@@ -23,6 +23,16 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
+dependencies = [
+    "forwardpy>=0.2.0",
+    "aiohttp>=3.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.23",
+]
 
 [project.urls]
 Homepage = "https://github.com/tiwb/mutagent"
@@ -31,3 +41,7 @@ Repository = "https://github.com/tiwb/mutagent"
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["mutagent*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
