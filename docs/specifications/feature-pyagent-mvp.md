@@ -1,4 +1,4 @@
-# AI Agent MVP 设计规范
+# mutagent MVP 设计规范
 
 **状态**：🔄 进行中
 **日期**：2026-02-13
@@ -6,7 +6,7 @@
 
 ## 1. 背景
 
-构建一个基于 Python 的 AI Agent 框架，让大语言模型（LLM）能够通过 Python 调用完成各种工作。核心价值在于为 LLM 提供一个**可运行时自我迭代的 Python 环境**——Agent 可以查看、修改代码并热重载验证，形成高效的开发闭环。
+构建一个基于 Python 的 AI Agent 框架（**mutagent**），让大语言模型（LLM）能够通过 Python 调用完成各种工作。核心价值在于为 LLM 提供一个**可运行时自我迭代的 Python 环境**——Agent 可以查看、修改代码并热重载验证，形成高效的开发闭环。
 
 框架基于 [forwardpy](https://github.com/tiwb/forwardpy) 库的声明-实现分离模式，天然支持运行时方法替换和模块热重载。
 
@@ -30,7 +30,7 @@
 
 ```
 ┌─────────────────────────────────────────────────┐
-│                   Agent Framework                │
+│                    mutagent                       │
 │                                                  │
 │  ┌───────────┐  ┌───────────┐  ┌─────────────┐  │
 │  │ LLM Client│  │   Agent   │  │  Tool System │  │
@@ -68,7 +68,7 @@
 ### 2.2 模块结构
 
 ```
-<package>/
+mutagent/
 ├── __init__.py
 ├── client/                    # LLM 客户端抽象
 │   ├── __init__.py
@@ -140,7 +140,7 @@ async def send_message(self: LLMClient, messages, tools):
 
 ### 2.4 Agent 核心
 
-Agent 负责管理对话循环：发送消息 → 接收响应 → 执行 tool calls → 反馈结果 → 继续对话。
+Agent 负责管理对话循环：发送消息 → 接收响应 → 执行 tool calls → 反馈结果 → 继续对话。全部使用 async 接口。
 
 ```python
 # agent/core.py - 声明
@@ -164,6 +164,8 @@ class Agent(forwardpy.Object):
 
 ### 2.5 Tool 系统
 
+统一使用 `async def` 接口，简化设计。同步操作在 async 函数中直接执行即可。
+
 #### Tool 基类
 
 ```python
@@ -173,7 +175,7 @@ class Tool(forwardpy.Object):
     description: str
 
     def get_schema(self) -> ToolSchema: ...       # 返回 JSON Schema 给 LLM
-    async def execute(self, **params) -> str: ...  # 执行工具调用
+    async def execute(self, **params) -> str: ...  # 执行工具调用（统一 async）
 ```
 
 #### Tool 注册表
@@ -197,12 +199,12 @@ class ToolRegistry(forwardpy.Object):
 **参数**：
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| `module_path` | `str` | 可选，模块路径如 `mypackage.tools.base`，不填则从根模块开始 |
+| `module_path` | `str` | 可选，模块路径如 `mutagent.tools.base`，不填则从根模块开始 |
 | `depth` | `int` | 展开深度，默认 2 |
 
 **输出示例**：
 ```
-mypackage/
+mutagent/
   client/
     base [module]
       LLMClient (class)
@@ -233,12 +235,11 @@ mypackage/
 **参数**：
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| `target` | `str` | 目标路径，如 `mypackage.agent.core.Agent` 或 `mypackage.tools.base.Tool.execute` |
+| `target` | `str` | 目标路径，如 `mutagent.agent.core.Agent` 或 `mutagent.tools.base.Tool.execute` |
 
 **实现要点**：
-- 使用 `inspect.getsource()` 获取源码
+- 直接使用 `inspect.getsource()` 获取源码——运行时 patch 的代码通过 linecache 机制透明支持（见 2.8 节）
 - 支持模块级、类级、函数/方法级查看
-- 对于运行时 patch 的代码，从内存中获取源码
 
 #### 2.6.3 `patch_module` — 运行时 patch
 
@@ -250,15 +251,17 @@ mypackage/
 | `module_path` | `str` | 目标模块路径（已有模块则 patch，不存在则创建虚拟模块） |
 | `source` | `str` | 完整的 Python 源代码 |
 
-**工作原理**：
-1. 将 `source` 编译为代码对象（`compile()`）
-2. 在目标模块的命名空间中执行（`exec()`）
-3. 如果是新模块，创建 `types.ModuleType` 并注册到 `sys.modules`
-4. 如果模块已存在，在其命名空间中执行新代码（覆盖/新增定义）
-5. forwardpy 的 `@impl(override=True)` 自动处理方法替换
+**工作原理**（详见 2.8 节）：
+1. 生成虚拟文件名 `mutagent://module_path`
+2. 将 `source` 注入 `linecache.cache`（使 `inspect.getsource()` 透明工作）
+3. 使用 `compile(source, filename, 'exec')` 编译
+4. 在目标模块的命名空间中执行
+5. 如果是新模块，创建 `types.ModuleType` 并注册到 `sys.modules`
+6. forwardpy 的 `@impl(override=True)` 自动处理方法替换
 
 **关键特性**：
 - **零文件 IO**：代码只存在于运行时内存中
+- **inspect 透明**：`inspect.getsource()` 对 patch 代码中的函数/类正常工作
 - **可叠加**：多次 patch 同一模块，后续 patch 叠加在前面之上
 - **可回溯**：维护 patch 历史，支持查看每次 patch 的内容
 
@@ -275,7 +278,7 @@ mypackage/
 **实现要点**：
 - 从 patch 历史中组装最终源码
 - 自动创建必要的包目录和 `__init__.py`
-- 写入文件后执行 `importlib.reload()` 确保文件版本与运行时一致
+- 写入文件后更新模块的 `__file__` 和 linecache，确保文件版本与运行时一致
 
 #### 2.6.5 `execute` — 执行验证
 
@@ -301,7 +304,111 @@ mypackage/
 - 模块固化（内存 → 文件）
 - 与 forwardpy 注册表交互，追踪声明和实现的对应关系
 
-### 2.8 Claude API 对接细节
+### 2.8 运行时源码追踪（核心设计）
+
+这是 mutagent 的关键基础设施。Agent 在运行时生成的代码必须对 Python 的 `inspect` 体系完全透明——`inspect.getsource()`、traceback 等应像操作普通文件代码一样工作。
+
+#### 2.8.1 问题背景
+
+Python 的 `inspect.getsource()` 调用链：
+```
+getsource(obj)
+  → getsourcefile(obj)
+    → getfile(obj)          # 获取文件名
+      - 函数: obj.__code__.co_filename
+      - 类: sys.modules[obj.__module__].__file__
+      - 模块: obj.__file__
+  → linecache.getlines()    # 通过文件名获取源码行
+  → getblock()              # 提取函数/类代码块
+```
+
+动态生成的代码如果不做特殊处理，`inspect.getsource()` 会因找不到源文件而失败。
+
+#### 2.8.2 解决方案：虚拟文件名 + linecache 注入 + loader 协议
+
+**三层机制协同工作**：
+
+| 层 | 机制 | 作用 |
+|---|---|---|
+| 1 | `linecache.cache` 注入 | 提供即时源码访问，`mtime=None` 免受 `checkcache()` 清理 |
+| 2 | `__loader__` + `get_source()` | 自愈能力——`linecache` 被清空后可重新填充 |
+| 3 | `sys.modules` 注册 | 使类的 `inspect.getfile()` 正常工作（类通过 `__module__` → `sys.modules` → `__file__` 路径解析） |
+
+**虚拟文件名格式**：`mutagent://<module_path>`
+
+不使用尖括号格式（如 `<dynamic>`），因为 linecache 的 `_source_unavailable()` 会将 `<...>` 格式视为"源码不可用"，阻止 `lazycache` / `__loader__` 机制工作。
+
+#### 2.8.3 实现设计
+
+```python
+import types, sys, linecache, importlib.machinery
+
+class ModuleManager:
+    """运行时模块管理器，支持 PEP 302 loader 协议"""
+
+    def __init__(self):
+        self._sources: dict[str, str] = {}       # module_path → 当前源码
+        self._history: dict[str, list[str]] = {}  # module_path → patch 历史
+
+    def get_source(self, fullname: str) -> str | None:
+        """PEP 302 loader 协议：linecache 自愈时调用"""
+        return self._sources.get(fullname)
+
+    def patch_module(self, module_path: str, source: str) -> types.ModuleType:
+        """将源码注入运行时，使 inspect.getsource() 透明工作"""
+
+        filename = f"mutagent://{module_path}"
+
+        # 1. 存储源码（用于 __loader__.get_source() 自愈）
+        self._sources[module_path] = source
+        self._history.setdefault(module_path, []).append(source)
+
+        # 2. 注入 linecache（即时可用，mtime=None 防清理）
+        lines = [line + '\n' for line in source.splitlines()]
+        linecache.cache[filename] = (len(source), None, lines, filename)
+
+        # 3. 创建或获取模块
+        if module_path in sys.modules:
+            mod = sys.modules[module_path]
+        else:
+            mod = types.ModuleType(module_path)
+            mod.__file__ = filename
+            mod.__loader__ = self        # PEP 302: 使 lazycache 自愈生效
+            mod.__spec__ = importlib.machinery.ModuleSpec(
+                module_path, self, origin=filename
+            )
+            sys.modules[module_path] = mod  # 必须：类的 inspect 解析依赖此
+
+        # 4. 编译并执行（co_filename 自动传播到所有内部函数/类）
+        code = compile(source, filename, 'exec')
+        exec(code, mod.__dict__)
+
+        return mod
+```
+
+#### 2.8.4 效果验证
+
+patch 后以下操作均正常工作：
+
+| 操作 | 结果 |
+|------|------|
+| `inspect.getsource(func)` | 返回函数源码 |
+| `inspect.getsource(cls)` | 返回类源码 |
+| `inspect.getsource(cls.method)` | 返回方法源码 |
+| `inspect.getsource(module)` | 返回整个模块源码 |
+| `inspect.getfile(obj)` | 返回 `mutagent://module_path` |
+| traceback | 显示 `mutagent://module_path` 及正确行号 |
+| `help(obj)` | 正常显示文档 |
+
+#### 2.8.5 固化时的过渡
+
+当 `save_module` 将代码写入文件后：
+1. 更新 `mod.__file__` 为实际文件路径
+2. 更新 `linecache.cache`：移除虚拟文件名条目，让 linecache 从真实文件读取
+3. 更新所有函数的 `__code__`：通过 `code.replace(co_filename=real_path)` 替换文件名
+4. 从 `_sources` 中移除该模块（不再需要内存中的源码副本）
+
+### 2.9 Claude API 对接细节
 
 直接通过 asyncio + aiohttp 调用 Claude Messages API（`https://api.anthropic.com/v1/messages`）：
 
@@ -314,12 +421,16 @@ mypackage/
   - `tool_result` content block → 内部 `ToolResult`
 - **MVP 不做流式**：直接使用普通 POST 请求等待完整响应
 
-### 2.9 设计决策记录
+### 2.10 设计决策记录
 
 | 决策 | 选择 | 理由 |
 |------|------|------|
+| 包名 | `mutagent` | mutation + agent，表达"可变异/进化"核心概念，PyPI 可用 |
 | HTTP 调用方式 | asyncio + aiohttp | 不依赖 SDK，更轻量可控 |
 | 代码迭代方式 | 运行时 patch 优先 | 避免频繁文件 IO，快速验证 |
+| 源码追踪 | linecache 注入 + loader 协议 | 使 `inspect.getsource()` 透明工作，三层自愈 |
+| 虚拟文件名 | `mutagent://module_path` | 避免尖括号陷阱，兼容 lazycache 自愈机制 |
+| Tool 接口 | 统一 `async def` | 简化设计，同步操作在 async 中直接执行 |
 | 安全边界 | 无沙箱，仅超时 | MVP 面向开发者，后续可加 |
 | 对话持久化 | 不持久化 | MVP 每次全新会话 |
 | forwardpy 使用 | 所有核心类 | 自举能力，但不成为阻碍 |
@@ -327,51 +438,44 @@ mypackage/
 
 ## 3. 待定问题
 
-### Q1: 项目包名
+### Q1: patch_module 的叠加语义
 
-**问题**：Python 包名选择。要求：不含 "py"，能表达核心概念，PyPI 上可用。
+**问题**：多次 patch 同一模块时，语义应该是"增量叠加"还是"完整替换"？
+- **增量叠加**：每次 patch 的代码 exec 到已有模块命名空间，新定义覆盖旧定义，未涉及的保持不变
+- **完整替换**：每次 patch 清空模块命名空间后重新执行
 
-**PyPI 可用性调查结果**：
+两种方式影响 Agent 的使用体验：增量叠加更灵活（可以只 patch 一个函数），完整替换更可预测（不会有残留状态）。
 
-| 名称 | 状态 | 说明 |
-|------|------|------|
-| `iteragent` | 可用 | iteration + agent，核心概念：可迭代的 agent |
-| `selfagent` | 可用 | self + agent，核心概念：自我迭代的 agent |
-| `mutagent` | 可用 | mutation + agent，核心概念：可变异/进化的 agent |
-| `agentmod` | 可用 | agent + module，核心概念：基于模块的 agent |
-| `agentmorph` | 可用 | agent + morph，核心概念：可变形的 agent |
-| agentcore | 已占用 | - |
-| agentforge | 已占用 | - |
-| evoagent | 已占用 | - |
-| agentica | 已占用 | - |
-| nexagent | 冲突 | nex-agent 已存在，PEP 503 规范化冲突 |
+**建议**：默认使用增量叠加（exec 到已有命名空间）。如果 Agent 需要完整替换，可以先传一个完整的模块源码。增量叠加更符合"迭代"的理念，Agent 可以小步修改。
 
-**建议**：`iteragent` — 直接表达"可迭代 agent"的核心概念，简洁（9 字符），无任何命名冲突。备选 `mutagent`（更有创意，8 字符）。
+回答，Agent必须有迭代一个函数的能力，当然需要有办法能迭代完整的模块。
+这引出了一个新的需要细化的点，就是forwardpy在本工程中使用的源码规范是什么？可能是素有的可import 的py文件，都是只包含类型声明的，而具体的实现文件的扩展名可能是xxx.impl.py这种python无法直接导入的。这样可能会更清晰。同时声明和实现文件可能也可以存在不同的目录下，甚至不同的包中。这个设计很有意思，是的agent能够比较安全的patch一些实现，如果需要禁用掉这些path，不加载对应的实现模块就行。
 
-我mutagent很好，用这个名称，迭代时创建一个最小的占位 PyPI 包，通过 twine 发布。
+### Q2: 虚拟模块的包层级
 
-### Q2: patch_module 的源码追踪
+**问题**：当 Agent patch 一个深层路径如 `myproject.utils.helpers` 时，父包 `myproject` 和 `myproject.utils` 是否需要存在？如果不存在，是否自动创建虚拟父包？
 
-**问题**：`patch_module` 将代码注入运行时后，`inspect.getsource()` 无法获取动态生成的代码源码。需要自行维护源码映射。这对 `view_source` 工具的实现有影响——是否需要在 MVP 阶段就实现完整的源码追踪？
-**建议**：MVP 阶段在 `module_manager` 中维护一个简单的 `{module_path: source_code}` 字典，`view_source` 优先从这个字典查找，找不到再 fallback 到 `inspect.getsource()`。
-
-同意，如果是在内存中生成的代码，可以想办法把代码直接包含在对应的对象上（比如函数或类）
-
-可以继续详细讨论这个问题，这是这个agent的一个非常重要的设计。
-
-### Q3: Agent 的异步架构
-
-**问题**：由于 LLM 调用使用 asyncio，Agent 主循环也需要是异步的。这意味着 tools 的 `execute` 方法也是 `async def`。但内置 tools 中 `inspect_module`、`view_source` 等本质是同步操作。是否所有 tool 统一用 `async def`，还是区分同步/异步 tool？
-**建议**：统一用 `async def`，简化接口。同步操作在 async 函数中直接执行即可（不阻塞事件循环的操作无需 `run_in_executor`）。
+**建议**：自动创建虚拟父包。当 patch `a.b.c` 时，如果 `a` 和 `a.b` 不在 `sys.modules` 中，自动创建空的 `types.ModuleType` 作为父包，并设置 `__path__` 属性使其成为 package。这样 `import a.b.c` 的语义保持一致。
 
 同意。
 
+### 补充说明：
+1. 给这个工程中的核心类增加一个统一的基类，不要每个都从forwardpy.Object继承，实现的annotation也自行定义，为以后预留扩展能力。
+2. 这个工程的另外一个核心设计就是tool和Python接口的对应，agent可以根据要处理的问题，自己提出需要哪些工具，然后在工具库了找到符合要求的工具再进行决策和迭代。 而工具本身应该是跟Agent运行时环境中的其他模块一样，也就是说，agent可以自行创建和迭代工具。设计中也请考虑这一点。 我觉得一开始可能只是提供了一些模块和类来完成获取模块结构，获取代码，修改代码，重载和调用等实现，然后有一个实现是工具选择，最开始的版本可以是返回所有核心基础工具（mutagent核心模块下的），随着要做的事情越来越多，ai要负责自行迭代工具选择的实现。 总结下来，就是未来所有的功能，都是基于一个简单可循环可进化的框架开始的。
+
 ## 4. 实施步骤清单
+
+### 阶段零：PyPI 占位 [待开始]
+
+- [ ] **Task 0.1**: 发布 mutagent 占位包到 PyPI
+  - [ ] 创建最小 pyproject.toml
+  - [ ] 通过 twine 发布
+  - 状态：⏸️ 待开始
 
 ### 阶段一：项目基础设施 [待开始]
 
 - [ ] **Task 1.1**: 初始化项目结构
-  - [ ] 创建包目录结构
+  - [ ] 创建 mutagent 包目录结构
   - [ ] 配置 pyproject.toml（依赖：forwardpy, aiohttp）
   - [ ] 创建 `__init__.py` 入口
   - 状态：⏸️ 待开始
@@ -381,72 +485,80 @@ mypackage/
   - [ ] 单元测试
   - 状态：⏸️ 待开始
 
-### 阶段二：LLM Client [待开始]
+### 阶段二：运行时核心（源码追踪） [待开始]
 
-- [ ] **Task 2.1**: LLM Client 声明
+- [ ] **Task 2.1**: ModuleManager 核心
+  - [ ] 实现 linecache 注入 + `__loader__` 协议
+  - [ ] 实现 `patch_module()`（虚拟文件名、模块创建、代码编译执行）
+  - [ ] 实现 patch 历史追踪
+  - [ ] 实现虚拟父包自动创建
+  - [ ] 单元测试：验证 `inspect.getsource()` 对 patch 后的函数/类/模块正常工作
+  - 状态：⏸️ 待开始
+
+- [ ] **Task 2.2**: 模块固化
+  - [ ] 实现 `save_module()`（内存 → 文件）
+  - [ ] 实现固化过渡（更新 `__file__`、`co_filename`、linecache）
+  - [ ] 单元测试
+  - 状态：⏸️ 待开始
+
+### 阶段三：LLM Client [待开始]
+
+- [ ] **Task 3.1**: LLM Client 声明
   - [ ] 实现 LLMClient forwardpy 声明（base.py）
   - [ ] 定义 async 接口方法签名
   - 状态：⏸️ 待开始
 
-- [ ] **Task 2.2**: Claude 实现
+- [ ] **Task 3.2**: Claude 实现
   - [ ] 使用 aiohttp 直接调用 Claude Messages API
   - [ ] 实现消息格式转换（内部格式 ↔ Claude 格式）
   - [ ] 实现 tool schema 格式转换
   - [ ] 集成测试（需要 API Key）
   - 状态：⏸️ 待开始
 
-### 阶段三：Tool 系统 [待开始]
+### 阶段四：Tool 系统 [待开始]
 
-- [ ] **Task 3.1**: Tool 基类与注册表
+- [ ] **Task 4.1**: Tool 基类与注册表
   - [ ] 实现 Tool forwardpy 声明
   - [ ] 实现 ToolRegistry
   - [ ] 单元测试
   - 状态：⏸️ 待开始
 
-- [ ] **Task 3.2**: 运行时模块管理器
-  - [ ] 实现 ModuleManager（模块发现、索引）
-  - [ ] 实现运行时 patch（compile + exec + 虚拟模块注册）
-  - [ ] 实现 patch 历史追踪
-  - [ ] 实现模块固化（内存 → 文件）
-  - [ ] 单元测试
-  - 状态：⏸️ 待开始
-
-- [ ] **Task 3.3**: inspect_module 工具
-  - [ ] 实现模块结构遍历
+- [ ] **Task 4.2**: inspect_module 工具
+  - [ ] 实现模块结构遍历（含虚拟模块）
   - [ ] 格式化输出
   - [ ] 单元测试
   - 状态：⏸️ 待开始
 
-- [ ] **Task 3.4**: view_source 工具
-  - [ ] 实现源码查看（文件 + 运行时 patch 双来源）
+- [ ] **Task 4.3**: view_source 工具
+  - [ ] 基于 `inspect.getsource()` 实现（自动支持 patch 源码）
   - [ ] 单元测试
   - 状态：⏸️ 待开始
 
-- [ ] **Task 3.5**: patch_module 工具
-  - [ ] 基于 ModuleManager 实现运行时 patch
+- [ ] **Task 4.4**: patch_module 工具
+  - [ ] 封装 ModuleManager.patch_module 为 Tool
   - [ ] 单元测试
   - 状态：⏸️ 待开始
 
-- [ ] **Task 3.6**: save_module 工具
-  - [ ] 基于 ModuleManager 实现模块固化
+- [ ] **Task 4.5**: save_module 工具
+  - [ ] 封装 ModuleManager.save_module 为 Tool
   - [ ] 单元测试
   - 状态：⏸️ 待开始
 
-- [ ] **Task 3.7**: execute 工具
+- [ ] **Task 4.6**: execute 工具
   - [ ] 实现代码执行（受控命名空间）
   - [ ] 输出捕获 + 超时控制
   - [ ] 单元测试
   - 状态：⏸️ 待开始
 
-### 阶段四：Agent 核心 [待开始]
+### 阶段五：Agent 核心 [待开始]
 
-- [ ] **Task 4.1**: Agent 声明与实现
+- [ ] **Task 5.1**: Agent 声明与实现
   - [ ] 实现 Agent forwardpy 声明
   - [ ] 实现 agent 异步主循环（run / step / handle_tool_calls）
   - [ ] 单元测试（mock LLM）
   - 状态：⏸️ 待开始
 
-- [ ] **Task 4.2**: 端到端集成
+- [ ] **Task 5.2**: 端到端集成
   - [ ] 组装所有组件
   - [ ] 实现简单的 main.py 入口
   - [ ] 端到端测试：Agent 使用 tools 完成简单任务
@@ -456,11 +568,14 @@ mypackage/
 
 ### 单元测试
 - [ ] 消息模型序列化/反序列化
+- [ ] ModuleManager: patch → inspect.getsource() 验证
+- [ ] ModuleManager: 多次 patch 叠加
+- [ ] ModuleManager: 固化过渡（虚拟 → 文件）
+- [ ] ModuleManager: 虚拟父包创建
 - [ ] Tool schema 生成
 - [ ] ToolRegistry 注册/查找
-- [ ] ModuleManager: patch / 固化 / 源码追踪
-- [ ] inspect_module 模块遍历
-- [ ] view_source 源码获取（文件源 + patch 源）
+- [ ] inspect_module 模块遍历（含虚拟模块）
+- [ ] view_source 源码获取（文件源 + patch 源，统一用 inspect）
 - [ ] patch_module 运行时注入
 - [ ] save_module 文件固化
 - [ ] execute 代码执行与输出捕获
