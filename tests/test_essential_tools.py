@@ -1,30 +1,16 @@
 """Tests for EssentialTools method implementations."""
 
-import importlib.util
 import sys
 from pathlib import Path
 
 import pytest
 
 from mutagent.essential_tools import EssentialTools
+from mutagent.main import load_builtins
 from mutagent.runtime.module_manager import ModuleManager
 
-
-# Load all .impl.py files to register @impl
-_builtins_dir = Path(__file__).resolve().parent.parent / "src" / "mutagent" / "builtins"
-
-def _load_impl(filename, mod_name):
-    path = _builtins_dir / filename
-    spec = importlib.util.spec_from_file_location(mod_name, str(path))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-_load_impl("inspect_module.impl.py", "mutagent.builtins.inspect_module_impl")
-_load_impl("view_source.impl.py", "mutagent.builtins.view_source_impl")
-_load_impl("patch_module.impl.py", "mutagent.builtins.patch_module_impl")
-_load_impl("save_module.impl.py", "mutagent.builtins.save_module_impl")
-_load_impl("run_code.impl.py", "mutagent.builtins.run_code_impl")
+# Load all impls (idempotent)
+load_builtins()
 
 
 @pytest.fixture

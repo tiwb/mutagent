@@ -1,6 +1,5 @@
 """Tests for EssentialTools + ToolSelector declarations and selector impl."""
 
-import importlib.util
 from pathlib import Path
 
 import pytest
@@ -8,23 +7,30 @@ import pytest
 import mutagent
 from mutagent.base import MutagentMeta
 from mutagent.essential_tools import EssentialTools
+from mutagent.main import load_builtins
 from mutagent.messages import ToolCall, ToolResult, ToolSchema
 from mutagent.runtime.module_manager import ModuleManager
 from mutagent.selector import ToolSelector
 from forwardpy.core import _DECLARED_METHODS
 
+# Load all impls (idempotent)
+load_builtins()
 
-# Load selector.impl.py to register @impl
-_selector_impl_path = (
-    Path(__file__).resolve().parent.parent
-    / "src" / "mutagent" / "builtins" / "selector.impl.py"
-)
-
-_spec = importlib.util.spec_from_file_location(
-    "mutagent.builtins.selector_impl", str(_selector_impl_path)
-)
-_selector_mod = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_selector_mod)
+# Import make_schema_from_method from the loaded module
+import sys
+_selector_mod = sys.modules.get("mutagent.builtins.selector")
+if _selector_mod is None:
+    # Fallback: load manually
+    import importlib.util
+    _selector_impl_path = (
+        Path(__file__).resolve().parent.parent
+        / "src" / "mutagent" / "builtins" / "selector.impl.py"
+    )
+    _spec = importlib.util.spec_from_file_location(
+        "mutagent.builtins.selector_impl", str(_selector_impl_path)
+    )
+    _selector_mod = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_selector_mod)
 
 make_schema_from_method = _selector_mod.make_schema_from_method
 

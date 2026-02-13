@@ -1,6 +1,5 @@
 """Tests for Claude API implementation (builtins/claude.impl.py)."""
 
-import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -8,26 +7,26 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mutagent.main import load_builtins
 from mutagent.messages import Message, Response, ToolCall, ToolResult, ToolSchema
 
+# Load all impls (idempotent)
+load_builtins()
 
-# Load the claude.impl module (dot in filename prevents normal import)
-_claude_impl_path = Path(__file__).resolve().parent.parent / "src" / "mutagent" / "builtins" / "claude.impl.py"
-
-
-def _load_claude_impl():
-    """Load claude.impl.py as a module (since dot in filename prevents normal import)."""
+# Get the claude module from sys.modules (loaded by load_builtins via ImplLoader)
+_claude = sys.modules.get("mutagent.builtins.claude")
+if _claude is None:
+    # Fallback: load manually
     import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "mutagent.builtins.claude_impl",
-        str(_claude_impl_path),
+    _claude_impl_path = (
+        Path(__file__).resolve().parent.parent
+        / "src" / "mutagent" / "builtins" / "claude.impl.py"
     )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-_claude = _load_claude_impl()
+    spec = importlib.util.spec_from_file_location(
+        "mutagent.builtins.claude_impl", str(_claude_impl_path)
+    )
+    _claude = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(_claude)
 _messages_to_claude = _claude._messages_to_claude
 _tools_to_claude = _claude._tools_to_claude
 _response_from_claude = _claude._response_from_claude
