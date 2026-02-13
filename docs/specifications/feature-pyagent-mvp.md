@@ -178,15 +178,16 @@ mutagent/
 │   └── core.impl.py          # Agent 主循环实现
 ├── tools/
 │   ├── __init__.py
+│   ├── core.py               # CoreTools 声明（所有内置工具的方法声明）
 │   ├── selector.py           # ToolSelector 声明（Agent 与工具的唯一桥梁）
 │   ├── selector.impl.py      # 初始工具选择与调度实现（Agent 可迭代）
-│   └── builtins/             # 核心原语（纯 Python 函数）
+│   └── builtins/             # CoreTools 各方法的 @impl 实现
 │       ├── __init__.py
-│       ├── inspect_module.py  # 模块结构查看
-│       ├── view_source.py     # 查看源码
-│       ├── patch_module.py    # 运行时 patch
-│       ├── save_module.py     # 固化到文件
-│       └── run_code.py        # 执行验证
+│       ├── inspect_module.impl.py
+│       ├── view_source.impl.py
+│       ├── patch_module.impl.py
+│       ├── save_module.impl.py
+│       └── run_code.impl.py
 └── runtime/
     ├── __init__.py
     ├── module_manager.py      # 模块管理（patch、固化、源码追踪）
@@ -267,19 +268,70 @@ class Agent(mutagent.Object):
 
 #### 2.7.1 核心理念
 
-mutagent 不定义"什么是工具"。在框架看来，**一切都是 Python 运行时中的接口和实现**。工具只是 ToolSelector 知道如何使用的 Python 可调用对象。
+mutagent 不定义"什么是工具"。**ToolSelector 决定如何发现、呈现和调用工具**。但有一个基本约束：
+
+**框架下的一切都是声明+实现，一切都可被 patch。**
+
+这意味着：
+- 内置工具是 `mutagent.Object` 子类上的**方法声明**（stub），实现通过 `@impl` 注册
+- Agent 关注的是**声明**（类和方法签名），而非具体实现
+- 普通函数是实现细节，Agent 知道直接 patch 这些会导致混乱
+- 如果外部函数需要被 Agent 使用，需要先包装为框架下的对象（声明+实现）
+- Agent 创建新工具 = 创建新的 `mutagent.Object` 子类 + `@impl`
 
 关键区别：
 - **传统框架**：定义 Tool 基类 → 实现者继承 → 注册到 Registry → 框架统一调用 `tool.execute()`
-- **mutagent 设计**：工具就是 Python 函数/模块 → **ToolSelector 决定如何发现、呈现和调用它们**
+- **mutagent 设计**：工具是 mutagent.Object 子类上的方法 → **ToolSelector 决定如何发现、呈现和调用它们** → 没有强制的公共接口
 
-这意味着：
-- 没有 `Tool` 基类，没有 `execute()` 接口约束
-- 内置工具就是普通 Python 函数
-- 即使是"如何调用工具"这件事，也只是 ToolSelector 默认实现的选择，不是框架规范
-- Agent 可以进化 ToolSelector 来改变工具的发现、选择和调用方式
+#### 2.7.2 CoreTools — 内置工具声明
 
-#### 2.7.2 ToolSelector — Agent 与工具的唯一桥梁
+核心内置工具组织为一个 `mutagent.Object` 子类，每个工具是一个独立的方法声明：
+
+```python
+# tools/core.py — 声明
+import mutagent
+
+class CoreTools(mutagent.Object):
+    """核心工具原语 — Agent 的最小操作集
+
+    每个方法是一个独立的工具声明。Agent 可以通过 @impl override 替换任何工具的实现，
+    也可以 patch 这个类来增删工具方法。
+    """
+    module_manager: 'ModuleManager'
+
+    def inspect_module(self, module_path: str = "", depth: int = 2) -> str: ...
+    def view_source(self, target: str) -> str: ...
+    def patch_module(self, module_path: str, source: str) -> str: ...
+    def save_module(self, module_path: str, file_path: str = "") -> str: ...
+    def run_code(self, code: str) -> str: ...
+```
+
+**设计要点**：
+- **每个方法独立 patchable**：`@impl(CoreTools.inspect_module, override=True)` 只替换一个工具
+- **依赖在实例上**：`module_manager` 作为属性，方法实现通过 `self.module_manager` 访问
+- **声明即 API**：Agent 通过 `view_source("mutagent.tools.core.CoreTools")` 看到所有可用工具
+- **可扩展**：Agent 可以 patch CoreTools 声明来增加新方法，也可以创建全新的工具类
+
+实现按工具拆分为独立 `.impl.py` 文件，每个工具可独立替换：
+
+```python
+# tools/builtins/inspect_module.impl.py
+import mutagent
+from mutagent.tools.core import CoreTools
+
+@mutagent.impl(CoreTools.inspect_module)
+def inspect_module(self: CoreTools, module_path="", depth=2):
+    # 使用 importlib + inspect 遍历模块
+    ...
+
+# tools/builtins/patch_module.impl.py
+@mutagent.impl(CoreTools.patch_module)
+def patch_module(self: CoreTools, module_path: str, source: str):
+    return self.module_manager.patch_module(module_path, source)
+    # ModuleManager 通过 self 访问，无需外部注入
+```
+
+#### 2.7.3 ToolSelector — Agent 与工具的唯一桥梁
 
 ToolSelector 是框架中唯一定义的工具相关抽象。它全部使用 async 接口，因为工具选择本身可能涉及 LLM 推理（分析需要什么工具、查询现有工具集、决定是否创造新工具）。
 
@@ -305,32 +357,20 @@ class ToolSelector(mutagent.Object):
 # tools/selector.impl.py - MVP 初始实现
 import mutagent
 from mutagent.tools.selector import ToolSelector
-from mutagent.tools.builtins import inspect_module, view_source, patch_module, save_module, run_code
 
 @mutagent.impl(ToolSelector.get_tools)
 async def get_tools(self: ToolSelector, context: dict) -> list[ToolSchema]:
-    """MVP：返回所有核心工具的 schema"""
-    return [
-        make_tool_schema(inspect_module.inspect_module),
-        make_tool_schema(view_source.view_source),
-        make_tool_schema(patch_module.patch_module),
-        make_tool_schema(save_module.save_module),
-        make_tool_schema(run_code.run_code),
-    ]
+    """MVP：从 CoreTools 的方法签名自动生成 schema"""
+    return make_schemas_from_methods(self.core_tools, [
+        'inspect_module', 'view_source', 'patch_module', 'save_module', 'run_code'
+    ])
 
 @mutagent.impl(ToolSelector.dispatch)
 async def dispatch(self: ToolSelector, tool_call: ToolCall) -> ToolResult:
-    """MVP：直接映射工具名到函数并调用"""
-    tool_map = {
-        "inspect_module": inspect_module.inspect_module,
-        "view_source": view_source.view_source,
-        "patch_module": patch_module.patch_module,
-        "save_module": save_module.save_module,
-        "run_code": run_code.run_code,
-    }
-    fn = tool_map[tool_call.name]
+    """MVP：直接调用 CoreTools 上的对应方法"""
+    method = getattr(self.core_tools, tool_call.name)
     try:
-        result = fn(**tool_call.arguments)
+        result = method(**tool_call.arguments)
         if asyncio.iscoroutine(result):
             result = await result
         return ToolResult(tool_call_id=tool_call.id, content=str(result))
@@ -338,45 +378,52 @@ async def dispatch(self: ToolSelector, tool_call: ToolCall) -> ToolResult:
         return ToolResult(tool_call_id=tool_call.id, content=str(e), is_error=True)
 ```
 
-**关于 dispatch 中的 sync/async 检测**：这里的 `iscoroutine` 检测不是框架规范，而是 MVP 默认实现的内部选择。它存在于 `selector.impl.py` 中，Agent 完全可以在进化 ToolSelector 时改变这个行为。
-
-#### 2.7.3 进化路径
+#### 2.7.4 进化路径
 
 ```
 v0（MVP）
-  ToolSelector.get_tools → 返回所有核心工具 schema
-  ToolSelector.dispatch  → name → function 直接映射
+  CoreTools 声明 5 个核心方法
+  ToolSelector.get_tools → 从 CoreTools 方法签名生成 schema
+  ToolSelector.dispatch  → getattr(core_tools, name)(**args)
 
-v1（Agent 自行迭代 ToolSelector.get_tools）
-  → 分析任务上下文，只返回相关工具
-  → 减少 LLM 的认知负担
+v1（Agent 迭代工具实现）
+  → @impl(CoreTools.inspect_module, override=True) 替换某个工具的实现
+  → 工具变得更智能，但声明不变
 
-v2（Agent 进化 ToolSelector 为 LLM 驱动）
+v2（Agent 创建新工具类）
+  → patch_module 创建新的 mutagent.Object 子类（有新的方法声明）
+  → patch ToolSelector 实现，将新类的方法也纳入调度
+
+v3（Agent 进化 ToolSelector 为 LLM 驱动）
   → get_tools 内部调用 LLM 分析"我需要什么工具？"
-  → 搜索运行时中的可用模块
+  → 搜索运行时中的所有 mutagent.Object 子类，发现可用方法
   → 判断是否需要创造新工具
-
-v3+（完全自进化）
-  → Agent patch ToolSelector 实现
-  → 创建新的工具模块 → patch 到运行时
-  → 更新 dispatch 逻辑来调用新工具
 ```
 
-#### 2.7.4 Agent 创建工具的流程
+#### 2.7.5 Agent 创建工具的流程
 
 ```
 Agent 遇到需要新工具的场景
-  → patch_module("project.tools.file_search", source="...")  # 创建新工具模块
-  → run_code("from project.tools.file_search import ...")     # 验证
-  → patch ToolSelector 的 get_tools/dispatch 实现             # 将新工具纳入选择器
+  → patch_module("project.tools.search", source="""
+      import mutagent
+      class SearchTools(mutagent.Object):
+          def grep_modules(self, pattern: str) -> str: ...
+    """)                                                       # 创建新工具类声明
+  → patch_module("project.tools.search_impl", source="""
+      from project.tools.search import SearchTools
+      @mutagent.impl(SearchTools.grep_modules)
+      def grep_modules(self, pattern): ...
+    """)                                                       # 提供实现
+  → run_code("from project.tools.search import SearchTools")   # 验证
+  → patch ToolSelector 的 get_tools/dispatch 实现               # 将新工具纳入选择器
   → 后续 step 中 LLM 即可使用新工具
 ```
 
-这就是"自进化"的完整闭环：Agent 用核心原语（patch/run_code）来创建新工具，再用新工具解决更复杂的问题。
+这就是"自进化"的完整闭环：Agent 用核心原语（patch/run_code）来创建新工具类，再用新工具解决更复杂的问题。
 
 ### 2.8 内置工具（核心原语）
 
-这些是 Agent 的最小操作集，是所有高级能力的基础。它们是**普通 Python 函数**，不继承任何基类。
+这些是 Agent 的最小操作集，是所有高级能力的基础。它们是 `CoreTools` 类上的**方法声明**，实现通过 `@impl` 注册在独立的 `.impl.py` 文件中。
 
 核心工作流：`inspect_module` → `view_source` → `patch_module` → `run_code`（验证）→ `save_module`（固化）
 
@@ -706,9 +753,9 @@ class ModuleManager:
 | 实现 patch | 先卸载旧 impl 再注册新 impl | 需要 forwardpy 扩展 |
 | 源码追踪 | linecache + loader 协议 | `inspect.getsource()` 透明工作 |
 | 虚拟文件名 | `mutagent://module_path` | 避免尖括号陷阱 |
-| Tool 接口 | **无基类**，工具就是 Python 函数 | 不给框架增加约束，一切可进化 |
+| Tool 接口 | 无公共基类，工具是 mutagent.Object 子类的方法 | 声明可被 patch，符合框架核心理念 |
 | Tool 调用 | ToolSelector.dispatch 内部决定 | 调用方式也是可进化的实现细节 |
-| Tool 选择 | ToolSelector（async，可进化） | 唯一桥梁，可进化为 LLM 驱动 |
+| Tool 组织 | CoreTools 类 + 独立 .impl.py | 声明集中，实现分散，各自独立可替换 |
 | 安全边界 | 无沙箱，仅超时 | MVP 面向开发者 |
 | 对话持久化 | 不持久化 | MVP 每次全新会话 |
 | 核心抽象 | 模块路径 | `package.module.function` 是第一公民 |
@@ -718,69 +765,49 @@ class ModuleManager:
 
 ### Q1: Schema 生成策略
 
-**问题**：ToolSelector 的 MVP 实现需要将 Python 函数转为 LLM 能理解的 ToolSchema（JSON Schema）。Schema 如何生成？
+**问题**：ToolSelector 的 MVP 实现需要从 `CoreTools` 的方法签名生成 `ToolSchema`（JSON Schema）。如何实现？
 
-**方案分析**：
+**建议**：编写 `make_schemas_from_methods(obj, method_names)` 工具函数，利用 `inspect.signature()` + 类型注解 + docstring 自动生成。这是 ToolSelector 默认实现的内部工具，不是框架规范。
 
-| 方案 | 做法 | 优缺点 |
-|------|------|--------|
-| A | 手写每个工具的 schema dict | 完全可控，但重复劳动，容易与函数签名不同步 |
-| B | 从函数签名 + docstring 自动生成 | 低维护成本，但需要解析逻辑 |
-| C | 函数上标注 schema（如装饰器或特殊属性） | 灵活，但引入额外约定 |
-
-**建议**：方案 B（自动生成）— 利用 `inspect.signature()` + 类型注解 + docstring 提取参数描述。这是一个 `make_tool_schema(fn)` 工具函数，放在 `tools/selector.impl.py` 或独立为 `tools/schema.py`。它不是框架规范，只是默认 ToolSelector 实现的内部工具。
-
-示例：
 ```python
-def inspect_module(module_path: str = "", depth: int = 2) -> str:
-    """查看模块结构
+# 示例：CoreTools 上的方法声明
+class CoreTools(mutagent.Object):
+    def inspect_module(self, module_path: str = "", depth: int = 2) -> str:
+        """查看模块结构
 
-    Args:
-        module_path: 模块路径，如 mutagent.tools。不填则从根模块开始
-        depth: 展开深度，默认 2
-    """
-    ...
+        Args:
+            module_path: 模块路径，如 mutagent.tools。不填则从根模块开始
+            depth: 展开深度，默认 2
+        """
+        ...
 
-# make_tool_schema(inspect_module) 自动产生：
-# {
-#   "name": "inspect_module",
-#   "description": "查看模块结构",
-#   "input_schema": {
+# make_schemas_from_methods(core_tools, ['inspect_module']) 自动产生：
+# ToolSchema(
+#   name="inspect_module",
+#   description="查看模块结构",
+#   input_schema={
 #     "type": "object",
 #     "properties": {
 #       "module_path": {"type": "string", "description": "模块路径..."},
 #       "depth": {"type": "integer", "description": "展开深度，默认 2"}
 #     }
 #   }
-# }
+# )
 ```
 
-### Q2: 内置工具如何获取 ModuleManager 等运行时依赖？
+注意：`self` 参数自动排除。docstring 的 Args 段用于提取参数描述。
 
-**问题**：内置工具是普通 Python 函数，但 `patch_module` 和 `save_module` 需要访问 `ModuleManager` 实例。如何注入这个依赖？
+同意
 
-**方案分析**：
+### 补充说明
 
-| 方案 | 做法 | 优缺点 |
-|------|------|--------|
-| A | 函数参数：`patch_module(module_path, source, manager)` | 明确，但 ToolSelector.dispatch 需要额外注入 |
-| B | 模块级全局变量：函数内引用 `_manager` | 简单，但需要初始化时设置 |
-| C | 函数是闭包或对象方法，绑定到 manager | 更 OO，但偏离"工具是纯函数"的理念 |
+1. 命名问题，我觉得内置的工具，应该叫EssentialTools，这些工具是定义Agent进化的最小工具集，并且这些工具以后是有可能被替换掉的。请分析下我的这个想法是否合理，给出建议。
 
-**建议**：方案 A — 函数参数最明确。ToolSelector.dispatch 作为调度者，天然知道如何注入依赖。这也是 ToolSelector 作为"唯一桥梁"的体现——它不只是简单的 name → function 映射，还负责组装调用上下文。
+2. selector.impl.py是不是也应该放到builtins中，本质它跟其他实现也没区别。
 
-```python
-# ToolSelector.dispatch 的 MVP 实现中：
-if tool_call.name == "patch_module":
-    result = patch_module(manager=self.module_manager, **tool_call.arguments)
-```
+3. 是不是也不要分agent和tools两个目录了，agent/core.py应该是agent的声明，所有默认实现都放在builtins里。
 
-Agent 进化 ToolSelector 时，依赖注入的方式也可以随之改变。
-
-回答：重要澄清，因为要利用forwardpy的思路和，没有“工具只是普通Python函数”的这一说法，框架下要保证所有的类型和函数都可被patch，所以内置的工具，至少也是某个类上的函数。这样才能利用到框架特性。 
-所有模块的普通函数实现，都会被视为实现细节，agent应该会知道patch这些实现会导致混乱。而所有的声明才是AI会重点关注的部分。 其他的函数如果要被使用，agent需要先把他们包装成框架下的对象。
-
-根据这个重要细节进行迭代设计，看下这个问题是否还依然存在。
+分析我以上想法，先不要修改结构，进行问题澄清。待我确认方案后再修改整体文档。
 
 
 ## 4. 实施步骤清单
@@ -858,19 +885,20 @@ Agent 进化 ToolSelector 时，依赖注入的方式也可以随之改变。
 
 ### 阶段四：Tool 系统 [待开始]
 
-- [ ] **Task 4.1**: ToolSelector 声明与 MVP 实现
-  - [ ] 实现 ToolSelector 声明（selector.py：get_tools + dispatch，全部 async）
-  - [ ] 实现 schema 生成工具函数（从函数签名自动生成 ToolSchema）
-  - [ ] 实现 ToolSelector MVP 实现（selector.impl.py：返回所有核心工具 schema，dispatch 映射调用）
+- [ ] **Task 4.1**: CoreTools 声明与 ToolSelector
+  - [ ] 实现 CoreTools 声明（tools/core.py：5 个工具方法声明）
+  - [ ] 实现 ToolSelector 声明（tools/selector.py：get_tools + dispatch，全部 async）
+  - [ ] 实现 schema 自动生成（从方法签名 + docstring → ToolSchema）
+  - [ ] 实现 ToolSelector MVP 实现（selector.impl.py）
   - [ ] 单元测试
   - 状态：⏸️ 待开始
 
-- [ ] **Task 4.2**: 核心工具实现（纯 Python 函数）
-  - [ ] inspect_module
-  - [ ] view_source
-  - [ ] patch_module（依赖 ModuleManager）
-  - [ ] save_module（依赖 ModuleManager）
-  - [ ] run_code
+- [ ] **Task 4.2**: CoreTools 各方法实现
+  - [ ] inspect_module.impl.py
+  - [ ] view_source.impl.py
+  - [ ] patch_module.impl.py（依赖 self.module_manager）
+  - [ ] save_module.impl.py（依赖 self.module_manager）
+  - [ ] run_code.impl.py
   - [ ] 各工具单元测试
   - 状态：⏸️ 待开始
 
@@ -905,10 +933,10 @@ Agent 进化 ToolSelector 时，依赖注入的方式也可以随之改变。
 - [ ] ModuleManager: 固化过渡（虚拟 → 文件）
 - [ ] ModuleManager: 虚拟父包创建
 - [ ] ImplLoader: .impl.py 发现与加载
-- [ ] Schema 自动生成（函数签名 → ToolSchema）
-- [ ] ToolSelector: get_tools 返回所有核心工具 schema
-- [ ] ToolSelector: dispatch 正确路由到内置函数
-- [ ] 各内置工具函数功能测试
+- [ ] Schema 自动生成（方法签名 → ToolSchema，self 排除）
+- [ ] ToolSelector: get_tools 从 CoreTools 生成 schema
+- [ ] ToolSelector: dispatch 正确路由到 CoreTools 方法
+- [ ] CoreTools: 各方法 @impl 功能测试
 - [ ] Agent 主循环（mock LLM 响应）
 
 ### 集成测试
