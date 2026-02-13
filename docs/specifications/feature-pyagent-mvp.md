@@ -48,7 +48,7 @@
 │              │  view_source     │  │  (运行时动态     │    │
 │              │  patch_module    │  │   生成和迭代)    │    │
 │              │  save_module     │  │                  │    │
-│              │  execute         │  │                  │    │
+│              │  run_code        │  │                  │    │
 │              └──────────────────┘  └──────────────────┘    │
 │                                                            │
 │  ┌──────────────────────────────────────────────────────┐  │
@@ -178,16 +178,15 @@ mutagent/
 │   └── core.impl.py          # Agent 主循环实现
 ├── tools/
 │   ├── __init__.py
-│   ├── base.py               # Tool 基类声明
-│   ├── selector.py           # ToolSelector 声明
-│   ├── selector.impl.py      # 初始工具选择实现（Agent 可迭代）
-│   └── builtins/             # 核心原语
+│   ├── selector.py           # ToolSelector 声明（Agent 与工具的唯一桥梁）
+│   ├── selector.impl.py      # 初始工具选择与调度实现（Agent 可迭代）
+│   └── builtins/             # 核心原语（纯 Python 函数）
 │       ├── __init__.py
 │       ├── inspect_module.py  # 模块结构查看
 │       ├── view_source.py     # 查看源码
 │       ├── patch_module.py    # 运行时 patch
 │       ├── save_module.py     # 固化到文件
-│       └── execute.py         # 执行验证
+│       └── run_code.py        # 执行验证
 └── runtime/
     ├── __init__.py
     ├── module_manager.py      # 模块管理（patch、固化、源码追踪）
@@ -258,9 +257,9 @@ class Agent(mutagent.Object):
 
 **Agent 主循环**：
 1. 用户输入 → 添加到 messages
-2. 调用 `tool_selector.select(context)` 获取当前可用 tools
+2. 调用 `await tool_selector.get_tools(context)` 获取当前可用 tool schemas
 3. 调用 `step()` → 将 tools 和 messages 发送给 LLM → 返回响应
-4. 如果响应包含 tool_calls → `handle_tool_calls()` 执行
+4. 如果响应包含 tool_calls → `handle_tool_calls()` 通过 `await tool_selector.dispatch(call)` 逐个执行
 5. 将 tool_results 添加到 messages → 回到步骤 2
 6. 如果响应是 end_turn → 返回最终文本
 
@@ -268,84 +267,118 @@ class Agent(mutagent.Object):
 
 #### 2.7.1 核心理念
 
-Tool 不是一个封闭的类层级，而是**运行时模块中的 Python 可调用对象**。Agent 可以像操作任何其他模块一样创建和迭代 Tool。
+mutagent 不定义"什么是工具"。在框架看来，**一切都是 Python 运行时中的接口和实现**。工具只是 ToolSelector 知道如何使用的 Python 可调用对象。
 
 关键区别：
-- **传统设计**：Tool 是预定义的类，注册到 Registry
-- **mutagent 设计**：Tool 是任何带类型标注的 Python 函数/方法，通过 ToolSelector 动态选择
+- **传统框架**：定义 Tool 基类 → 实现者继承 → 注册到 Registry → 框架统一调用 `tool.execute()`
+- **mutagent 设计**：工具就是 Python 函数/模块 → **ToolSelector 决定如何发现、呈现和调用它们**
 
-#### 2.7.2 Tool 基类
+这意味着：
+- 没有 `Tool` 基类，没有 `execute()` 接口约束
+- 内置工具就是普通 Python 函数
+- 即使是"如何调用工具"这件事，也只是 ToolSelector 默认实现的选择，不是框架规范
+- Agent 可以进化 ToolSelector 来改变工具的发现、选择和调用方式
 
-```python
-# tools/base.py
-import mutagent
+#### 2.7.2 ToolSelector — Agent 与工具的唯一桥梁
 
-class Tool(mutagent.Object):
-    """Tool 基类 — 将 Python 可调用对象暴露为 LLM tool"""
-    name: str
-    description: str
-
-    def get_schema(self) -> ToolSchema: ...
-    def execute(self, **params) -> str: ...             # 同步接口
-    async def execute_async(self, **params) -> str: ... # 异步接口
-
-# tools/base.impl.py — 默认实现
-@mutagent.impl(Tool.execute_async)
-async def execute_async(self: Tool, **params) -> str:
-    """默认：委托给同步 execute"""
-    return self.execute(**params)
-```
-
-**双接口设计**：
-- 同步工具（大多数）→ 实现 `execute`，`execute_async` 自动委托
-- 异步工具 → 实现 `execute_async`（override=True）
-- 框架统一调用 `await tool.execute_async(**params)`
-
-核心内置 tools（`inspect_module`、`view_source` 等）继承此基类，是 Agent 最底层的操作原语。
-
-#### 2.7.3 ToolSelector（可进化的工具选择器）
+ToolSelector 是框架中唯一定义的工具相关抽象。它全部使用 async 接口，因为工具选择本身可能涉及 LLM 推理（分析需要什么工具、查询现有工具集、决定是否创造新工具）。
 
 ```python
 # tools/selector.py - 声明
 import mutagent
 
 class ToolSelector(mutagent.Object):
-    """工具选择器 — 决定哪些 tools 对 LLM 可用"""
+    """工具选择与调度 — Agent 与工具之间的唯一桥梁
 
-    def select(self, context: dict) -> list[Tool]: ...
+    职责：
+    1. 决定当前上下文下哪些工具对 LLM 可用（get_tools）
+    2. 将 LLM 的工具调用路由到具体实现（dispatch）
 
-# tools/selector.impl.py - 初始实现（v0：返回所有核心 tools）
-import mutagent
-from mutagent.tools.selector import ToolSelector
+    这两个职责的实现方式完全由 impl 决定，Agent 可以迭代进化。
+    """
 
-@mutagent.impl(ToolSelector.select)
-def select(self: ToolSelector, context: dict) -> list[Tool]:
-    """MVP 版本：返回所有核心内置 tools"""
-    return self._get_core_tools()
+    async def get_tools(self, context: dict) -> list[ToolSchema]: ...
+    async def dispatch(self, tool_call: ToolCall) -> ToolResult: ...
 ```
 
-**进化路径**：
-1. **v0（MVP）**：返回所有核心 tools（inspect、view、patch、save、execute）
-2. **v1（Agent 自行迭代）**：Agent 根据任务上下文过滤 tools，减少 LLM 的认知负担
-3. **v2+**：Agent 发现需要新工具时，自行创建新 Tool 模块 → patch 到运行时 → 注册到可选工具列表
+```python
+# tools/selector.impl.py - MVP 初始实现
+import mutagent
+from mutagent.tools.selector import ToolSelector
+from mutagent.tools.builtins import inspect_module, view_source, patch_module, save_module, run_code
 
-#### 2.7.4 Agent 创建 Tool 的流程
+@mutagent.impl(ToolSelector.get_tools)
+async def get_tools(self: ToolSelector, context: dict) -> list[ToolSchema]:
+    """MVP：返回所有核心工具的 schema"""
+    return [
+        make_tool_schema(inspect_module.inspect_module),
+        make_tool_schema(view_source.view_source),
+        make_tool_schema(patch_module.patch_module),
+        make_tool_schema(save_module.save_module),
+        make_tool_schema(run_code.run_code),
+    ]
+
+@mutagent.impl(ToolSelector.dispatch)
+async def dispatch(self: ToolSelector, tool_call: ToolCall) -> ToolResult:
+    """MVP：直接映射工具名到函数并调用"""
+    tool_map = {
+        "inspect_module": inspect_module.inspect_module,
+        "view_source": view_source.view_source,
+        "patch_module": patch_module.patch_module,
+        "save_module": save_module.save_module,
+        "run_code": run_code.run_code,
+    }
+    fn = tool_map[tool_call.name]
+    try:
+        result = fn(**tool_call.arguments)
+        if asyncio.iscoroutine(result):
+            result = await result
+        return ToolResult(tool_call_id=tool_call.id, content=str(result))
+    except Exception as e:
+        return ToolResult(tool_call_id=tool_call.id, content=str(e), is_error=True)
+```
+
+**关于 dispatch 中的 sync/async 检测**：这里的 `iscoroutine` 检测不是框架规范，而是 MVP 默认实现的内部选择。它存在于 `selector.impl.py` 中，Agent 完全可以在进化 ToolSelector 时改变这个行为。
+
+#### 2.7.3 进化路径
+
+```
+v0（MVP）
+  ToolSelector.get_tools → 返回所有核心工具 schema
+  ToolSelector.dispatch  → name → function 直接映射
+
+v1（Agent 自行迭代 ToolSelector.get_tools）
+  → 分析任务上下文，只返回相关工具
+  → 减少 LLM 的认知负担
+
+v2（Agent 进化 ToolSelector 为 LLM 驱动）
+  → get_tools 内部调用 LLM 分析"我需要什么工具？"
+  → 搜索运行时中的可用模块
+  → 判断是否需要创造新工具
+
+v3+（完全自进化）
+  → Agent patch ToolSelector 实现
+  → 创建新的工具模块 → patch 到运行时
+  → 更新 dispatch 逻辑来调用新工具
+```
+
+#### 2.7.4 Agent 创建工具的流程
 
 ```
 Agent 遇到需要新工具的场景
-  → patch_module("project.tools.file_search", source="...")  # 创建新 tool 模块
-  → execute("from project.tools.file_search import ...")      # 验证
-  → patch ToolSelector.select 的实现                          # 将新 tool 加入选择器
-  → 后续 step 中 LLM 即可使用新 tool
+  → patch_module("project.tools.file_search", source="...")  # 创建新工具模块
+  → run_code("from project.tools.file_search import ...")     # 验证
+  → patch ToolSelector 的 get_tools/dispatch 实现             # 将新工具纳入选择器
+  → 后续 step 中 LLM 即可使用新工具
 ```
 
-这就是"自进化"的完整闭环：Agent 用核心原语（patch/execute）来创建新 tool，再用新 tool 解决更复杂的问题。
+这就是"自进化"的完整闭环：Agent 用核心原语（patch/run_code）来创建新工具，再用新工具解决更复杂的问题。
 
-### 2.8 内置 Tools（核心原语）
+### 2.8 内置工具（核心原语）
 
-这些是 Agent 的最小操作集，是所有高级能力的基础。
+这些是 Agent 的最小操作集，是所有高级能力的基础。它们是**普通 Python 函数**，不继承任何基类。
 
-核心工作流：`inspect_module` → `view_source` → `patch_module` → `execute`（验证）→ `save_module`（固化）
+核心工作流：`inspect_module` → `view_source` → `patch_module` → `run_code`（验证）→ `save_module`（固化）
 
 #### 2.8.1 `inspect_module` — 模块结构查看
 
@@ -389,10 +422,8 @@ Agent 遇到需要新工具的场景
 1. 生成虚拟文件名 `mutagent://module_path`
 2. 将 `source` 注入 `linecache.cache`
 3. 使用 `compile(source, filename, 'exec')` 编译
-4. 在目标模块的命名空间中执行（增量叠加）
+4. 完全替换目标模块命名空间（patch = 写文件 + 重启）
 5. forwardpy 的 `@impl(override=True)` 自动处理方法替换
-
-**叠加语义**：默认增量叠加——新定义覆盖旧定义，未涉及的保持不变。Agent 可以只 patch 一个函数，也可以 patch 完整模块。
 
 #### 2.8.4 `save_module` — 固化到文件
 
@@ -409,7 +440,7 @@ Agent 遇到需要新工具的场景
 - 自动创建必要的包目录和 `__init__.py`
 - 写入文件后更新 `__file__`、linecache，确保一致
 
-#### 2.8.5 `execute` — 执行验证
+#### 2.8.5 `run_code` — 执行验证
 
 **功能**：在当前运行时执行 Python 代码片段，验证修改效果。
 
@@ -654,7 +685,7 @@ class ModuleManager:
 
 - **模型**：`claude-sonnet-4-20250514`（默认，可配置）
 - **认证**：`x-api-key` header
-- **Tool Use**：将 Tool 的 `get_schema()` 输出转为 Claude 的 tool 格式
+- **Tool Use**：ToolSelector 提供的 `ToolSchema` 转为 Claude 的 tool 格式
 - **消息格式映射**：
   - `user` / `assistant` 角色直接映射
   - `tool_use` content block → 内部 `ToolCall`
@@ -675,9 +706,9 @@ class ModuleManager:
 | 实现 patch | 先卸载旧 impl 再注册新 impl | 需要 forwardpy 扩展 |
 | 源码追踪 | linecache + loader 协议 | `inspect.getsource()` 透明工作 |
 | 虚拟文件名 | `mutagent://module_path` | 避免尖括号陷阱 |
-| Tool 接口 | 双接口 `execute` + `execute_async` | 清晰契约，无隐式魔法，Python 常见模式（Django/ASGI） |
-| Tool 实现 | 同步工具实现 `execute`，异步工具实现 `execute_async` | 实现者只需关心一个方法，默认委托透明 |
-| Tool 选择 | ToolSelector（可进化） | 初始返回全部，Agent 可迭代 |
+| Tool 接口 | **无基类**，工具就是 Python 函数 | 不给框架增加约束，一切可进化 |
+| Tool 调用 | ToolSelector.dispatch 内部决定 | 调用方式也是可进化的实现细节 |
+| Tool 选择 | ToolSelector（async，可进化） | 唯一桥梁，可进化为 LLM 驱动 |
 | 安全边界 | 无沙箱，仅超时 | MVP 面向开发者 |
 | 对话持久化 | 不持久化 | MVP 每次全新会话 |
 | 核心抽象 | 模块路径 | `package.module.function` 是第一公民 |
@@ -685,168 +716,71 @@ class ModuleManager:
 
 ## 3. 待定问题
 
-### Q1: Tool 的同步/异步接口设计
+### Q1: Schema 生成策略
 
-**问题**：Tool 接口应如何处理同步/异步实现的差异？
+**问题**：ToolSelector 的 MVP 实现需要将 Python 函数转为 LLM 能理解的 ToolSchema（JSON Schema）。Schema 如何生成？
 
-**背景**：
-- Agent 内部是完全的异步框架
-- 核心工具（`inspect_module`、`view_source`）本质是同步操作
-- 未来工具（如调用子 Agent、HTTP 请求）需要真正的异步
-- 用户要求：**避免任何不清晰的设计**
+**方案分析**：
 
-**三种方案对比**：
+| 方案 | 做法 | 优缺点 |
+|------|------|--------|
+| A | 手写每个工具的 schema dict | 完全可控，但重复劳动，容易与函数签名不同步 |
+| B | 从函数签名 + docstring 自动生成 | 低维护成本，但需要解析逻辑 |
+| C | 函数上标注 schema（如装饰器或特殊属性） | 灵活，但引入额外约定 |
 
-#### 方案 A：统一 `async def execute`
+**建议**：方案 B（自动生成）— 利用 `inspect.signature()` + 类型注解 + docstring 提取参数描述。这是一个 `make_tool_schema(fn)` 工具函数，放在 `tools/selector.impl.py` 或独立为 `tools/schema.py`。它不是框架规范，只是默认 ToolSelector 实现的内部工具。
 
+示例：
 ```python
-class Tool(mutagent.Object):
-    async def execute(self, **params) -> str: ...
+def inspect_module(module_path: str = "", depth: int = 2) -> str:
+    """查看模块结构
 
-# 同步工具也必须写 async def
-@mutagent.impl(InspectModuleTool.execute)
-async def execute(self, **params) -> str:
-    return do_sync_stuff()  # 没有 await，但声明是 async
+    Args:
+        module_path: 模块路径，如 mutagent.tools。不填则从根模块开始
+        depth: 展开深度，默认 2
+    """
+    ...
+
+# make_tool_schema(inspect_module) 自动产生：
+# {
+#   "name": "inspect_module",
+#   "description": "查看模块结构",
+#   "input_schema": {
+#     "type": "object",
+#     "properties": {
+#       "module_path": {"type": "string", "description": "模块路径..."},
+#       "depth": {"type": "integer", "description": "展开深度，默认 2"}
+#     }
+#   }
+# }
 ```
 
-| 维度 | 评价 |
-|------|------|
-| 清晰度 | ⚠️ 中等 — 声明为 async 但实际无 await，产生"假异步"困惑 |
-| 简洁度 | ✅ 高 — 只有一个方法 |
-| 实现负担 | ⚠️ 每个同步工具都要写无意义的 `async def` |
-| 扩展性 | ✅ 框架只需 `await tool.execute()` |
+### Q2: 内置工具如何获取 ModuleManager 等运行时依赖？
 
-#### 方案 B：框架自动检测 sync/async
+**问题**：内置工具是普通 Python 函数，但 `patch_module` 和 `save_module` 需要访问 `ModuleManager` 实例。如何注入这个依赖？
 
-```python
-class Tool(mutagent.Object):
-    async def execute(self, **params) -> str: ...  # 声明为 async
+**方案分析**：
 
-# 但实现可以是 sync，框架自动检测包装
-@mutagent.impl(InspectModuleTool.execute)
-def execute(self, **params) -> str:              # 实际是 sync
-    return do_sync_stuff()
-```
+| 方案 | 做法 | 优缺点 |
+|------|------|--------|
+| A | 函数参数：`patch_module(module_path, source, manager)` | 明确，但 ToolSelector.dispatch 需要额外注入 |
+| B | 模块级全局变量：函数内引用 `_manager` | 简单，但需要初始化时设置 |
+| C | 函数是闭包或对象方法，绑定到 manager | 更 OO，但偏离"工具是纯函数"的理念 |
 
-| 维度 | 评价 |
-|------|------|
-| 清晰度 | ❌ 低 — 声明是 async 但允许 sync 实现，隐式魔法 |
-| 简洁度 | ✅ 高 — 只有一个方法 |
-| 实现负担 | ✅ 低 — 实现者自由选择 |
-| 扩展性 | ⚠️ 框架需要 `iscoroutine` 检测逻辑 |
-
-**这正是用户指出的"不清晰设计"** — 声明契约与实现不一致，依赖隐式行为。
-
-#### 方案 D：双接口 `execute` + `execute_async`（用户提议）
+**建议**：方案 A — 函数参数最明确。ToolSelector.dispatch 作为调度者，天然知道如何注入依赖。这也是 ToolSelector 作为"唯一桥梁"的体现——它不只是简单的 name → function 映射，还负责组装调用上下文。
 
 ```python
-# tools/base.py — 声明
-class Tool(mutagent.Object):
-    name: str
-    description: str
-
-    def get_schema(self) -> ToolSchema: ...
-    def execute(self, **params) -> str: ...           # 同步接口
-    async def execute_async(self, **params) -> str: ... # 异步接口
-
-# tools/base.impl.py — 默认实现：execute_async 委托给 execute
-@mutagent.impl(Tool.execute_async)
-async def execute_async(self: Tool, **params) -> str:
-    return self.execute(**params)  # 默认：直接调用同步版本
+# ToolSelector.dispatch 的 MVP 实现中：
+if tool_call.name == "patch_module":
+    result = patch_module(manager=self.module_manager, **tool_call.arguments)
 ```
 
-**同步工具**（大多数内置工具）— 只需实现 `execute`：
-```python
-@mutagent.impl(InspectModuleTool.execute)
-def execute(self, **params) -> str:
-    return inspect_module(params['module_path'])
-# execute_async 继承默认实现，自动委托到 execute
-```
+Agent 进化 ToolSelector 时，依赖注入的方式也可以随之改变。
 
-**异步工具**（需要 await 的工具）— 直接实现 `execute_async`：
-```python
-@mutagent.impl(SubAgentTool.execute_async, override=True)
-async def execute_async(self, **params) -> str:
-    return await self.client.send_message(...)
-# execute 保持为 stub（不需要同步版本）
-```
+回答：重要澄清，因为要利用forwardpy的思路和，没有“工具只是普通Python函数”的这一说法，框架下要保证所有的类型和函数都可被patch，所以内置的工具，至少也是某个类上的函数。这样才能利用到框架特性。 
+所有模块的普通函数实现，都会被视为实现细节，agent应该会知道patch这些实现会导致混乱。而所有的声明才是AI会重点关注的部分。 其他的函数如果要被使用，agent需要先把他们包装成框架下的对象。
 
-**框架调用**：统一使用 `await tool.execute_async(**params)`
-
-| 维度 | 评价 |
-|------|------|
-| 清晰度 | ✅ 高 — `def execute` 就是同步，`async def execute_async` 就是异步，零歧义 |
-| 简洁度 | ⚠️ 中等 — 两个方法，但实现者只需关心其中一个 |
-| 实现负担 | ✅ 低 — 同步工具实现 `execute`（最自然），异步工具实现 `execute_async` |
-| 扩展性 | ✅ 高 — 未来可让默认 `execute_async` 使用 `asyncio.to_thread` 运行同步工具 |
-| 与 forwardpy 兼容 | ✅ 两个独立 stub，各自走 `@impl` 注册，无特殊处理 |
-
-**关于事件循环阻塞**：
-- MVP 阶段：默认 `execute_async` 直接调用 `self.execute()`（同步执行在事件循环中）
-- 核心工具（inspect、view_source）操作很快，不会阻塞
-- 未来优化：可将默认实现改为 `await asyncio.to_thread(self.execute, **params)` 运行到线程池
-
-**总结对比**：
-
-| | 方案 A（统一 async） | 方案 B（自动检测） | 方案 D（双接口） |
-|---|---|---|---|
-| 契约清晰度 | 中 | 低 | **高** |
-| 方法数量 | 1 | 1 | 2 |
-| 实现者负担 | 高（假 async） | 低（但有隐式魔法） | **低（选一个实现）** |
-| 框架复杂度 | 低 | 中（检测逻辑） | **低（默认 impl 委托）** |
-| Python 惯例 | 少见 | 不推荐 | **常见**（Django, ASGI） |
-
-**建议**：方案 D（双接口）。Python 生态中 Django（`__call__` / `__acall__`）、ASGI（sync/async views）都采用类似模式，是成熟的惯例。契约最清晰：类型签名即契约，无隐式行为。
-
-### Q2: 内置工具 `execute` 与 `Tool.execute()` 方法的命名冲突
-
-**问题**：内置工具中有一个叫 `execute` 的工具（执行 Python 代码片段），同时 `Tool` 基类有 `execute()` 方法。这会导致：
-
-1. **代码可读性**：`execute_tool.execute(code="print(1)")` — 冗余且混淆
-2. **LLM 认知**：tool_name="execute" 语义不够具体（execute what?）
-3. **与方案 D 的交叉**：Tool 有 `execute` + `execute_async` 两个方法，再加上一个叫 "execute" 的内置工具，概念容易混淆
-
-**建议**：将内置工具 `execute` 重命名为更具体的名称：
-
-| 候选名 | 含义 | 与 Python 惯例 |
-|--------|------|----------------|
-| `run_code` | 运行代码片段 | 直观，无歧义 |
-| `eval_code` | 求值代码 | 但 eval 在 Python 中有特定含义（表达式求值），这里是 exec |
-| `exec_code` | 执行代码 | 贴近 Python `exec()`，但 exec 是关键字 |
-
-**推荐**：`run_code` — 简洁明了，与 Tool 方法名零冲突。
-
-### Q3: 双接口模式是否也适用于其他核心声明？
-
-**问题**：确认双接口模式（sync + async）是否只用于 Tool，还是也推广到其他声明类。
-
-当前各类的接口：
-| 类 | 方法 | 当前声明 | 本质 |
-|----|------|----------|------|
-| `LLMClient` | `send_message` | `async def` | 真正的 I/O 异步 |
-| `Agent` | `run`, `step`, `handle_tool_calls` | `async def` | 真正的异步循环 |
-| `ToolSelector` | `select` | `def` | 同步选择逻辑 |
-| `Tool` | `execute` / `execute_async` | 双接口 | 取决于工具实现 |
-
-**分析**：
-- `LLMClient` 和 `Agent` 是纯异步的，单 `async def` 就够了
-- `ToolSelector.select` 是纯同步的，单 `def` 就够了
-- 只有 `Tool` 存在同步/异步的不确定性，需要双接口
-
-**建议**：双接口仅用于 `Tool`。其他类的方法保持当前的单一声明（纯同步或纯异步），因为它们的同步/异步属性是确定的。
-
-
-统一回复：我觉得我们是不是跑偏了。
-
-mutagent的核心设计是实现一个可自我进化的Agent。
-我们有一个Agent，Agent通过语言模型运行做出决策，Agent选择工具，Python运行时中很多工具。
-我们并没有也不需要明确的定义：什么是一个工具。 在框架看来，所有的东西都是Python运行时的接口和实现。
-是工具选择器决定了选择以后如何调用工具。
-所以，即使是工具上的execute接口，也不是任何规范，只是默认工具选择器的实现。所以不应该纠结任何的接口设计。初始框架实现要做的是让这套思路能运转起来，同时尽量不给任何限制。
-
-请你根据以上的思路，重新思考一下这个问题。上面还有一个关键信息，你认为ToolSelector是同步选择的，我会觉得工具选择是大模型的行为，比如我提出一个问题，模型需要先分析，解决这个问题我需要什么工具？然后去选择工具，选择工具的过程很可能是模型要给出一个工具范围，然后查询现有的工具集，判断是否有满足需要的工具，是否需要创造一个新工具等等。这个过程也一定是异步的。 
-
-我们不应该陷入在具体的实现细节中，核心应该是这一切都是可进化的。
+根据这个重要细节进行迭代设计，看下这个问题是否还依然存在。
 
 
 ## 4. 实施步骤清单
@@ -924,19 +858,19 @@ mutagent的核心设计是实现一个可自我进化的Agent。
 
 ### 阶段四：Tool 系统 [待开始]
 
-- [ ] **Task 4.1**: Tool 基类与 ToolSelector
-  - [ ] 实现 Tool 声明（base.py）
-  - [ ] 实现 ToolSelector 声明（selector.py）
-  - [ ] 实现 ToolSelector 初始实现（selector.impl.py：返回所有核心 tools）
+- [ ] **Task 4.1**: ToolSelector 声明与 MVP 实现
+  - [ ] 实现 ToolSelector 声明（selector.py：get_tools + dispatch，全部 async）
+  - [ ] 实现 schema 生成工具函数（从函数签名自动生成 ToolSchema）
+  - [ ] 实现 ToolSelector MVP 实现（selector.impl.py：返回所有核心工具 schema，dispatch 映射调用）
   - [ ] 单元测试
   - 状态：⏸️ 待开始
 
-- [ ] **Task 4.2**: 核心 tools 实现
+- [ ] **Task 4.2**: 核心工具实现（纯 Python 函数）
   - [ ] inspect_module
   - [ ] view_source
-  - [ ] patch_module（封装 ModuleManager）
-  - [ ] save_module（封装 ModuleManager）
-  - [ ] execute
+  - [ ] patch_module（依赖 ModuleManager）
+  - [ ] save_module（依赖 ModuleManager）
+  - [ ] run_code
   - [ ] 各工具单元测试
   - 状态：⏸️ 待开始
 
@@ -971,12 +905,13 @@ mutagent的核心设计是实现一个可自我进化的Agent。
 - [ ] ModuleManager: 固化过渡（虚拟 → 文件）
 - [ ] ModuleManager: 虚拟父包创建
 - [ ] ImplLoader: .impl.py 发现与加载
-- [ ] Tool schema 生成
-- [ ] ToolSelector: 初始版本返回所有核心 tools
-- [ ] 各 builtin tool 功能测试
+- [ ] Schema 自动生成（函数签名 → ToolSchema）
+- [ ] ToolSelector: get_tools 返回所有核心工具 schema
+- [ ] ToolSelector: dispatch 正确路由到内置函数
+- [ ] 各内置工具函数功能测试
 - [ ] Agent 主循环（mock LLM 响应）
 
 ### 集成测试
 - [ ] Claude API 实际调用测试（aiohttp 直连）
-- [ ] Agent + Tools 端到端：Agent 查看模块 → patch 代码 → 执行验证 → 固化文件
-- [ ] 自进化验证：Agent 创建新 tool → 注册到 ToolSelector → 使用新 tool
+- [ ] Agent + Tools 端到端：Agent 查看模块 → patch 代码 → run_code 验证 → 固化文件
+- [ ] 自进化验证：Agent 创建新工具模块 → patch ToolSelector → 使用新工具
