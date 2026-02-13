@@ -763,52 +763,139 @@ class ModuleManager:
 
 ## 3. 待定问题
 
-### Q1: Schema 生成策略
+### Q1: ~~Schema 生成策略~~ → ✅ 已确认
 
-**问题**：ToolSelector 的 MVP 实现需要从 `CoreTools` 的方法签名生成 `ToolSchema`（JSON Schema）。如何实现？
+从方法签名 + docstring 自动生成 ToolSchema。`make_schemas_from_methods()` 是 ToolSelector 默认实现的内部工具，不是框架规范。
 
-**建议**：编写 `make_schemas_from_methods(obj, method_names)` 工具函数，利用 `inspect.signature()` + 类型注解 + docstring 自动生成。这是 ToolSelector 默认实现的内部工具，不是框架规范。
+### Q2: CoreTools → EssentialTools 命名
 
-```python
-# 示例：CoreTools 上的方法声明
-class CoreTools(mutagent.Object):
-    def inspect_module(self, module_path: str = "", depth: int = 2) -> str:
-        """查看模块结构
+**背景**：用户提议将 `CoreTools` 改名为 `EssentialTools`，理由：这些工具定义了 Agent 进化的最小工具集，未来有可能被替换。
 
-        Args:
-            module_path: 模块路径，如 mutagent.tools。不填则从根模块开始
-            depth: 展开深度，默认 2
-        """
-        ...
+**分析**：
 
-# make_schemas_from_methods(core_tools, ['inspect_module']) 自动产生：
-# ToolSchema(
-#   name="inspect_module",
-#   description="查看模块结构",
-#   input_schema={
-#     "type": "object",
-#     "properties": {
-#       "module_path": {"type": "string", "description": "模块路径..."},
-#       "depth": {"type": "integer", "description": "展开深度，默认 2"}
-#     }
-#   }
-# )
-```
+| 名称 | 含义 | 暗示 |
+|------|------|------|
+| `CoreTools` | 核心工具 | 永久的、不可替换的中心 |
+| `EssentialTools` | 必要工具 | 当前必要的最小集，但可进化替换 |
+| `PrimitiveTools` | 原语工具 | 最底层构建块 |
+| `BootstrapTools` | 引导工具 | 仅用于启动阶段 |
 
-注意：`self` 参数自动排除。docstring 的 Args 段用于提取参数描述。
+**结论**：`EssentialTools` 比 `CoreTools` 更准确。
+
+- "Essential" 传达了"当前不可缺少"的语义，但不暗示永恒不变
+- 与框架理念一致：一切可进化，包括最基础的工具集
+- Agent 在 v2+ 阶段可能创造更好的工具来替代这些原始版本
+- "Core" 容易让人误以为这些工具享有特殊地位或保护，实际上它们和 Agent 创建的工具在框架层面完全平等
+
+**建议**：采用 `EssentialTools`。
 
 同意
 
-### 补充说明
+### Q3: selector.impl.py 是否也应放入 builtins/
 
-1. 命名问题，我觉得内置的工具，应该叫EssentialTools，这些工具是定义Agent进化的最小工具集，并且这些工具以后是有可能被替换掉的。请分析下我的这个想法是否合理，给出建议。
+**背景**：`selector.impl.py` 本质上和 `inspect_module.impl.py` 一样，都是某个声明类方法的 `@impl` 实现。
 
-2. selector.impl.py是不是也应该放到builtins中，本质它跟其他实现也没区别。
+**分析**：
 
-3. 是不是也不要分agent和tools两个目录了，agent/core.py应该是agent的声明，所有默认实现都放在builtins里。
+当前 `selector.impl.py` 单独放在 `tools/` 下，但与 `builtins/` 中的 impl 文件没有本质区别：
 
-分析我以上想法，先不要修改结构，进行问题澄清。待我确认方案后再修改整体文档。
+| 文件 | 为谁提供 impl | 可被 Agent 替换？ |
+|------|-------------|-----------------|
+| `selector.impl.py` | `ToolSelector.get_tools`, `ToolSelector.dispatch` | 是 |
+| `inspect_module.impl.py` | `EssentialTools.inspect_module` | 是 |
+| `core.impl.py` (agent) | `Agent.run`, `Agent.step` | 是 |
+| `claude.impl.py` (client) | `LLMClient.send_message` | 是 |
 
+它们全部是"框架的默认实现"，全部可被 Agent 通过 `@impl(override=True)` 替换。
+
+**结论**：应该放入 builtins/。进一步说，**所有框架自带的 `.impl.py` 都应该放入 builtins/**，包括 `agent/core.impl.py` 和 `client/claude.impl.py`。这样形成一个清晰的分层：
+
+- **声明文件**（`.py`）= 稳定的接口契约，散布在逻辑位置
+- **builtins/**（`.impl.py`）= 框架自带的默认实现集，全部可替换
+
+好处：
+1. Agent 知道：声明 = 要理解的 API，builtins/ = 可改进的实现
+2. "禁用所有默认实现" = 不加载 builtins/
+3. 统一的心智模型：builtins 是框架的"默认人格"
+
+确认
+
+### Q4: 是否合并 agent/ 和 tools/ 目录
+
+**背景**：用户提议不再分 `agent/` 和 `tools/` 两个目录。`agent/core.py` 是 Agent 声明，所有默认实现都放在 `builtins/` 里。
+
+**分析**：
+
+如果 Q3 的结论成立（所有 impl 进 builtins/），那么 `agent/` 目录下只剩 `core.py` 一个声明文件，`tools/` 目录下也只剩声明文件。子目录的存在意义变弱。
+
+**方案 A：声明扁平化 + builtins/ 集中实现**
+
+```
+mutagent/
+├── __init__.py              # 导出 Object, impl
+├── base.py                  # mutagent.Object + MutagentMeta
+├── agent.py                 # Agent 声明
+├── selector.py              # ToolSelector 声明
+├── essential_tools.py       # EssentialTools 声明
+├── client.py                # LLMClient 声明
+├── messages.py              # 消息模型（dataclass，非 mutagent.Object）
+├── builtins/                # 所有默认实现
+│   ├── __init__.py
+│   ├── agent.impl.py        # Agent.run, Agent.step 等
+│   ├── selector.impl.py     # ToolSelector.get_tools, dispatch
+│   ├── claude.impl.py       # LLMClient.send_message (Claude)
+│   ├── inspect_module.impl.py
+│   ├── view_source.impl.py
+│   ├── patch_module.impl.py
+│   ├── save_module.impl.py
+│   └── run_code.impl.py
+└── runtime/                 # 基础设施（非典型 patch 目标）
+    ├── __init__.py
+    ├── module_manager.py    # ModuleManager
+    └── impl_loader.py       # ImplLoader
+```
+
+**方案 B：保持子目录，但 impl 集中**
+
+```
+mutagent/
+├── __init__.py
+├── base.py
+├── agent/
+│   └── core.py              # Agent 声明（目录下只有声明）
+├── tools/
+│   ├── selector.py          # ToolSelector 声明
+│   └── essential_tools.py   # EssentialTools 声明
+├── client/
+│   ├── base.py              # LLMClient 声明
+│   └── messages.py
+├── builtins/                # 所有 impl
+│   └── ...
+└── runtime/
+    └── ...
+```
+
+**对比**：
+
+| 维度 | 方案 A（扁平） | 方案 B（子目录） |
+|------|---------------|-----------------|
+| 声明文件位置 | 包根目录，一眼看全 | 分散在子目录，逻辑分组 |
+| Agent 浏览成本 | 低 — `inspect_module("mutagent")` 直接看到所有声明 | 需要递归查看子包 |
+| 文件数量 | 根下 6 个 .py | 根下 1 个，子目录各 1-2 个 |
+| 未来扩展 | 声明变多后根目录拥挤 | 天然按领域分组 |
+| 与 forwardpy 风格 | forwardpy 自身是扁平的 | — |
+
+**建议**：方案 A（扁平声明）。理由：
+
+1. **Agent 友好**：Agent 做 `inspect_module("mutagent")` 一次就能看到所有核心声明（Agent, ToolSelector, EssentialTools, LLMClient），不用递归探索子包
+2. **MVP 规模**：当前只有 ~6 个声明文件，扁平完全可控
+3. **心智模型简洁**：`mutagent/*.py` = 所有声明，`mutagent/builtins/` = 所有默认实现，`mutagent/runtime/` = 基础设施
+4. **forwardpy 一致**：forwardpy 自身也是扁平结构
+5. **未来可演化**：如果声明文件增多到需要分组，Agent 可以自己重构目录结构
+
+`runtime/` 保持独立目录，因为 `ModuleManager` 和 `ImplLoader` 是基础设施层，不是典型的 Agent patch 目标（虽然理论上也可以 patch）。
+
+确认
 
 ## 4. 实施步骤清单
 
