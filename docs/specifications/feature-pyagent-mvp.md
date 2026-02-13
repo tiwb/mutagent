@@ -286,8 +286,20 @@ class Tool(mutagent.Object):
     description: str
 
     def get_schema(self) -> ToolSchema: ...
-    async def execute(self, **params) -> str: ...
+    def execute(self, **params) -> str: ...             # 同步接口
+    async def execute_async(self, **params) -> str: ... # 异步接口
+
+# tools/base.impl.py — 默认实现
+@mutagent.impl(Tool.execute_async)
+async def execute_async(self: Tool, **params) -> str:
+    """默认：委托给同步 execute"""
+    return self.execute(**params)
 ```
+
+**双接口设计**：
+- 同步工具（大多数）→ 实现 `execute`，`execute_async` 自动委托
+- 异步工具 → 实现 `execute_async`（override=True）
+- 框架统一调用 `await tool.execute_async(**params)`
 
 核心内置 tools（`inspect_module`、`view_source` 等）继承此基类，是 Agent 最底层的操作原语。
 
@@ -663,8 +675,8 @@ class ModuleManager:
 | 实现 patch | 先卸载旧 impl 再注册新 impl | 需要 forwardpy 扩展 |
 | 源码追踪 | linecache + loader 协议 | `inspect.getsource()` 透明工作 |
 | 虚拟文件名 | `mutagent://module_path` | 避免尖括号陷阱 |
-| Tool 接口 | 统一 `async def` 声明 | Agent 是完全异步框架 |
-| Tool 实现 | 允许 sync/async 实现 | 框架自动检测和包装 |
+| Tool 接口 | 双接口 `execute` + `execute_async` | 清晰契约，无隐式魔法，Python 常见模式（Django/ASGI） |
+| Tool 实现 | 同步工具实现 `execute`，异步工具实现 `execute_async` | 实现者只需关心一个方法，默认委托透明 |
 | Tool 选择 | ToolSelector（可进化） | 初始返回全部，Agent 可迭代 |
 | 安全边界 | 无沙箱，仅超时 | MVP 面向开发者 |
 | 对话持久化 | 不持久化 | MVP 每次全新会话 |
@@ -673,49 +685,168 @@ class ModuleManager:
 
 ## 3. 待定问题
 
-### Q1: Tool 的同步/异步实现灵活性
+### Q1: Tool 的同步/异步接口设计
 
-**问题**：Tool 的声明接口是 `async def execute(...)`，但某些工具（如 `inspect_module`、`view_source`）本质是同步操作。是否允许实现者提供同步函数，由框架自动处理？
+**问题**：Tool 接口应如何处理同步/异步实现的差异？
 
 **背景**：
-- Agent 内部是完全的异步框架（确认）
-- 但强制所有 tool 实现都写 `async def` 是不必要的负担
+- Agent 内部是完全的异步框架
+- 核心工具（`inspect_module`、`view_source`）本质是同步操作
+- 未来工具（如调用子 Agent、HTTP 请求）需要真正的异步
+- 用户要求：**避免任何不清晰的设计**
 
-**方案分析**：
+**三种方案对比**：
 
-| 方案 | 做法 | 优缺点 |
-|------|------|--------|
-| A | 全部 `async def`，同步操作直接在 async 函数中执行 | 简单一致，但每个 impl 都要写 `async def` |
-| B | 框架自动检测：sync impl 自动包装为 async | 实现者更灵活，框架稍复杂 |
-| C | 声明接口为普通 `def`，框架统一处理 | 失去异步语义提示 |
-
-**建议**：方案 B——框架在调用 `tool.execute()` 时自动检测：
+#### 方案 A：统一 `async def execute`
 
 ```python
-# Agent 调用 tool 时
-result = tool.execute(**params)
-if asyncio.iscoroutine(result):
-    result = await result
-```
-
-或者在 forwardpy 的 `@impl` 注册时自动处理——当声明是 `async def` 但实现是 `def` 时，自动包装为 async wrapper：
-
-```python
-# 声明
-class InspectModuleTool(mutagent.Object):
+class Tool(mutagent.Object):
     async def execute(self, **params) -> str: ...
 
-# 实现可以是同步的
+# 同步工具也必须写 async def
 @mutagent.impl(InspectModuleTool.execute)
-def execute(self: InspectModuleTool, **params) -> str:
-    return inspect_module(params['module_path'])  # 同步代码
-
-# 框架自动包装，调用时 await 正常工作
+async def execute(self, **params) -> str:
+    return do_sync_stuff()  # 没有 await，但声明是 async
 ```
 
-这样实现者可以根据实际情况选择 sync/async，框架透明处理。
+| 维度 | 评价 |
+|------|------|
+| 清晰度 | ⚠️ 中等 — 声明为 async 但实际无 await，产生"假异步"困惑 |
+| 简洁度 | ✅ 高 — 只有一个方法 |
+| 实现负担 | ⚠️ 每个同步工具都要写无意义的 `async def` |
+| 扩展性 | ✅ 框架只需 `await tool.execute()` |
 
-回答，我觉得要避免任何不清晰的设计，是否可以提供execute跟execute_async两个接口？比较下这样的设计的优势和缺点。
+#### 方案 B：框架自动检测 sync/async
+
+```python
+class Tool(mutagent.Object):
+    async def execute(self, **params) -> str: ...  # 声明为 async
+
+# 但实现可以是 sync，框架自动检测包装
+@mutagent.impl(InspectModuleTool.execute)
+def execute(self, **params) -> str:              # 实际是 sync
+    return do_sync_stuff()
+```
+
+| 维度 | 评价 |
+|------|------|
+| 清晰度 | ❌ 低 — 声明是 async 但允许 sync 实现，隐式魔法 |
+| 简洁度 | ✅ 高 — 只有一个方法 |
+| 实现负担 | ✅ 低 — 实现者自由选择 |
+| 扩展性 | ⚠️ 框架需要 `iscoroutine` 检测逻辑 |
+
+**这正是用户指出的"不清晰设计"** — 声明契约与实现不一致，依赖隐式行为。
+
+#### 方案 D：双接口 `execute` + `execute_async`（用户提议）
+
+```python
+# tools/base.py — 声明
+class Tool(mutagent.Object):
+    name: str
+    description: str
+
+    def get_schema(self) -> ToolSchema: ...
+    def execute(self, **params) -> str: ...           # 同步接口
+    async def execute_async(self, **params) -> str: ... # 异步接口
+
+# tools/base.impl.py — 默认实现：execute_async 委托给 execute
+@mutagent.impl(Tool.execute_async)
+async def execute_async(self: Tool, **params) -> str:
+    return self.execute(**params)  # 默认：直接调用同步版本
+```
+
+**同步工具**（大多数内置工具）— 只需实现 `execute`：
+```python
+@mutagent.impl(InspectModuleTool.execute)
+def execute(self, **params) -> str:
+    return inspect_module(params['module_path'])
+# execute_async 继承默认实现，自动委托到 execute
+```
+
+**异步工具**（需要 await 的工具）— 直接实现 `execute_async`：
+```python
+@mutagent.impl(SubAgentTool.execute_async, override=True)
+async def execute_async(self, **params) -> str:
+    return await self.client.send_message(...)
+# execute 保持为 stub（不需要同步版本）
+```
+
+**框架调用**：统一使用 `await tool.execute_async(**params)`
+
+| 维度 | 评价 |
+|------|------|
+| 清晰度 | ✅ 高 — `def execute` 就是同步，`async def execute_async` 就是异步，零歧义 |
+| 简洁度 | ⚠️ 中等 — 两个方法，但实现者只需关心其中一个 |
+| 实现负担 | ✅ 低 — 同步工具实现 `execute`（最自然），异步工具实现 `execute_async` |
+| 扩展性 | ✅ 高 — 未来可让默认 `execute_async` 使用 `asyncio.to_thread` 运行同步工具 |
+| 与 forwardpy 兼容 | ✅ 两个独立 stub，各自走 `@impl` 注册，无特殊处理 |
+
+**关于事件循环阻塞**：
+- MVP 阶段：默认 `execute_async` 直接调用 `self.execute()`（同步执行在事件循环中）
+- 核心工具（inspect、view_source）操作很快，不会阻塞
+- 未来优化：可将默认实现改为 `await asyncio.to_thread(self.execute, **params)` 运行到线程池
+
+**总结对比**：
+
+| | 方案 A（统一 async） | 方案 B（自动检测） | 方案 D（双接口） |
+|---|---|---|---|
+| 契约清晰度 | 中 | 低 | **高** |
+| 方法数量 | 1 | 1 | 2 |
+| 实现者负担 | 高（假 async） | 低（但有隐式魔法） | **低（选一个实现）** |
+| 框架复杂度 | 低 | 中（检测逻辑） | **低（默认 impl 委托）** |
+| Python 惯例 | 少见 | 不推荐 | **常见**（Django, ASGI） |
+
+**建议**：方案 D（双接口）。Python 生态中 Django（`__call__` / `__acall__`）、ASGI（sync/async views）都采用类似模式，是成熟的惯例。契约最清晰：类型签名即契约，无隐式行为。
+
+### Q2: 内置工具 `execute` 与 `Tool.execute()` 方法的命名冲突
+
+**问题**：内置工具中有一个叫 `execute` 的工具（执行 Python 代码片段），同时 `Tool` 基类有 `execute()` 方法。这会导致：
+
+1. **代码可读性**：`execute_tool.execute(code="print(1)")` — 冗余且混淆
+2. **LLM 认知**：tool_name="execute" 语义不够具体（execute what?）
+3. **与方案 D 的交叉**：Tool 有 `execute` + `execute_async` 两个方法，再加上一个叫 "execute" 的内置工具，概念容易混淆
+
+**建议**：将内置工具 `execute` 重命名为更具体的名称：
+
+| 候选名 | 含义 | 与 Python 惯例 |
+|--------|------|----------------|
+| `run_code` | 运行代码片段 | 直观，无歧义 |
+| `eval_code` | 求值代码 | 但 eval 在 Python 中有特定含义（表达式求值），这里是 exec |
+| `exec_code` | 执行代码 | 贴近 Python `exec()`，但 exec 是关键字 |
+
+**推荐**：`run_code` — 简洁明了，与 Tool 方法名零冲突。
+
+### Q3: 双接口模式是否也适用于其他核心声明？
+
+**问题**：确认双接口模式（sync + async）是否只用于 Tool，还是也推广到其他声明类。
+
+当前各类的接口：
+| 类 | 方法 | 当前声明 | 本质 |
+|----|------|----------|------|
+| `LLMClient` | `send_message` | `async def` | 真正的 I/O 异步 |
+| `Agent` | `run`, `step`, `handle_tool_calls` | `async def` | 真正的异步循环 |
+| `ToolSelector` | `select` | `def` | 同步选择逻辑 |
+| `Tool` | `execute` / `execute_async` | 双接口 | 取决于工具实现 |
+
+**分析**：
+- `LLMClient` 和 `Agent` 是纯异步的，单 `async def` 就够了
+- `ToolSelector.select` 是纯同步的，单 `def` 就够了
+- 只有 `Tool` 存在同步/异步的不确定性，需要双接口
+
+**建议**：双接口仅用于 `Tool`。其他类的方法保持当前的单一声明（纯同步或纯异步），因为它们的同步/异步属性是确定的。
+
+
+统一回复：我觉得我们是不是跑偏了。
+
+mutagent的核心设计是实现一个可自我进化的Agent。
+我们有一个Agent，Agent通过语言模型运行做出决策，Agent选择工具，Python运行时中很多工具。
+我们并没有也不需要明确的定义：什么是一个工具。 在框架看来，所有的东西都是Python运行时的接口和实现。
+是工具选择器决定了选择以后如何调用工具。
+所以，即使是工具上的execute接口，也不是任何规范，只是默认工具选择器的实现。所以不应该纠结任何的接口设计。初始框架实现要做的是让这套思路能运转起来，同时尽量不给任何限制。
+
+请你根据以上的思路，重新思考一下这个问题。上面还有一个关键信息，你认为ToolSelector是同步选择的，我会觉得工具选择是大模型的行为，比如我提出一个问题，模型需要先分析，解决这个问题我需要什么工具？然后去选择工具，选择工具的过程很可能是模型要给出一个工具范围，然后查询现有的工具集，判断是否有满足需要的工具，是否需要创造一个新工具等等。这个过程也一定是异步的。 
+
+我们不应该陷入在具体的实现细节中，核心应该是这一切都是可进化的。
 
 
 ## 4. 实施步骤清单
