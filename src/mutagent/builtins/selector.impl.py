@@ -1,8 +1,10 @@
 """mutagent.builtins.selector -- ToolSelector MVP implementation."""
 
+import ast
 import asyncio
 import inspect
-from typing import Any, get_type_hints
+import textwrap
+from typing import Any
 
 import mutagent
 from mutagent.essential_tools import EssentialTools
@@ -10,60 +12,124 @@ from mutagent.messages import ToolCall, ToolResult, ToolSchema
 from mutagent.selector import ToolSelector
 
 
-def _python_type_to_json_type(py_type: Any) -> str:
-    """Map a Python type annotation to a JSON Schema type string."""
-    if py_type is str:
-        return "string"
-    if py_type is int:
-        return "integer"
-    if py_type is float:
-        return "number"
-    if py_type is bool:
-        return "boolean"
-    return "string"
+def _python_type_to_json_type(type_str: str) -> str:
+    """Map a Python type annotation string to a JSON Schema type string."""
+    mapping = {
+        "str": "string",
+        "int": "integer",
+        "float": "number",
+        "bool": "boolean",
+    }
+    return mapping.get(type_str, "string")
+
+
+def _parse_method_signature(cls: type, method_name: str) -> tuple[str, list[dict[str, Any]]]:
+    """Parse a method's signature from the class source code using AST.
+
+    Returns (docstring, params) where params is a list of dicts with
+    keys: name, type, default, required.
+    """
+    source = inspect.getsource(cls)
+    source = textwrap.dedent(source)
+    tree = ast.parse(source)
+
+    class_def = tree.body[0]
+    for node in class_def.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name == method_name:
+                return _extract_from_funcdef(node)
+
+    return (method_name, [])
+
+
+def _extract_from_funcdef(node: ast.FunctionDef) -> tuple[str, list[dict[str, Any]]]:
+    """Extract docstring and parameters from an AST FunctionDef node."""
+    # Docstring
+    docstring = ""
+    if (node.body and isinstance(node.body[0], ast.Expr)
+            and isinstance(node.body[0].value, ast.Constant)
+            and isinstance(node.body[0].value.value, str)):
+        docstring = node.body[0].value.value
+
+    # Parameters
+    params = []
+    args = node.args
+    # Compute defaults offset: defaults align to the end of args
+    num_defaults = len(args.defaults)
+    num_args = len(args.args)
+    default_offset = num_args - num_defaults
+
+    for i, arg in enumerate(args.args):
+        if arg.arg == "self":
+            continue
+
+        param: dict[str, Any] = {"name": arg.arg}
+
+        # Type annotation
+        if arg.annotation:
+            param["type"] = _annotation_to_str(arg.annotation)
+        else:
+            param["type"] = "str"
+
+        # Default value
+        default_idx = i - default_offset
+        if default_idx >= 0 and default_idx < len(args.defaults):
+            default_node = args.defaults[default_idx]
+            param["default"] = _ast_literal(default_node)
+            param["required"] = False
+        else:
+            param["required"] = True
+
+        params.append(param)
+
+    return (docstring, params)
+
+
+def _annotation_to_str(node: ast.expr) -> str:
+    """Convert an AST annotation node to a type string."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Constant):
+        return str(node.value)
+    if isinstance(node, ast.Attribute):
+        return ast.unparse(node)
+    return ast.unparse(node)
+
+
+def _ast_literal(node: ast.expr) -> Any:
+    """Extract a literal value from an AST node."""
+    try:
+        return ast.literal_eval(node)
+    except (ValueError, TypeError):
+        return ast.unparse(node)
 
 
 def make_schema_from_method(obj: Any, method_name: str) -> ToolSchema:
-    """Generate a ToolSchema from a method's signature and docstring.
+    """Generate a ToolSchema from a method's source definition.
 
-    Inspects the method's type hints and docstring to build a JSON Schema
-    description. The ``self`` parameter is excluded.
+    Parses the class source code to extract the method signature,
+    since forwardpy stubs replace the original signature.
     """
-    method = getattr(obj, method_name)
-    sig = inspect.signature(method)
+    cls = type(obj)
+    docstring, params = _parse_method_signature(cls, method_name)
 
-    # Get docstring
-    doc = inspect.getdoc(method) or ""
-    description = doc.split("\n")[0] if doc else method_name
+    # Use first line of docstring as description
+    description = docstring.split("\n")[0].strip() if docstring else method_name
 
-    # Build input schema from parameters (skip 'self')
+    # Build input schema
     properties: dict[str, Any] = {}
     required: list[str] = []
 
-    try:
-        hints = get_type_hints(method)
-    except Exception:
-        hints = {}
-
-    for param_name, param in sig.parameters.items():
-        if param_name == "self":
-            continue
-
-        prop: dict[str, Any] = {}
-        if param_name in hints:
-            prop["type"] = _python_type_to_json_type(hints[param_name])
+    for param in params:
+        prop: dict[str, Any] = {
+            "type": _python_type_to_json_type(param["type"]),
+            "description": param["name"],
+        }
+        if not param.get("required", True):
+            prop["default"] = param.get("default")
         else:
-            prop["type"] = "string"
-
-        # Extract parameter description from docstring Args section
-        prop["description"] = param_name
-
-        if param.default is inspect.Parameter.empty:
-            required.append(param_name)
-        else:
-            prop["default"] = param.default
-
-        properties[param_name] = prop
+            required.append(param["name"])
+        properties[param["name"]] = prop
 
     input_schema: dict[str, Any] = {
         "type": "object",

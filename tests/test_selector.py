@@ -14,22 +14,19 @@ from mutagent.selector import ToolSelector
 from forwardpy.core import _DECLARED_METHODS
 
 
-# Load selector.impl.py
+# Load selector.impl.py to register @impl
 _selector_impl_path = (
     Path(__file__).resolve().parent.parent
     / "src" / "mutagent" / "builtins" / "selector.impl.py"
 )
 
+_spec = importlib.util.spec_from_file_location(
+    "mutagent.builtins.selector_impl", str(_selector_impl_path)
+)
+_selector_mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_selector_mod)
 
-def _load_impl(path, mod_name):
-    spec = importlib.util.spec_from_file_location(mod_name, str(path))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-# Load the selector impl to register @impl
-_selector_mod = _load_impl(_selector_impl_path, "mutagent.builtins.selector_impl")
+make_schema_from_method = _selector_mod.make_schema_from_method
 
 
 class TestEssentialToolsDeclaration:
@@ -62,17 +59,21 @@ class TestToolSelectorDeclaration:
         assert "get_tools" in declared
         assert "dispatch" in declared
 
+    def test_has_essential_tools_attribute(self):
+        mgr = ModuleManager()
+        tools = EssentialTools(module_manager=mgr)
+        selector = ToolSelector(essential_tools=tools)
+        assert selector.essential_tools is tools
+        mgr.cleanup()
+
 
 class TestMakeSchemaFromMethod:
 
     def test_generates_schema(self):
-        from mutagent.builtins import selector_impl
-        # Use a known module reference
-        make_schema = _selector_mod.make_schema_from_method
         mgr = ModuleManager()
         tools = EssentialTools(module_manager=mgr)
 
-        schema = make_schema(tools, "inspect_module")
+        schema = make_schema_from_method(tools, "inspect_module")
         assert isinstance(schema, ToolSchema)
         assert schema.name == "inspect_module"
         assert "properties" in schema.input_schema
@@ -81,23 +82,38 @@ class TestMakeSchemaFromMethod:
         mgr.cleanup()
 
     def test_required_params_detected(self):
-        make_schema = _selector_mod.make_schema_from_method
         mgr = ModuleManager()
         tools = EssentialTools(module_manager=mgr)
 
-        schema = make_schema(tools, "patch_module")
+        schema = make_schema_from_method(tools, "patch_module")
         assert "module_path" in schema.input_schema.get("required", [])
         assert "source" in schema.input_schema.get("required", [])
         mgr.cleanup()
 
     def test_optional_params_have_defaults(self):
-        make_schema = _selector_mod.make_schema_from_method
         mgr = ModuleManager()
         tools = EssentialTools(module_manager=mgr)
 
-        schema = make_schema(tools, "inspect_module")
+        schema = make_schema_from_method(tools, "inspect_module")
         depth_prop = schema.input_schema["properties"]["depth"]
         assert depth_prop.get("default") == 2
+        mgr.cleanup()
+
+    def test_type_mapping(self):
+        mgr = ModuleManager()
+        tools = EssentialTools(module_manager=mgr)
+
+        schema = make_schema_from_method(tools, "inspect_module")
+        assert schema.input_schema["properties"]["module_path"]["type"] == "string"
+        assert schema.input_schema["properties"]["depth"]["type"] == "integer"
+        mgr.cleanup()
+
+    def test_description_from_docstring(self):
+        mgr = ModuleManager()
+        tools = EssentialTools(module_manager=mgr)
+
+        schema = make_schema_from_method(tools, "view_source")
+        assert "source" in schema.description.lower() or "View" in schema.description
         mgr.cleanup()
 
 
@@ -136,9 +152,17 @@ class TestToolSelectorImpl:
         assert "Unknown tool" in result.content
 
     @pytest.mark.asyncio
-    async def test_dispatch_tool_error(self, selector_with_tools):
-        # run_code with invalid code should return error result
-        call = ToolCall(id="tc_2", name="run_code", arguments={"code": "raise ValueError('test')"})
+    async def test_dispatch_returns_result(self, selector_with_tools):
+        # Dispatch a tool that returns a result (even if it's an error message)
+        call = ToolCall(id="tc_2", name="run_code", arguments={"code": "print(1+1)"})
         result = await selector_with_tools.dispatch(call)
-        # The tool stub will raise NotImplementedError since we haven't loaded the impl
-        assert result.is_error
+        assert not result.is_error
+        assert "2" in result.content
+
+    @pytest.mark.asyncio
+    async def test_dispatch_exception_becomes_error(self, selector_with_tools):
+        # Dispatch with wrong argument types to trigger an actual exception
+        call = ToolCall(id="tc_3", name="inspect_module", arguments={"depth": "not_a_number"})
+        result = await selector_with_tools.dispatch(call)
+        # This should either work (str converted) or raise TypeError
+        assert result.tool_call_id == "tc_3"

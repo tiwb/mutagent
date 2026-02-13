@@ -838,24 +838,24 @@ class ModuleManager:
   - [x] 单元测试 + mock 集成测试 (17 tests)
   - 状态：✅ 已完成
 
-### 阶段四：Tool 系统 [待开始]
+### 阶段四：Tool 系统 [✅ 已完成]
 
-- [ ] **Task 4.1**: EssentialTools 声明与 ToolSelector
-  - [ ] 实现 EssentialTools 声明（essential_tools.py：5 个工具方法声明）
-  - [ ] 实现 ToolSelector 声明（selector.py：get_tools + dispatch，全部 async）
-  - [ ] 实现 schema 自动生成（从方法签名 + docstring → ToolSchema）
-  - [ ] 实现 ToolSelector MVP 实现（builtins/selector.impl.py）
-  - [ ] 单元测试
-  - 状态：⏸️ 待开始
+- [x] **Task 4.1**: EssentialTools 声明与 ToolSelector
+  - [x] 实现 EssentialTools 声明（essential_tools.py：5 个工具方法声明）
+  - [x] 实现 ToolSelector 声明（selector.py：get_tools + dispatch，全部 async）
+  - [x] 实现 schema 自动生成（从方法源码 AST 解析 → ToolSchema）
+  - [x] 实现 ToolSelector MVP 实现（builtins/selector.impl.py）
+  - [x] 单元测试 (16 tests)
+  - 状态：✅ 已完成
 
-- [ ] **Task 4.2**: EssentialTools 各方法实现
-  - [ ] builtins/inspect_module.impl.py
-  - [ ] builtins/view_source.impl.py
-  - [ ] builtins/patch_module.impl.py（依赖 self.module_manager）
-  - [ ] builtins/save_module.impl.py（依赖 self.module_manager）
-  - [ ] builtins/run_code.impl.py
-  - [ ] 各工具单元测试
-  - 状态：⏸️ 待开始
+- [x] **Task 4.2**: EssentialTools 各方法实现
+  - [x] builtins/inspect_module.impl.py
+  - [x] builtins/view_source.impl.py
+  - [x] builtins/patch_module.impl.py（依赖 self.module_manager）
+  - [x] builtins/save_module.impl.py（依赖 self.module_manager）
+  - [x] builtins/run_code.impl.py
+  - [x] 各工具单元测试 (20 tests)
+  - 状态：✅ 已完成
 
 ### 阶段五：Agent 核心 [待开始]
 
