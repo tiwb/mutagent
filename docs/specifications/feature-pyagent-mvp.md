@@ -133,27 +133,32 @@ class ImplLoader:
         ...
 ```
 
-### 2.3 统一基类
+### 2.3 统一基类与元类
 
-所有 mutagent 核心类继承自统一基类 `mutagent.Object`，而非直接从 `forwardpy.Object` 继承：
+所有 mutagent 核心类继承自 `mutagent.Object`，使用 `MutagentMeta` 元类支持就地类更新：
 
 ```python
 # mutagent/base.py
 import forwardpy
 
-class Object(forwardpy.Object):
-    """mutagent 统一基类，为未来扩展预留能力"""
+class MutagentMeta(forwardpy.ObjectMeta):
+    """支持类的就地重定义（见 2.9.2 节）"""
+    _class_registry: dict[tuple[str, str], type] = {}
+    # ... 详见 2.9.2
+
+class Object(forwardpy.Object, metaclass=MutagentMeta):
+    """mutagent 统一基类，MVP 阶段纯透传"""
     pass
 
 # mutagent/__init__.py
-from mutagent.base import Object
+from mutagent.base import Object, MutagentMeta
 from forwardpy import impl  # 重新导出，统一入口
 ```
 
 **设计考虑**：
 - 所有核心类（`LLMClient`、`Agent`、`Tool` 等）继承 `mutagent.Object`
-- 未来可在 `mutagent.Object` 上添加通用能力（如运行时元数据、序列化等），不影响已有代码
-- `mutagent.impl` 重新导出 `forwardpy.impl`，保持统一的使用入口
+- `MutagentMeta` 扩展 `forwardpy.ObjectMeta`，增加就地类更新能力
+- 未来可在 `mutagent.Object` 上添加通用能力，不影响已有代码
 - forwardpy 作为底层实现细节，对 mutagent 用户透明
 
 ### 2.4 模块结构
@@ -407,33 +412,137 @@ Agent 遇到需要新工具的场景
 - 捕获异常并返回完整 traceback
 - 设置执行超时
 
-### 2.9 运行时模块管理
+### 2.9 Patch 语义（核心设计）
 
-`runtime/module_manager.py` 统一负责：
-- 维护模块索引（已加载模块 + 运行时 patch 的虚拟模块）
-- 模块发现与加载（`importlib` + `pkgutil`）
-- 运行时 patch 执行与历史记录
-- 模块固化（内存 → 文件）
-- 与 forwardpy 注册表交互，追踪声明和实现的对应关系
+**核心原则**：patch 行为等同于"写文件 + 重启"。patch 一个模块后，旧模块的状态被完全替换，而非增量叠加。
 
-### 2.10 运行时源码追踪（核心设计）
+只需要 **mutagent 框架下的类**（继承自 `mutagent.Object`）能正常工作，不需要支持任意 Python 模块。
+
+#### 2.9.1 实现模块的 Patch（`.impl.py`）
+
+实现模块包含 `@impl` 注册。Patch 流程：
+
+```
+patch_module("pkg.foo.impl", new_source):
+  1. forwardpy.unregister_module_impls("pkg.foo.impl")
+     → 移除该模块注册的所有 @impl，方法恢复为 stub 或前一个 impl
+  2. 清空模块命名空间（保留 __name__, __file__ 等系统属性）
+  3. compile(new_source) + exec(code, mod.__dict__)
+     → 新的 @impl 装饰器重新注册实现
+  4. 更新 linecache 为 new_source
+```
+
+**效果**：
+- 新源码中定义的 `@impl` → 注册为新实现
+- 旧源码中有但新源码中没有的 `@impl` → 被卸载，方法恢复为 stub
+- 行为完全等同于删掉旧 `.impl.py`、写入新内容、重新加载
+
+**forwardpy 需要的能力**：
+```python
+# 需要 forwardpy 新增的 API
+forwardpy.unregister_module_impls(module_name: str) -> None
+    """移除指定模块注册的所有 @impl，恢复为 stub 或前一个 impl"""
+
+# 内部实现：@impl 注册时记录来源模块
+# _method_registry[class][method_name] = [(impl_func, source_module), ...]
+# unregister 时按 source_module 过滤移除
+```
+
+#### 2.9.2 声明模块的 Patch（`.py`）
+
+声明模块包含 `mutagent.Object` 子类的定义。Patch 声明的挑战：
+
+**问题**：重新 exec 一个包含 `class Foo(mutagent.Object)` 的模块会创建**新的** Foo 类对象。旧的 `@impl` 注册、`isinstance` 检查、已有实例都指向旧类对象，会全部失效。
+
+**解决方案**：通过 `mutagent.Object` 的元类实现**就地类更新**。
+
+```python
+class MutagentMeta(forwardpy.ObjectMeta):
+    """mutagent 元类：支持类的就地重定义"""
+    _class_registry: dict[tuple[str, str], type] = {}
+
+    def __new__(mcs, name, bases, namespace, **kwargs):
+        module = namespace.get('__module__', '')
+        qualname = namespace.get('__qualname__', name)
+        key = (module, qualname)
+
+        existing = mcs._class_registry.get(key)
+        if existing is not None:
+            # 就地更新已有类，而非创建新对象
+            mcs._update_class_inplace(existing, namespace)
+            return existing  # 返回同一个类对象
+
+        # 首次定义：正常创建
+        cls = super().__new__(mcs, name, bases, namespace)
+        mcs._class_registry[key] = cls
+        return cls
+
+    @staticmethod
+    def _update_class_inplace(cls, new_namespace):
+        """就地更新类：删旧增新改变"""
+        # 1. 收集旧定义（排除系统属性）
+        old_attrs = {k for k in cls.__dict__ if not k.startswith('__')}
+        new_attrs = {k for k in new_namespace if not k.startswith('__')}
+
+        # 2. 删除旧定义中不存在于新定义的属性
+        for attr in old_attrs - new_attrs:
+            delattr(cls, attr)
+
+        # 3. 设置新定义的属性
+        for attr in new_attrs:
+            setattr(cls, attr, new_namespace[attr])
+
+        # 4. 更新 __annotations__
+        if '__annotations__' in new_namespace:
+            cls.__annotations__ = new_namespace['__annotations__']
+
+        # 5. 对新的描述符调用 __set_name__
+        for attr in new_attrs - old_attrs:
+            val = new_namespace[attr]
+            if hasattr(val, '__set_name__'):
+                val.__set_name__(cls, attr)
+```
+
+**效果**：
+- **类对象身份不变**：`id(Agent)` 不变，`isinstance` 正常
+- **已有实例不受影响**：实例的 `__class__` 仍指向同一个类对象
+- **@impl 注册不断裂**：因为类对象没变，之前注册在该类上的 impl 仍然有效
+- **可增删方法和属性**：从声明中移除的 stub 方法被 `delattr`，新增的被 `setattr`
+
+**注意事项**：
+- `mutagent.Object` 不使用 `__slots__`（slots 无法在类创建后修改）
+- 使用 `super()` 的方法需要特殊处理 `__class__` 闭包变量（通过更新现有函数的 `__code__` 而非替换函数对象）
+
+#### 2.9.3 声明模块 Patch 的完整流程
+
+```
+patch_module("pkg.foo", new_source):
+  1. forwardpy.unregister_module_impls("pkg.foo")  # 以防声明模块中有 impl
+  2. 清空模块命名空间（保留系统属性）
+  3. compile(new_source) + exec(code, mod.__dict__)
+     → MutagentMeta.__new__ 拦截类定义：
+       - 已有类：就地更新（删旧增新），返回原对象
+       - 新类：正常创建并注册
+  4. 清理：移除模块中不再存在的旧定义
+  5. 更新 linecache 为 new_source
+```
+
+#### 2.9.4 forwardpy 扩展需求汇总
+
+| 需求 | 说明 | 优先级 |
+|------|------|--------|
+| 模块来源追踪 | `@impl` 注册时记录 `source_module` | MVP 必需 |
+| 模块 impl 卸载 | `unregister_module_impls(module_name)` | MVP 必需 |
+| impl 回退 | 卸载后恢复为 stub 或前一个 impl | MVP 必需 |
+| 就地类更新 | `ObjectMeta` 支持返回已有类（或由 mutagent 扩展元类实现） | MVP 必需 |
+
+这些扩展可以在 forwardpy 中实现，也可以在 mutagent 的扩展元类 `MutagentMeta` 中实现。两个项目可以同步迭代。
+
+### 2.10 运行时模块管理与源码追踪
+
+#### 2.10.1 源码追踪：三层机制
 
 Agent 在运行时生成的代码必须对 Python 的 `inspect` 体系完全透明。
-
-#### 2.10.1 问题背景
-
-Python 的 `inspect.getsource()` 调用链：
-```
-getsource(obj)
-  → getfile(obj)          # 获取文件名
-    - 函数: obj.__code__.co_filename
-    - 类: sys.modules[obj.__module__].__file__
-    - 模块: obj.__file__
-  → linecache.getlines()  # 通过文件名获取源码行
-  → getblock()            # 提取代码块
-```
-
-#### 2.10.2 解决方案：三层机制
 
 | 层 | 机制 | 作用 |
 |---|---|---|
@@ -443,7 +552,7 @@ getsource(obj)
 
 **虚拟文件名格式**：`mutagent://module_path`（不用尖括号 `<>`，避免 linecache 的 `_source_unavailable()` 陷阱）
 
-#### 2.10.3 实现设计
+#### 2.10.2 ModuleManager 实现
 
 ```python
 import types, sys, linecache, importlib.machinery
@@ -460,24 +569,29 @@ class ModuleManager:
         return self._sources.get(fullname)
 
     def patch_module(self, module_path: str, source: str) -> types.ModuleType:
-        """将源码注入运行时，使 inspect.getsource() 透明工作"""
+        """patch = 写文件 + 重启。完全替换模块内容。"""
 
         filename = f"mutagent://{module_path}"
 
-        # 1. 存储源码
+        # 1. 卸载旧模块的所有 @impl 注册
+        forwardpy.unregister_module_impls(module_path)
+
+        # 2. 存储源码
         self._sources[module_path] = source
         self._history.setdefault(module_path, []).append(source)
 
-        # 2. 注入 linecache（mtime=None 防清理）
+        # 3. 注入 linecache（mtime=None 防清理）
         lines = [line + '\n' for line in source.splitlines()]
         linecache.cache[filename] = (len(source), None, lines, filename)
 
-        # 3. 自动创建虚拟父包
+        # 4. 自动创建虚拟父包
         self._ensure_parent_packages(module_path)
 
-        # 4. 创建或获取模块
+        # 5. 创建或重置模块
         if module_path in sys.modules:
             mod = sys.modules[module_path]
+            # 清空命名空间（保留系统属性）
+            self._reset_module_namespace(mod)
         else:
             mod = types.ModuleType(module_path)
             mod.__file__ = filename
@@ -487,11 +601,20 @@ class ModuleManager:
             )
             sys.modules[module_path] = mod
 
-        # 5. 编译并执行（增量叠加到已有命名空间）
+        # 6. 编译并执行（全新命名空间）
         code = compile(source, filename, 'exec')
         exec(code, mod.__dict__)
+        # MutagentMeta 自动处理类的就地更新
 
         return mod
+
+    def _reset_module_namespace(self, mod):
+        """清空模块命名空间，保留系统属性"""
+        keep = {'__name__', '__file__', '__loader__', '__spec__',
+                '__path__', '__package__', '__builtins__'}
+        for key in list(mod.__dict__):
+            if key not in keep:
+                del mod.__dict__[key]
 
     def _ensure_parent_packages(self, module_path: str) -> None:
         """自动创建虚拟父包"""
@@ -500,12 +623,12 @@ class ModuleManager:
             parent = '.'.join(parts[:i])
             if parent not in sys.modules:
                 pkg = types.ModuleType(parent)
-                pkg.__path__ = []  # 标记为 package
+                pkg.__path__ = []
                 pkg.__package__ = parent
                 sys.modules[parent] = pkg
 ```
 
-#### 2.10.4 固化时的过渡
+#### 2.10.3 固化时的过渡
 
 当 `save_module` 将代码写入文件后：
 1. 更新 `mod.__file__` 为实际文件路径
@@ -526,61 +649,59 @@ class ModuleManager:
   - `tool_result` content block → 内部 `ToolResult`
 - **MVP 不做流式**：直接使用普通 POST 请求等待完整响应
 
-### 2.12 设计决策记录
+### 2.13 设计决策记录
 
 | 决策 | 选择 | 理由 |
 |------|------|------|
 | 包名 | `mutagent` | mutation + agent，PyPI 可用 |
-| 统一基类 | `mutagent.Object` | 封装 forwardpy.Object，预留扩展 |
+| 统一基类 | `mutagent.Object`（MVP 纯透传） | 封装 forwardpy.Object，预留扩展 |
 | 声明/实现规范 | `.py` / `.impl.py` | 声明可 import、实现需 loader，天然安全边界 |
+| impl 加载策略 | 启动时全量扫描 | 简单直接，后续可进化 |
 | HTTP 调用 | asyncio + aiohttp | 不依赖 SDK |
-| patch 语义 | 增量叠加（默认） | 支持函数级迭代，也可整模块替换 |
+| **patch 语义** | **完全替换（写文件+重启）** | 简单直观，行为可预测 |
+| 声明 patch | 元类就地更新 | 保持类对象身份，不断裂 @impl |
+| 实现 patch | 先卸载旧 impl 再注册新 impl | 需要 forwardpy 扩展 |
 | 源码追踪 | linecache + loader 协议 | `inspect.getsource()` 透明工作 |
 | 虚拟文件名 | `mutagent://module_path` | 避免尖括号陷阱 |
 | Tool 接口 | 统一 `async def` | 简化设计 |
-| Tool 选择 | ToolSelector（可进化） | 初始返回全部，Agent 可迭代选择逻辑 |
+| Tool 选择 | ToolSelector（可进化） | 初始返回全部，Agent 可迭代 |
 | 安全边界 | 无沙箱，仅超时 | MVP 面向开发者 |
 | 对话持久化 | 不持久化 | MVP 每次全新会话 |
 | 核心抽象 | 模块路径 | `package.module.function` 是第一公民 |
+| 适用范围 | 仅 mutagent 框架类 | 不需要 patch 任意 Python 模块 |
 
 ## 3. 待定问题
 
-### Q1: .impl.py 的发现与加载策略
+### Q1: MutagentMeta 的实现位置
 
-**问题**：`.impl.py` 文件的发现和加载时机是什么？有几种选择：
+**问题**：就地类更新的元类逻辑应该放在哪里？
 
-- **方式 A：启动时全量扫描**：mutagent 启动时扫描所有包目录，自动发现并加载所有 `.impl.py`
-- **方式 B：按需延迟加载**：当首次访问某个 stub 方法时，搜索对应的 `.impl.py` 并加载
-- **方式 C：显式注册**：在 `__init__.py` 或配置中显式列出需要加载的 `.impl.py`
+- **方式 A**：在 forwardpy 的 `ObjectMeta` 中实现——forwardpy 原生支持类重定义
+- **方式 B**：在 mutagent 的 `MutagentMeta(forwardpy.ObjectMeta)` 中实现——mutagent 扩展元类
+- **方式 C**：先在 mutagent 中实现，验证可行后再推入 forwardpy
 
-**建议**：MVP 使用方式 A（启动时全量扫描）——简单直接。mutagent 启动时调用 `ImplLoader.load_all(package_path)` 扫描并加载所有 `.impl.py`。延迟加载可作为后续优化。
-
-同意，这块以后可以进化
-
-### Q2: 增量 patch 的 linecache 一致性
-
-**问题**：当 Agent 对同一模块进行多次增量 patch 时，linecache 中存储的源码与模块实际状态会不一致。例如：
-- 第一次 patch：定义 `func_a` 和 `func_b`（linecache 记录完整源码）
-- 第二次 patch：只重定义 `func_a`（linecache 更新为只含 `func_a` 的新源码）
-- 此时 `inspect.getsource(mod.func_b)` 会失败，因为 linecache 中的新源码不包含 `func_b`
-
-**建议**：每次增量 patch 时，将新代码追加到当前源码末尾，形成完整的累积源码存储到 linecache。这样 `inspect.getsource()` 始终能从累积源码中找到所有定义。但这带来一个副作用：源码中可能有同名函数的多个版本（旧版本在前，新版本在后），`inspect` 会返回第一个匹配。需要进一步思考这个问题。
-
-回答：确实这是一个比较复杂的问题，我觉得我们需要保证patch机制的简单和直观。也就是说，我patch了一个模块以后，行为应该是跟我写文件然后重新启动是一样的。所以，模块里的未定义的函数应该是被卸载的。我觉得基于forwardpy的设计这是能实现的，在重新定义一个模块时，之前模块里override的所有函数可以先卸载，然后被override。这可能需要forwardpy拥有对应的能力。没有关系，只要能实现，我们就可以假设这个模块是拥有的。可以同时迭代forwardpy和mutagent。至于声明文件，帮我想想看有没有方案。
-最重要的是： 我们不需要能够patch任何python模块，只需要在mutagent框架下的类行能正常工作即可。
-
-### Q3: mutagent.Object 的初始扩展
-
-**问题**：`mutagent.Object` 在 MVP 阶段是否需要在 `forwardpy.Object` 基础上添加额外能力，还是先做纯透传？
-
-**建议**：MVP 先做纯透传（`class Object(forwardpy.Object): pass`）。预留的扩展方向包括：
-- 运行时元数据（如创建时间、版本号）
-- 自省增强（快速查看声明与实现的对应关系）
-- 序列化/反序列化支持
-
-先建立规范，后续按需添加。
+**建议**：方式 C——先在 mutagent 中实现 `MutagentMeta`，作为 `forwardpy.ObjectMeta` 的子类。验证设计成熟后再考虑推入 forwardpy。这样两个项目可以独立迭代。
 
 同意
+
+### Q2: super() 的 __class__ 闭包处理
+
+**问题**：当就地更新类的方法时，使用 `super()` 的方法内部有隐式的 `__class__` 闭包变量。直接用 `setattr(cls, 'method', new_func)` 替换会导致 `super()` 失败（新函数缺少 `__class__` cell）。
+
+两种处理方式：
+- **方式 A**：更新现有函数对象的 `__code__`（保留闭包），而非替换函数对象
+- **方式 B**：用 `types.FunctionType` 手动构造带正确 `__class__` cell 的新函数
+
+**建议**：方式 A 更简洁。但 MVP 阶段可以先不处理这个边缘情况——mutagent 的声明文件中 stub 方法本身不太会用 `super()`。实际使用 `super()` 的是 `@impl` 实现，而实现的替换走 forwardpy 的标准机制（unregister + register），不涉及就地类更新。
+
+先记录下这个问题，后续迭代处理。
+
+### 补充说明：
+
+我看到了Tool 统一使用async def，我来确认和对齐下理解：
+1. 内部实现可以认为agent是完全的异步框架。
+2. 实际实现Tool的时候，可以选择异步实现，但如果这个Tool本身同步实现更简单，是否可以允许实现同步接口，然后框架自动异步调用？
+
 
 ## 4. 实施步骤清单
 
@@ -607,21 +728,35 @@ class ModuleManager:
 
 ### 阶段二：运行时核心 [待开始]
 
-- [ ] **Task 2.1**: ModuleManager 核心
+- [ ] **Task 2.1**: forwardpy 扩展（可与 mutagent 并行开发）
+  - [ ] `@impl` 注册时记录 source_module
+  - [ ] 实现 `unregister_module_impls(module_name)`
+  - [ ] impl 卸载后恢复为 stub
+  - [ ] 单元测试
+  - 状态：⏸️ 待开始
+
+- [ ] **Task 2.2**: MutagentMeta 元类
+  - [ ] 实现类注册表 `_class_registry`
+  - [ ] 实现就地类更新 `_update_class_inplace()`
+  - [ ] 确保 `mutagent.Object` 使用 `MutagentMeta` 元类
+  - [ ] 单元测试：类重定义后 `id(cls)` 不变、isinstance 正常、@impl 不断裂
+  - 状态：⏸️ 待开始
+
+- [ ] **Task 2.3**: ModuleManager 核心
+  - [ ] 实现 `patch_module()`（完全替换语义：卸载旧 impl → 清空命名空间 → 编译执行）
   - [ ] 实现 linecache 注入 + `__loader__` 协议
-  - [ ] 实现 `patch_module()`（增量叠加语义）
   - [ ] 实现 patch 历史追踪
   - [ ] 实现虚拟父包自动创建
   - [ ] 单元测试：`inspect.getsource()` 对 patch 后的函数/类/模块正常工作
   - 状态：⏸️ 待开始
 
-- [ ] **Task 2.2**: ImplLoader
+- [ ] **Task 2.4**: ImplLoader
   - [ ] 实现 `.impl.py` 文件发现
   - [ ] 实现加载与 `@impl` 注册
   - [ ] 单元测试
   - 状态：⏸️ 待开始
 
-- [ ] **Task 2.3**: 模块固化
+- [ ] **Task 2.5**: 模块固化
   - [ ] 实现 `save_module()`（内存 → 文件）
   - [ ] 实现固化过渡（更新 `__file__`、`co_filename`、linecache）
   - [ ] 单元测试
@@ -677,10 +812,16 @@ class ModuleManager:
 ## 5. 测试验证
 
 ### 单元测试
-- [ ] mutagent.Object 基类继承
+- [ ] mutagent.Object 基类继承（MutagentMeta 生效）
+- [ ] MutagentMeta: 类重定义后 id 不变
+- [ ] MutagentMeta: 重定义后 isinstance 正常
+- [ ] MutagentMeta: 重定义后 @impl 不断裂
+- [ ] MutagentMeta: 增删属性和方法
+- [ ] forwardpy 扩展: unregister_module_impls
+- [ ] forwardpy 扩展: impl 卸载后恢复 stub
 - [ ] 消息模型序列化/反序列化
+- [ ] ModuleManager: patch 完全替换语义
 - [ ] ModuleManager: patch → inspect.getsource() 验证
-- [ ] ModuleManager: 多次增量 patch
 - [ ] ModuleManager: 固化过渡（虚拟 → 文件）
 - [ ] ModuleManager: 虚拟父包创建
 - [ ] ImplLoader: .impl.py 发现与加载
