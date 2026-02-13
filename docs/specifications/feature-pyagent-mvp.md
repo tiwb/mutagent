@@ -41,9 +41,9 @@
 │                        ┌─────────────────────┤              │
 │                        │                     │              │
 │              ┌─────────┴────────┐  ┌─────────┴────────┐    │
-│              │   Core Modules   │  │  Agent-Created   │    │
-│              │   (核心原语)      │  │    Modules       │    │
-│              │                  │  │  (Agent 创建的)   │    │
+│              │   Essential      │  │  Agent-Created   │    │
+│              │   Tools          │  │    Modules       │    │
+│              │  (最小工具集)     │  │  (Agent 创建的)   │    │
 │              │  inspect_module  │  │                  │    │
 │              │  view_source     │  │  (运行时动态     │    │
 │              │  patch_module    │  │   生成和迭代)    │    │
@@ -79,30 +79,27 @@ mutagent 建立在 forwardpy 的声明-实现分离之上，并制定更严格�
 
 声明和实现文件可以灵活组织：
 
-**方式 A：同目录**
+**方式 A：mutagent 的组织方式（声明扁平 + builtins 集中实现）**
 ```
 mutagent/
-├── agent/
-│   ├── core.py              # 声明：class Agent(mutagent.Object): ...
-│   └── core.impl.py         # 实现：@impl(Agent.run) def run(...): ...
+├── agent.py                # 声明：class Agent(mutagent.Object): ...
+├── builtins/
+│   └── agent.impl.py      # 实现：@impl(Agent.run) def run(...): ...
 ```
 
-**方式 B：分离目录**
+**方式 B：同目录（用户项目可选）**
 ```
-mutagent/
-├── agent/
-│   └── core.py              # 声明
-├── _impl/
-│   └── agent/
-│       └── core.impl.py     # 实现（可在不同包中）
+myproject/
+├── processor.py            # 声明
+└── processor.impl.py       # 实现
 ```
 
 **方式 C：Agent 运行时生成**
 ```
 # Agent 在运行时 patch 一个实现，无需文件
-manager.patch_module("mutagent._impl.agent.core", source="""
+manager.patch_module("mutagent.builtins.agent", source="""
 import mutagent
-from mutagent.agent.core import Agent
+from mutagent.agent import Agent
 
 @mutagent.impl(Agent.run, override=True)
 async def run(self: Agent, user_input: str) -> str:
@@ -156,7 +153,7 @@ from forwardpy import impl  # 重新导出，统一入口
 ```
 
 **设计考虑**：
-- 所有核心类（`LLMClient`、`Agent`、`Tool` 等）继承 `mutagent.Object`
+- 所有核心类（`LLMClient`、`Agent`、`ToolSelector`、`EssentialTools` 等）继承 `mutagent.Object`
 - `MutagentMeta` 扩展 `forwardpy.ObjectMeta`，增加就地类更新能力
 - 未来可在 `mutagent.Object` 上添加通用能力，不影响已有代码
 - forwardpy 作为底层实现细节，对 mutagent 用户透明
@@ -165,41 +162,40 @@ from forwardpy import impl  # 重新导出，统一入口
 
 ```
 mutagent/
-├── __init__.py               # 导出 Object, impl 等核心接口
-├── base.py                   # mutagent.Object 统一基类
-├── client/
+├── __init__.py              # 导出 Object, impl 等核心接口
+├── base.py                  # mutagent.Object + MutagentMeta
+├── agent.py                 # Agent 声明
+├── selector.py              # ToolSelector 声明
+├── essential_tools.py       # EssentialTools 声明（最小工具集）
+├── client.py                # LLMClient 声明
+├── messages.py              # 消息模型定义（Message, ToolCall, ToolResult, Response, ToolSchema）
+├── builtins/                # 所有默认实现（框架的"默认人格"，全部可被 Agent 替换）
 │   ├── __init__.py
-│   ├── base.py               # LLMClient 声明
-│   ├── messages.py           # 消息模型定义
-│   └── claude.impl.py        # Claude API 实现
-├── agent/
-│   ├── __init__.py
-│   ├── core.py               # Agent 声明
-│   └── core.impl.py          # Agent 主循环实现
-├── tools/
-│   ├── __init__.py
-│   ├── core.py               # CoreTools 声明（所有内置工具的方法声明）
-│   ├── selector.py           # ToolSelector 声明（Agent 与工具的唯一桥梁）
-│   ├── selector.impl.py      # 初始工具选择与调度实现（Agent 可迭代）
-│   └── builtins/             # CoreTools 各方法的 @impl 实现
-│       ├── __init__.py
-│       ├── inspect_module.impl.py
-│       ├── view_source.impl.py
-│       ├── patch_module.impl.py
-│       ├── save_module.impl.py
-│       └── run_code.impl.py
-└── runtime/
+│   ├── agent.impl.py        # Agent.run, Agent.step, Agent.handle_tool_calls
+│   ├── selector.impl.py     # ToolSelector.get_tools, ToolSelector.dispatch
+│   ├── claude.impl.py       # LLMClient.send_message (Claude API)
+│   ├── inspect_module.impl.py   # EssentialTools.inspect_module
+│   ├── view_source.impl.py      # EssentialTools.view_source
+│   ├── patch_module.impl.py     # EssentialTools.patch_module
+│   ├── save_module.impl.py      # EssentialTools.save_module
+│   └── run_code.impl.py         # EssentialTools.run_code
+└── runtime/                 # 基础设施（非典型 Agent patch 目标）
     ├── __init__.py
-    ├── module_manager.py      # 模块管理（patch、固化、源码追踪）
-    └── impl_loader.py         # .impl.py 文件发现与加载
+    ├── module_manager.py    # ModuleManager（patch、固化、源码追踪）
+    └── impl_loader.py       # ImplLoader（.impl.py 发现与加载）
 ```
+
+**目录分层**：
+- `mutagent/*.py` — 所有声明（Agent 浏览 `inspect_module("mutagent")` 一次看全）
+- `mutagent/builtins/` — 所有默认实现（Agent 可逐个或全部替换）
+- `mutagent/runtime/` — 基础设施层（ModuleManager, ImplLoader）
 
 ### 2.5 LLM Client 层
 
 使用 asyncio + aiohttp 直接发送 HTTP 请求，不依赖任何 LLM SDK。
 
 ```python
-# client/base.py - 声明
+# mutagent/client.py - 声明
 import mutagent
 
 class LLMClient(mutagent.Object):
@@ -210,9 +206,9 @@ class LLMClient(mutagent.Object):
 
     async def send_message(self, messages: list[Message], tools: list[ToolSchema]) -> Response: ...
 
-# client/claude.impl.py - Claude 实现
+# mutagent/builtins/claude.impl.py - Claude 实现
 import mutagent
-from mutagent.client.base import LLMClient
+from mutagent.client import LLMClient
 
 @mutagent.impl(LLMClient.send_message)
 async def send_message(self: LLMClient, messages, tools):
@@ -230,7 +226,7 @@ async def send_message(self: LLMClient, messages, tools):
             return Response.from_claude(data)
 ```
 
-**消息模型**（`client/messages.py`）：
+**消息模型**（`mutagent/messages.py`）：
 - `Message`：统一消息格式（role, content, tool_calls, tool_results）
 - `ToolCall`：LLM 发起的工具调用（tool_name, arguments, id）
 - `ToolResult`：工具执行结果（tool_call_id, content, is_error）
@@ -242,7 +238,7 @@ async def send_message(self: LLMClient, messages, tools):
 Agent 负责管理对话循环。全部使用 async 接口。
 
 ```python
-# agent/core.py - 声明
+# mutagent/agent.py - 声明
 import mutagent
 
 class Agent(mutagent.Object):
@@ -283,16 +279,16 @@ mutagent 不定义"什么是工具"。**ToolSelector 决定如何发现、呈现
 - **传统框架**：定义 Tool 基类 → 实现者继承 → 注册到 Registry → 框架统一调用 `tool.execute()`
 - **mutagent 设计**：工具是 mutagent.Object 子类上的方法 → **ToolSelector 决定如何发现、呈现和调用它们** → 没有强制的公共接口
 
-#### 2.7.2 CoreTools — 内置工具声明
+#### 2.7.2 EssentialTools — 内置工具声明
 
-核心内置工具组织为一个 `mutagent.Object` 子类，每个工具是一个独立的方法声明：
+内置工具组织为一个 `mutagent.Object` 子类，每个工具是一个独立的方法声明。"Essential" 表达**当前不可缺少的最小集**，但不暗示永恒不变——Agent 可以进化甚至替换这些工具。
 
 ```python
-# tools/core.py — 声明
+# mutagent/essential_tools.py — 声明
 import mutagent
 
-class CoreTools(mutagent.Object):
-    """核心工具原语 — Agent 的最小操作集
+class EssentialTools(mutagent.Object):
+    """必要工具原语 — Agent 进化的最小操作集
 
     每个方法是一个独立的工具声明。Agent 可以通过 @impl override 替换任何工具的实现，
     也可以 patch 这个类来增删工具方法。
@@ -307,26 +303,26 @@ class CoreTools(mutagent.Object):
 ```
 
 **设计要点**：
-- **每个方法独立 patchable**：`@impl(CoreTools.inspect_module, override=True)` 只替换一个工具
+- **每个方法独立 patchable**：`@impl(EssentialTools.inspect_module, override=True)` 只替换一个工具
 - **依赖在实例上**：`module_manager` 作为属性，方法实现通过 `self.module_manager` 访问
-- **声明即 API**：Agent 通过 `view_source("mutagent.tools.core.CoreTools")` 看到所有可用工具
-- **可扩展**：Agent 可以 patch CoreTools 声明来增加新方法，也可以创建全新的工具类
+- **声明即 API**：Agent 通过 `view_source("mutagent.essential_tools.EssentialTools")` 看到所有可用工具
+- **可扩展**：Agent 可以 patch EssentialTools 声明来增加新方法，也可以创建全新的工具类
 
 实现按工具拆分为独立 `.impl.py` 文件，每个工具可独立替换：
 
 ```python
-# tools/builtins/inspect_module.impl.py
+# mutagent/builtins/inspect_module.impl.py
 import mutagent
-from mutagent.tools.core import CoreTools
+from mutagent.essential_tools import EssentialTools
 
-@mutagent.impl(CoreTools.inspect_module)
-def inspect_module(self: CoreTools, module_path="", depth=2):
+@mutagent.impl(EssentialTools.inspect_module)
+def inspect_module(self: EssentialTools, module_path="", depth=2):
     # 使用 importlib + inspect 遍历模块
     ...
 
-# tools/builtins/patch_module.impl.py
-@mutagent.impl(CoreTools.patch_module)
-def patch_module(self: CoreTools, module_path: str, source: str):
+# mutagent/builtins/patch_module.impl.py
+@mutagent.impl(EssentialTools.patch_module)
+def patch_module(self: EssentialTools, module_path: str, source: str):
     return self.module_manager.patch_module(module_path, source)
     # ModuleManager 通过 self 访问，无需外部注入
 ```
@@ -336,7 +332,7 @@ def patch_module(self: CoreTools, module_path: str, source: str):
 ToolSelector 是框架中唯一定义的工具相关抽象。它全部使用 async 接口，因为工具选择本身可能涉及 LLM 推理（分析需要什么工具、查询现有工具集、决定是否创造新工具）。
 
 ```python
-# tools/selector.py - 声明
+# mutagent/selector.py - 声明
 import mutagent
 
 class ToolSelector(mutagent.Object):
@@ -354,21 +350,21 @@ class ToolSelector(mutagent.Object):
 ```
 
 ```python
-# tools/selector.impl.py - MVP 初始实现
+# mutagent/builtins/selector.impl.py - MVP 初始实现
 import mutagent
-from mutagent.tools.selector import ToolSelector
+from mutagent.selector import ToolSelector
 
 @mutagent.impl(ToolSelector.get_tools)
 async def get_tools(self: ToolSelector, context: dict) -> list[ToolSchema]:
-    """MVP：从 CoreTools 的方法签名自动生成 schema"""
-    return make_schemas_from_methods(self.core_tools, [
+    """MVP：从 EssentialTools 的方法签名自动生成 schema"""
+    return make_schemas_from_methods(self.essential_tools, [
         'inspect_module', 'view_source', 'patch_module', 'save_module', 'run_code'
     ])
 
 @mutagent.impl(ToolSelector.dispatch)
 async def dispatch(self: ToolSelector, tool_call: ToolCall) -> ToolResult:
-    """MVP：直接调用 CoreTools 上的对应方法"""
-    method = getattr(self.core_tools, tool_call.name)
+    """MVP：直接调用 EssentialTools 上的对应方法"""
+    method = getattr(self.essential_tools, tool_call.name)
     try:
         result = method(**tool_call.arguments)
         if asyncio.iscoroutine(result):
@@ -382,12 +378,12 @@ async def dispatch(self: ToolSelector, tool_call: ToolCall) -> ToolResult:
 
 ```
 v0（MVP）
-  CoreTools 声明 5 个核心方法
-  ToolSelector.get_tools → 从 CoreTools 方法签名生成 schema
-  ToolSelector.dispatch  → getattr(core_tools, name)(**args)
+  EssentialTools 声明 5 个必要方法
+  ToolSelector.get_tools → 从 EssentialTools 方法签名生成 schema
+  ToolSelector.dispatch  → getattr(essential_tools, name)(**args)
 
 v1（Agent 迭代工具实现）
-  → @impl(CoreTools.inspect_module, override=True) 替换某个工具的实现
+  → @impl(EssentialTools.inspect_module, override=True) 替换某个工具的实现
   → 工具变得更智能，但声明不变
 
 v2（Agent 创建新工具类）
@@ -423,7 +419,7 @@ Agent 遇到需要新工具的场景
 
 ### 2.8 内置工具（核心原语）
 
-这些是 Agent 的最小操作集，是所有高级能力的基础。它们是 `CoreTools` 类上的**方法声明**，实现通过 `@impl` 注册在独立的 `.impl.py` 文件中。
+这些是 Agent 的最小操作集，是所有高级能力的基础。它们是 `EssentialTools` 类上的**方法声明**，实现通过 `@impl` 注册在 `builtins/` 的独立 `.impl.py` 文件中。
 
 核心工作流：`inspect_module` → `view_source` → `patch_module` → `run_code`（验证）→ `save_module`（固化）
 
@@ -434,7 +430,7 @@ Agent 遇到需要新工具的场景
 **参数**：
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| `module_path` | `str` | 可选，模块路径如 `mutagent.tools.base`，不填则从根模块开始 |
+| `module_path` | `str` | 可选，模块路径如 `mutagent.essential_tools`，不填则从根模块开始 |
 | `depth` | `int` | 展开深度，默认 2 |
 
 **实现要点**：
@@ -449,7 +445,7 @@ Agent 遇到需要新工具的场景
 **参数**：
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| `target` | `str` | 目标路径，如 `mutagent.agent.core.Agent` |
+| `target` | `str` | 目标路径，如 `mutagent.agent.Agent` |
 
 **实现要点**：
 - 直接使用 `inspect.getsource()` — 运行时 patch 的代码通过 linecache 机制透明支持（见 2.10 节）
@@ -746,7 +742,8 @@ class ModuleManager:
 | 包名 | `mutagent` | mutation + agent，PyPI 可用 |
 | 统一基类 | `mutagent.Object`（MVP 纯透传） | 封装 forwardpy.Object，预留扩展 |
 | 声明/实现规范 | `.py` / `.impl.py` | 声明可 import、实现需 loader，天然安全边界 |
-| impl 加载策略 | 启动时全量扫描 | 简单直接，后续可进化 |
+| 目录结构 | 声明扁平（`mutagent/*.py`） + 实现集中（`builtins/`） | Agent 一次 inspect 看全声明，实现统一管理 |
+| impl 加载策略 | 启动时全量扫描 builtins/ | 简单直接，后续可进化 |
 | HTTP 调用 | asyncio + aiohttp | 不依赖 SDK |
 | **patch 语义** | **完全替换（写文件+重启）** | 简单直观，行为可预测 |
 | 声明 patch | MutagentMeta 就地更新 | 保持类对象身份，先在 mutagent 实现 |
@@ -754,148 +751,18 @@ class ModuleManager:
 | 源码追踪 | linecache + loader 协议 | `inspect.getsource()` 透明工作 |
 | 虚拟文件名 | `mutagent://module_path` | 避免尖括号陷阱 |
 | Tool 接口 | 无公共基类，工具是 mutagent.Object 子类的方法 | 声明可被 patch，符合框架核心理念 |
+| Tool 命名 | `EssentialTools`（非 CoreTools） | "Essential" = 当前必要但可进化替换 |
 | Tool 调用 | ToolSelector.dispatch 内部决定 | 调用方式也是可进化的实现细节 |
-| Tool 组织 | CoreTools 类 + 独立 .impl.py | 声明集中，实现分散，各自独立可替换 |
+| Tool 选择 | ToolSelector（async，可进化） | 唯一桥梁，可进化为 LLM 驱动 |
+| Schema 生成 | 从方法签名 + docstring 自动生成 | ToolSelector 实现的内部工具，非框架规范 |
 | 安全边界 | 无沙箱，仅超时 | MVP 面向开发者 |
 | 对话持久化 | 不持久化 | MVP 每次全新会话 |
 | 核心抽象 | 模块路径 | `package.module.function` 是第一公民 |
 | 适用范围 | 仅 mutagent 框架类 | 不需要 patch 任意 Python 模块 |
 
-## 3. 待定问题
+## 3. 已解决问题
 
-### Q1: ~~Schema 生成策略~~ → ✅ 已确认
-
-从方法签名 + docstring 自动生成 ToolSchema。`make_schemas_from_methods()` 是 ToolSelector 默认实现的内部工具，不是框架规范。
-
-### Q2: CoreTools → EssentialTools 命名
-
-**背景**：用户提议将 `CoreTools` 改名为 `EssentialTools`，理由：这些工具定义了 Agent 进化的最小工具集，未来有可能被替换。
-
-**分析**：
-
-| 名称 | 含义 | 暗示 |
-|------|------|------|
-| `CoreTools` | 核心工具 | 永久的、不可替换的中心 |
-| `EssentialTools` | 必要工具 | 当前必要的最小集，但可进化替换 |
-| `PrimitiveTools` | 原语工具 | 最底层构建块 |
-| `BootstrapTools` | 引导工具 | 仅用于启动阶段 |
-
-**结论**：`EssentialTools` 比 `CoreTools` 更准确。
-
-- "Essential" 传达了"当前不可缺少"的语义，但不暗示永恒不变
-- 与框架理念一致：一切可进化，包括最基础的工具集
-- Agent 在 v2+ 阶段可能创造更好的工具来替代这些原始版本
-- "Core" 容易让人误以为这些工具享有特殊地位或保护，实际上它们和 Agent 创建的工具在框架层面完全平等
-
-**建议**：采用 `EssentialTools`。
-
-同意
-
-### Q3: selector.impl.py 是否也应放入 builtins/
-
-**背景**：`selector.impl.py` 本质上和 `inspect_module.impl.py` 一样，都是某个声明类方法的 `@impl` 实现。
-
-**分析**：
-
-当前 `selector.impl.py` 单独放在 `tools/` 下，但与 `builtins/` 中的 impl 文件没有本质区别：
-
-| 文件 | 为谁提供 impl | 可被 Agent 替换？ |
-|------|-------------|-----------------|
-| `selector.impl.py` | `ToolSelector.get_tools`, `ToolSelector.dispatch` | 是 |
-| `inspect_module.impl.py` | `EssentialTools.inspect_module` | 是 |
-| `core.impl.py` (agent) | `Agent.run`, `Agent.step` | 是 |
-| `claude.impl.py` (client) | `LLMClient.send_message` | 是 |
-
-它们全部是"框架的默认实现"，全部可被 Agent 通过 `@impl(override=True)` 替换。
-
-**结论**：应该放入 builtins/。进一步说，**所有框架自带的 `.impl.py` 都应该放入 builtins/**，包括 `agent/core.impl.py` 和 `client/claude.impl.py`。这样形成一个清晰的分层：
-
-- **声明文件**（`.py`）= 稳定的接口契约，散布在逻辑位置
-- **builtins/**（`.impl.py`）= 框架自带的默认实现集，全部可替换
-
-好处：
-1. Agent 知道：声明 = 要理解的 API，builtins/ = 可改进的实现
-2. "禁用所有默认实现" = 不加载 builtins/
-3. 统一的心智模型：builtins 是框架的"默认人格"
-
-确认
-
-### Q4: 是否合并 agent/ 和 tools/ 目录
-
-**背景**：用户提议不再分 `agent/` 和 `tools/` 两个目录。`agent/core.py` 是 Agent 声明，所有默认实现都放在 `builtins/` 里。
-
-**分析**：
-
-如果 Q3 的结论成立（所有 impl 进 builtins/），那么 `agent/` 目录下只剩 `core.py` 一个声明文件，`tools/` 目录下也只剩声明文件。子目录的存在意义变弱。
-
-**方案 A：声明扁平化 + builtins/ 集中实现**
-
-```
-mutagent/
-├── __init__.py              # 导出 Object, impl
-├── base.py                  # mutagent.Object + MutagentMeta
-├── agent.py                 # Agent 声明
-├── selector.py              # ToolSelector 声明
-├── essential_tools.py       # EssentialTools 声明
-├── client.py                # LLMClient 声明
-├── messages.py              # 消息模型（dataclass，非 mutagent.Object）
-├── builtins/                # 所有默认实现
-│   ├── __init__.py
-│   ├── agent.impl.py        # Agent.run, Agent.step 等
-│   ├── selector.impl.py     # ToolSelector.get_tools, dispatch
-│   ├── claude.impl.py       # LLMClient.send_message (Claude)
-│   ├── inspect_module.impl.py
-│   ├── view_source.impl.py
-│   ├── patch_module.impl.py
-│   ├── save_module.impl.py
-│   └── run_code.impl.py
-└── runtime/                 # 基础设施（非典型 patch 目标）
-    ├── __init__.py
-    ├── module_manager.py    # ModuleManager
-    └── impl_loader.py       # ImplLoader
-```
-
-**方案 B：保持子目录，但 impl 集中**
-
-```
-mutagent/
-├── __init__.py
-├── base.py
-├── agent/
-│   └── core.py              # Agent 声明（目录下只有声明）
-├── tools/
-│   ├── selector.py          # ToolSelector 声明
-│   └── essential_tools.py   # EssentialTools 声明
-├── client/
-│   ├── base.py              # LLMClient 声明
-│   └── messages.py
-├── builtins/                # 所有 impl
-│   └── ...
-└── runtime/
-    └── ...
-```
-
-**对比**：
-
-| 维度 | 方案 A（扁平） | 方案 B（子目录） |
-|------|---------------|-----------------|
-| 声明文件位置 | 包根目录，一眼看全 | 分散在子目录，逻辑分组 |
-| Agent 浏览成本 | 低 — `inspect_module("mutagent")` 直接看到所有声明 | 需要递归查看子包 |
-| 文件数量 | 根下 6 个 .py | 根下 1 个，子目录各 1-2 个 |
-| 未来扩展 | 声明变多后根目录拥挤 | 天然按领域分组 |
-| 与 forwardpy 风格 | forwardpy 自身是扁平的 | — |
-
-**建议**：方案 A（扁平声明）。理由：
-
-1. **Agent 友好**：Agent 做 `inspect_module("mutagent")` 一次就能看到所有核心声明（Agent, ToolSelector, EssentialTools, LLMClient），不用递归探索子包
-2. **MVP 规模**：当前只有 ~6 个声明文件，扁平完全可控
-3. **心智模型简洁**：`mutagent/*.py` = 所有声明，`mutagent/builtins/` = 所有默认实现，`mutagent/runtime/` = 基础设施
-4. **forwardpy 一致**：forwardpy 自身也是扁平结构
-5. **未来可演化**：如果声明文件增多到需要分组，Agent 可以自己重构目录结构
-
-`runtime/` 保持独立目录，因为 `ModuleManager` 和 `ImplLoader` 是基础设施层，不是典型的 Agent patch 目标（虽然理论上也可以 patch）。
-
-确认
+所有设计问题已澄清并确认，决策已记录在 2.13 节。无待定问题。
 
 ## 4. 实施步骤清单
 
@@ -909,14 +776,14 @@ mutagent/
 ### 阶段一：项目基础设施 [待开始]
 
 - [ ] **Task 1.1**: 初始化项目结构
-  - [ ] 创建 mutagent 包目录结构（按 2.4 节）
+  - [ ] 创建 mutagent 包目录结构（按 2.4 节：扁平声明 + builtins/ + runtime/）
   - [ ] 配置 pyproject.toml（依赖：forwardpy, aiohttp）
-  - [ ] 实现 `mutagent.Object` 统一基类
+  - [ ] 实现 `mutagent.Object` 统一基类（base.py）
   - [ ] 创建 `__init__.py`（导出 Object, impl）
   - 状态：⏸️ 待开始
 
 - [ ] **Task 1.2**: 消息模型定义
-  - [ ] 定义 Message、ToolCall、ToolResult、Response、ToolSchema
+  - [ ] 定义 Message、ToolCall、ToolResult、Response、ToolSchema（messages.py）
   - [ ] 单元测试
   - 状态：⏸️ 待开始
 
@@ -959,12 +826,12 @@ mutagent/
 ### 阶段三：LLM Client [待开始]
 
 - [ ] **Task 3.1**: LLM Client 声明
-  - [ ] 实现 LLMClient 声明（base.py）
+  - [ ] 实现 LLMClient 声明（client.py）
   - [ ] 定义 async 接口方法签名
   - 状态：⏸️ 待开始
 
 - [ ] **Task 3.2**: Claude 实现
-  - [ ] 使用 aiohttp 直接调用 Claude Messages API（claude.impl.py）
+  - [ ] 使用 aiohttp 直接调用 Claude Messages API（builtins/claude.impl.py）
   - [ ] 实现消息格式转换
   - [ ] 实现 tool schema 格式转换
   - [ ] 集成测试
@@ -972,34 +839,34 @@ mutagent/
 
 ### 阶段四：Tool 系统 [待开始]
 
-- [ ] **Task 4.1**: CoreTools 声明与 ToolSelector
-  - [ ] 实现 CoreTools 声明（tools/core.py：5 个工具方法声明）
-  - [ ] 实现 ToolSelector 声明（tools/selector.py：get_tools + dispatch，全部 async）
+- [ ] **Task 4.1**: EssentialTools 声明与 ToolSelector
+  - [ ] 实现 EssentialTools 声明（essential_tools.py：5 个工具方法声明）
+  - [ ] 实现 ToolSelector 声明（selector.py：get_tools + dispatch，全部 async）
   - [ ] 实现 schema 自动生成（从方法签名 + docstring → ToolSchema）
-  - [ ] 实现 ToolSelector MVP 实现（selector.impl.py）
+  - [ ] 实现 ToolSelector MVP 实现（builtins/selector.impl.py）
   - [ ] 单元测试
   - 状态：⏸️ 待开始
 
-- [ ] **Task 4.2**: CoreTools 各方法实现
-  - [ ] inspect_module.impl.py
-  - [ ] view_source.impl.py
-  - [ ] patch_module.impl.py（依赖 self.module_manager）
-  - [ ] save_module.impl.py（依赖 self.module_manager）
-  - [ ] run_code.impl.py
+- [ ] **Task 4.2**: EssentialTools 各方法实现
+  - [ ] builtins/inspect_module.impl.py
+  - [ ] builtins/view_source.impl.py
+  - [ ] builtins/patch_module.impl.py（依赖 self.module_manager）
+  - [ ] builtins/save_module.impl.py（依赖 self.module_manager）
+  - [ ] builtins/run_code.impl.py
   - [ ] 各工具单元测试
   - 状态：⏸️ 待开始
 
 ### 阶段五：Agent 核心 [待开始]
 
 - [ ] **Task 5.1**: Agent 声明与实现
-  - [ ] 实现 Agent 声明（core.py）
-  - [ ] 实现 agent 异步主循环（core.impl.py）
+  - [ ] 实现 Agent 声明（agent.py）
+  - [ ] 实现 Agent 异步主循环（builtins/agent.impl.py）
   - [ ] 单元测试（mock LLM）
   - 状态：⏸️ 待开始
 
 - [ ] **Task 5.2**: 端到端集成
   - [ ] 组装所有组件
-  - [ ] ImplLoader 加载所有 .impl.py
+  - [ ] ImplLoader 加载 builtins/ 下所有 .impl.py
   - [ ] 实现 main.py 入口
   - [ ] 端到端测试：Agent 查看模块 → patch 代码 → 执行验证 → 固化文件
   - 状态：⏸️ 待开始
@@ -1021,9 +888,9 @@ mutagent/
 - [ ] ModuleManager: 虚拟父包创建
 - [ ] ImplLoader: .impl.py 发现与加载
 - [ ] Schema 自动生成（方法签名 → ToolSchema，self 排除）
-- [ ] ToolSelector: get_tools 从 CoreTools 生成 schema
-- [ ] ToolSelector: dispatch 正确路由到 CoreTools 方法
-- [ ] CoreTools: 各方法 @impl 功能测试
+- [ ] ToolSelector: get_tools 从 EssentialTools 生成 schema
+- [ ] ToolSelector: dispatch 正确路由到 EssentialTools 方法
+- [ ] EssentialTools: 各方法 @impl 功能测试
 - [ ] Agent 主循环（mock LLM 响应）
 
 ### 集成测试
