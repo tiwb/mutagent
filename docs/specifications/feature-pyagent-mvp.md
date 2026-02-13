@@ -659,11 +659,12 @@ class ModuleManager:
 | impl 加载策略 | 启动时全量扫描 | 简单直接，后续可进化 |
 | HTTP 调用 | asyncio + aiohttp | 不依赖 SDK |
 | **patch 语义** | **完全替换（写文件+重启）** | 简单直观，行为可预测 |
-| 声明 patch | 元类就地更新 | 保持类对象身份，不断裂 @impl |
+| 声明 patch | MutagentMeta 就地更新 | 保持类对象身份，先在 mutagent 实现 |
 | 实现 patch | 先卸载旧 impl 再注册新 impl | 需要 forwardpy 扩展 |
 | 源码追踪 | linecache + loader 协议 | `inspect.getsource()` 透明工作 |
 | 虚拟文件名 | `mutagent://module_path` | 避免尖括号陷阱 |
-| Tool 接口 | 统一 `async def` | 简化设计 |
+| Tool 接口 | 统一 `async def` 声明 | Agent 是完全异步框架 |
+| Tool 实现 | 允许 sync/async 实现 | 框架自动检测和包装 |
 | Tool 选择 | ToolSelector（可进化） | 初始返回全部，Agent 可迭代 |
 | 安全边界 | 无沙箱，仅超时 | MVP 面向开发者 |
 | 对话持久化 | 不持久化 | MVP 每次全新会话 |
@@ -672,35 +673,49 @@ class ModuleManager:
 
 ## 3. 待定问题
 
-### Q1: MutagentMeta 的实现位置
+### Q1: Tool 的同步/异步实现灵活性
 
-**问题**：就地类更新的元类逻辑应该放在哪里？
+**问题**：Tool 的声明接口是 `async def execute(...)`，但某些工具（如 `inspect_module`、`view_source`）本质是同步操作。是否允许实现者提供同步函数，由框架自动处理？
 
-- **方式 A**：在 forwardpy 的 `ObjectMeta` 中实现——forwardpy 原生支持类重定义
-- **方式 B**：在 mutagent 的 `MutagentMeta(forwardpy.ObjectMeta)` 中实现——mutagent 扩展元类
-- **方式 C**：先在 mutagent 中实现，验证可行后再推入 forwardpy
+**背景**：
+- Agent 内部是完全的异步框架（确认）
+- 但强制所有 tool 实现都写 `async def` 是不必要的负担
 
-**建议**：方式 C——先在 mutagent 中实现 `MutagentMeta`，作为 `forwardpy.ObjectMeta` 的子类。验证设计成熟后再考虑推入 forwardpy。这样两个项目可以独立迭代。
+**方案分析**：
 
-同意
+| 方案 | 做法 | 优缺点 |
+|------|------|--------|
+| A | 全部 `async def`，同步操作直接在 async 函数中执行 | 简单一致，但每个 impl 都要写 `async def` |
+| B | 框架自动检测：sync impl 自动包装为 async | 实现者更灵活，框架稍复杂 |
+| C | 声明接口为普通 `def`，框架统一处理 | 失去异步语义提示 |
 
-### Q2: super() 的 __class__ 闭包处理
+**建议**：方案 B——框架在调用 `tool.execute()` 时自动检测：
 
-**问题**：当就地更新类的方法时，使用 `super()` 的方法内部有隐式的 `__class__` 闭包变量。直接用 `setattr(cls, 'method', new_func)` 替换会导致 `super()` 失败（新函数缺少 `__class__` cell）。
+```python
+# Agent 调用 tool 时
+result = tool.execute(**params)
+if asyncio.iscoroutine(result):
+    result = await result
+```
 
-两种处理方式：
-- **方式 A**：更新现有函数对象的 `__code__`（保留闭包），而非替换函数对象
-- **方式 B**：用 `types.FunctionType` 手动构造带正确 `__class__` cell 的新函数
+或者在 forwardpy 的 `@impl` 注册时自动处理——当声明是 `async def` 但实现是 `def` 时，自动包装为 async wrapper：
 
-**建议**：方式 A 更简洁。但 MVP 阶段可以先不处理这个边缘情况——mutagent 的声明文件中 stub 方法本身不太会用 `super()`。实际使用 `super()` 的是 `@impl` 实现，而实现的替换走 forwardpy 的标准机制（unregister + register），不涉及就地类更新。
+```python
+# 声明
+class InspectModuleTool(mutagent.Object):
+    async def execute(self, **params) -> str: ...
 
-先记录下这个问题，后续迭代处理。
+# 实现可以是同步的
+@mutagent.impl(InspectModuleTool.execute)
+def execute(self: InspectModuleTool, **params) -> str:
+    return inspect_module(params['module_path'])  # 同步代码
 
-### 补充说明：
+# 框架自动包装，调用时 await 正常工作
+```
 
-我看到了Tool 统一使用async def，我来确认和对齐下理解：
-1. 内部实现可以认为agent是完全的异步框架。
-2. 实际实现Tool的时候，可以选择异步实现，但如果这个Tool本身同步实现更简单，是否可以允许实现同步接口，然后框架自动异步调用？
+这样实现者可以根据实际情况选择 sync/async，框架透明处理。
+
+回答，我觉得要避免任何不清晰的设计，是否可以提供execute跟execute_async两个接口？比较下这样的设计的优势和缺点。
 
 
 ## 4. 实施步骤清单
