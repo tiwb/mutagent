@@ -823,19 +823,20 @@ class ModuleManager:
   - [x] 单元测试 (12 tests)
   - 状态：✅ 已完成
 
-### 阶段三：LLM Client [待开始]
+### 阶段三：LLM Client [✅ 已完成]
 
-- [ ] **Task 3.1**: LLM Client 声明
-  - [ ] 实现 LLMClient 声明（client.py）
-  - [ ] 定义 async 接口方法签名
-  - 状态：⏸️ 待开始
+- [x] **Task 3.1**: LLM Client 声明
+  - [x] 实现 LLMClient 声明（client.py）
+  - [x] 定义 async 接口方法签名
+  - [x] 单元测试 (5 tests)
+  - 状态：✅ 已完成
 
-- [ ] **Task 3.2**: Claude 实现
-  - [ ] 使用 aiohttp 直接调用 Claude Messages API（builtins/claude.impl.py）
-  - [ ] 实现消息格式转换
-  - [ ] 实现 tool schema 格式转换
-  - [ ] 集成测试
-  - 状态：⏸️ 待开始
+- [x] **Task 3.2**: Claude 实现
+  - [x] 使用 aiohttp 直接调用 Claude Messages API（builtins/claude.impl.py）
+  - [x] 实现消息格式转换（_messages_to_claude, _tools_to_claude, _response_from_claude）
+  - [x] 实现 tool schema 格式转换
+  - [x] 单元测试 + mock 集成测试 (17 tests)
+  - 状态：✅ 已完成
 
 ### 阶段四：Tool 系统 [待开始]
 
