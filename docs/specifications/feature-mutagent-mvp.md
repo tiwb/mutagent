@@ -766,62 +766,62 @@ class ModuleManager:
 
 ## 4. 实施步骤清单
 
-### 阶段零：PyPI 占位 [待开始]
+### 阶段零：PyPI 占位 [✅ 已完成]
 
-- [ ] **Task 0.1**: 发布 mutagent 占位包到 PyPI
-  - [ ] 创建最小 pyproject.toml
-  - [ ] 通过 twine 发布
-  - 状态：⏸️ 待开始
+- [x] **Task 0.1**: 发布 mutagent 占位包到 PyPI
+  - [x] 创建最小 pyproject.toml
+  - [x] 通过 twine 发布
+  - 状态：✅ 已完成
 
-### 阶段一：项目基础设施 [待开始]
+### 阶段一：项目基础设施 [✅ 已完成]
 
-- [ ] **Task 1.1**: 初始化项目结构
-  - [ ] 创建 mutagent 包目录结构（按 2.4 节：扁平声明 + builtins/ + runtime/）
-  - [ ] 配置 pyproject.toml（依赖：forwardpy, aiohttp）
-  - [ ] 实现 `mutagent.Object` 统一基类（base.py）
-  - [ ] 创建 `__init__.py`（导出 Object, impl）
-  - 状态：⏸️ 待开始
+- [x] **Task 1.1**: 初始化项目结构
+  - [x] 创建 mutagent 包目录结构（按 2.4 节：扁平声明 + builtins/ + runtime/）
+  - [x] 配置 pyproject.toml（依赖：forwardpy, aiohttp）
+  - [x] 实现 `mutagent.Object` 统一基类（base.py）
+  - [x] 创建 `__init__.py`（导出 Object, impl）
+  - 状态：✅ 已完成
 
-- [ ] **Task 1.2**: 消息模型定义
-  - [ ] 定义 Message、ToolCall、ToolResult、Response、ToolSchema（messages.py）
-  - [ ] 单元测试
-  - 状态：⏸️ 待开始
+- [x] **Task 1.2**: 消息模型定义
+  - [x] 定义 Message、ToolCall、ToolResult、Response、ToolSchema（messages.py）
+  - [x] 单元测试 (16 tests)
+  - 状态：✅ 已完成
 
-### 阶段二：运行时核心 [待开始]
+### 阶段二：运行时核心 [✅ 已完成]
 
-- [ ] **Task 2.1**: forwardpy 扩展（可与 mutagent 并行开发）
-  - [ ] `@impl` 注册时记录 source_module
-  - [ ] 实现 `unregister_module_impls(module_name)`
-  - [ ] impl 卸载后恢复为 stub
-  - [ ] 单元测试
-  - 状态：⏸️ 待开始
+- [x] **Task 2.1**: forwardpy 扩展（可与 mutagent 并行开发）
+  - [x] `@impl` 注册时记录 source_module (`_impl_sources` registry)
+  - [x] 实现 `unregister_module_impls(module_name)`
+  - [x] impl 卸载后恢复为 stub
+  - [x] 单元测试 (11 tests in forwardpy)
+  - 状态：✅ 已完成
 
-- [ ] **Task 2.2**: MutagentMeta 元类
-  - [ ] 实现类注册表 `_class_registry`
-  - [ ] 实现就地类更新 `_update_class_inplace()`
-  - [ ] 确保 `mutagent.Object` 使用 `MutagentMeta` 元类
-  - [ ] 单元测试：类重定义后 `id(cls)` 不变、isinstance 正常、@impl 不断裂
-  - 状态：⏸️ 待开始
+- [x] **Task 2.2**: MutagentMeta 元类
+  - [x] 实现类注册表 `_class_registry`
+  - [x] 实现就地类更新 `_update_class_inplace()` + `_migrate_forwardpy_registries()`
+  - [x] 确保 `mutagent.Object` 使用 `MutagentMeta` 元类
+  - [x] 单元测试：类重定义后 `id(cls)` 不变、isinstance 正常、@impl 不断裂 (11 tests)
+  - 状态：✅ 已完成
 
-- [ ] **Task 2.3**: ModuleManager 核心
-  - [ ] 实现 `patch_module()`（完全替换语义：卸载旧 impl → 清空命名空间 → 编译执行）
-  - [ ] 实现 linecache 注入 + `__loader__` 协议
-  - [ ] 实现 patch 历史追踪
-  - [ ] 实现虚拟父包自动创建
-  - [ ] 单元测试：`inspect.getsource()` 对 patch 后的函数/类/模块正常工作
-  - 状态：⏸️ 待开始
+- [x] **Task 2.3**: ModuleManager 核心
+  - [x] 实现 `patch_module()`（完全替换语义：卸载旧 impl → 清空命名空间 → 编译执行）
+  - [x] 实现 linecache 注入 + `__loader__` 协议
+  - [x] 实现 patch 历史追踪
+  - [x] 实现虚拟父包自动创建
+  - [x] 单元测试：`inspect.getsource()` 对 patch 后的函数/类/模块正常工作 (18 tests)
+  - 状态：✅ 已完成
 
-- [ ] **Task 2.4**: ImplLoader
-  - [ ] 实现 `.impl.py` 文件发现
-  - [ ] 实现加载与 `@impl` 注册
-  - [ ] 单元测试
-  - 状态：⏸️ 待开始
+- [x] **Task 2.4**: ImplLoader
+  - [x] 实现 `.impl.py` 文件发现
+  - [x] 实现加载与 `@impl` 注册
+  - [x] 单元测试 (14 tests)
+  - 状态：✅ 已完成
 
-- [ ] **Task 2.5**: 模块固化
-  - [ ] 实现 `save_module()`（内存 → 文件）
-  - [ ] 实现固化过渡（更新 `__file__`、`co_filename`、linecache）
-  - [ ] 单元测试
-  - 状态：⏸️ 待开始
+- [x] **Task 2.5**: 模块固化
+  - [x] 实现 `save_module()`（内存 → 文件）
+  - [x] 实现固化过渡（更新 `__file__`、`co_filename`、linecache）
+  - [x] 单元测试 (12 tests)
+  - 状态：✅ 已完成
 
 ### 阶段三：LLM Client [待开始]
 
