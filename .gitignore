@@ -30,3 +30,4 @@ nul
 .pytest_cache/
 .coverage
 htmlcov/
+/mutagent.json

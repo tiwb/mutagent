@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 from pathlib import Path
 
 from mutagent.agent import Agent
@@ -14,6 +16,9 @@ from mutagent.selector import ToolSelector
 
 
 _builtins_loaded = False
+
+_DEFAULT_MODEL = "claude-sonnet-4-20250514"
+_DEFAULT_BASE_URL = "https://api.anthropic.com"
 
 
 def load_builtins() -> None:
@@ -27,10 +32,50 @@ def load_builtins() -> None:
     _builtins_loaded = True
 
 
+def load_config() -> dict[str, str]:
+    """Load configuration from mutagent.json (fallback) then environment variables (override).
+
+    mutagent.json format (same as Claude Code):
+        { "env": { "ANTHROPIC_AUTH_TOKEN": "...", ... } }
+
+    Returns:
+        Dict with keys: api_key, model, base_url.
+
+    Raises:
+        SystemExit: If no API key is found.
+    """
+    # 1. Read mutagent.json as fallback
+    file_env: dict[str, str] = {}
+    config_path = Path("mutagent.json")
+    if config_path.exists():
+        try:
+            data = json.loads(config_path.read_text(encoding="utf-8"))
+            file_env = data.get("env", {})
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    def _get(var_name: str, default: str = "") -> str:
+        """Env var > mutagent.json > default."""
+        return os.environ.get(var_name) or file_env.get(var_name) or default
+
+    api_key = _get("ANTHROPIC_AUTH_TOKEN")
+    if not api_key:
+        raise SystemExit(
+            "Error: ANTHROPIC_AUTH_TOKEN not set.\n"
+            "Set it via environment variable or in mutagent.json under env."
+        )
+
+    return {
+        "api_key": api_key,
+        "model": _get("ANTHROPIC_MODEL", _DEFAULT_MODEL),
+        "base_url": _get("ANTHROPIC_BASE_URL", _DEFAULT_BASE_URL),
+    }
+
+
 def create_agent(
     api_key: str,
-    model: str = "claude-sonnet-4-20250514",
-    base_url: str = "https://api.anthropic.com",
+    model: str = _DEFAULT_MODEL,
+    base_url: str = _DEFAULT_BASE_URL,
     system_prompt: str = "",
 ) -> Agent:
     """Create a fully assembled Agent with all components wired up.

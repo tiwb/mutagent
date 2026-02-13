@@ -31,12 +31,14 @@ class LLMClient(mutagent.Object):
         self,
         messages: list[Message],
         tools: list[ToolSchema],
+        system_prompt: str = "",
     ) -> Response:
         """Send messages to the LLM and return the response.
 
         Args:
             messages: Conversation history.
             tools: Available tool schemas for the LLM to use.
+            system_prompt: System-level instruction for the LLM.
 
         Returns:
             The LLM response containing the assistant message,

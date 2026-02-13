@@ -249,7 +249,7 @@ class TestSendMessageIntegration:
         mock_session.post.assert_called_once()
         call_args = mock_session.post.call_args
         assert call_args[0][0] == "https://api.anthropic.com/v1/messages"
-        assert call_args[1]["headers"]["x-api-key"] == "test-key"
+        assert call_args[1]["headers"]["authorization"] == "Bearer test-key"
         payload = call_args[1]["json"]
         assert payload["model"] == "claude-sonnet-4-20250514"
         assert "tools" not in payload  # No tools provided

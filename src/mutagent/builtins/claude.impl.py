@@ -97,6 +97,7 @@ async def send_message(
     self: LLMClient,
     messages: list[Message],
     tools: list[ToolSchema],
+    system_prompt: str = "",
 ) -> Response:
     """Send messages to Claude API and return the response."""
     claude_messages = _messages_to_claude(messages)
@@ -105,11 +106,13 @@ async def send_message(
         "messages": claude_messages,
         "max_tokens": 4096,
     }
+    if system_prompt:
+        payload["system"] = system_prompt
     if tools:
         payload["tools"] = _tools_to_claude(tools)
 
     headers = {
-        "x-api-key": self.api_key,
+        "authorization": f"Bearer {self.api_key}",
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
     }

@@ -30,20 +30,10 @@ async def run(self: Agent, user_input: str) -> str:
 @mutagent.impl(Agent.step)
 async def step(self: Agent) -> Response:
     """Execute a single LLM call."""
-    # Get available tools
     tools = await self.tool_selector.get_tools({})
-
-    # Build messages with system prompt
-    messages = list(self.messages)
-
-    # Send to LLM (system prompt passed as first user message if needed)
-    # For Claude API, system prompt is handled via the system parameter
-    # For MVP, we prepend it as context
-    if self.system_prompt and messages and messages[0].role == "user":
-        # Inject system context into the conversation
-        pass  # Claude handles system prompt separately via the API
-
-    return await self.client.send_message(messages, tools)
+    return await self.client.send_message(
+        self.messages, tools, system_prompt=self.system_prompt,
+    )
 
 
 @mutagent.impl(Agent.handle_tool_calls)
