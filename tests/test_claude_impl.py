@@ -1,6 +1,7 @@
 """Tests for Claude API implementation (builtins/claude.impl.py)."""
 
 import json
+import os
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -332,3 +333,64 @@ class TestSendMessageIntegration:
             )
             with pytest.raises(RuntimeError, match="Invalid API key"):
                 await client.send_message([Message(role="user", content="Hi")], [])
+
+
+_has_api_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+
+
+@pytest.mark.skipif(not _has_api_key, reason="ANTHROPIC_API_KEY not set")
+class TestClaudeRealAPI:
+    """Integration tests using the real Claude API (skipped without API key)."""
+
+    @pytest.mark.asyncio
+    async def test_real_send_message(self):
+        """Send a real message to Claude API and verify the response structure."""
+        from mutagent.client import LLMClient
+
+        client = LLMClient(
+            model="claude-sonnet-4-20250514",
+            api_key=os.environ["ANTHROPIC_API_KEY"],
+            base_url="https://api.anthropic.com",
+        )
+        messages = [Message(role="user", content="Reply with exactly: PONG")]
+        resp = await client.send_message(messages, [])
+
+        assert isinstance(resp, Response)
+        assert resp.message.role == "assistant"
+        assert resp.message.content  # non-empty
+        assert resp.stop_reason == "end_turn"
+        assert resp.usage.get("input_tokens", 0) > 0
+        assert resp.usage.get("output_tokens", 0) > 0
+
+    @pytest.mark.asyncio
+    async def test_real_send_message_with_tool_use(self):
+        """Send a real message with tools and verify tool_use response."""
+        from mutagent.client import LLMClient
+
+        client = LLMClient(
+            model="claude-sonnet-4-20250514",
+            api_key=os.environ["ANTHROPIC_API_KEY"],
+            base_url="https://api.anthropic.com",
+        )
+        tools = [ToolSchema(
+            name="get_weather",
+            description="Get current weather for a city.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string", "description": "City name"},
+                },
+                "required": ["city"],
+            },
+        )]
+        messages = [Message(role="user", content="What's the weather in Tokyo?")]
+        resp = await client.send_message(messages, tools)
+
+        assert isinstance(resp, Response)
+        assert resp.message.role == "assistant"
+        # LLM should use the tool
+        assert resp.stop_reason == "tool_use"
+        assert len(resp.message.tool_calls) >= 1
+        tc = resp.message.tool_calls[0]
+        assert tc.name == "get_weather"
+        assert "city" in tc.arguments

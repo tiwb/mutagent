@@ -1,7 +1,10 @@
 """End-to-end integration tests for mutagent Agent."""
 
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock
+
+import forwardpy
 
 import pytest
 
@@ -215,3 +218,201 @@ class TestEndToEnd:
         result = await agent.run("Hello")
         assert result == "Hello! I'm mutagent."
         assert len(agent.messages) == 2
+
+
+class TestSelfEvolution:
+    """Verify Agent can create new tool modules, patch ToolSelector, and use them."""
+
+    @pytest.fixture
+    def agent(self):
+        agent = create_agent(api_key="test-key")
+        yield agent
+        # Cleanup: unregister override impls, remove virtual modules,
+        # then re-load the original selector impl to restore original impls.
+        mgr = agent.tool_selector.essential_tools.module_manager
+        forwardpy.unregister_module_impls("user_tools.selector_ext")
+        mgr.cleanup()
+        # Re-execute the original selector impl to restore ToolSelector impls
+        self._reload_selector_impl()
+
+    @staticmethod
+    def _reload_selector_impl():
+        """Re-execute the builtins/selector.impl.py to restore original @impls."""
+        from pathlib import Path
+        selector_impl = Path(__file__).resolve().parent.parent / "src" / "mutagent" / "builtins" / "selector.impl.py"
+        source = selector_impl.read_text(encoding="utf-8")
+        mod = sys.modules.get("mutagent.builtins.selector")
+        if mod is not None:
+            code = compile(source, str(selector_impl), "exec")
+            exec(code, mod.__dict__)
+
+    @pytest.mark.asyncio
+    async def test_create_tool_and_use_it(self, agent):
+        """Self-evolution: Agent creates a new tool class, patches ToolSelector, then uses it."""
+        # Step 1: Agent creates a new tool class declaration
+        create_decl_resp = Response(
+            message=Message(
+                role="assistant",
+                content="I'll create a math tools module.",
+                tool_calls=[ToolCall(
+                    id="tc_1",
+                    name="patch_module",
+                    arguments={
+                        "module_path": "user_tools.math_tools",
+                        "source": (
+                            "import mutagent\n"
+                            "\n"
+                            "class MathTools(mutagent.Object):\n"
+                            "    def factorial(self, n: int) -> str:\n"
+                            "        '''Compute factorial of n.'''\n"
+                            "        ...\n"
+                        ),
+                    },
+                )],
+            ),
+            stop_reason="tool_use",
+        )
+
+        # Step 2: Agent provides the implementation
+        create_impl_resp = Response(
+            message=Message(
+                role="assistant",
+                content="Now I'll implement the factorial method.",
+                tool_calls=[ToolCall(
+                    id="tc_2",
+                    name="patch_module",
+                    arguments={
+                        "module_path": "user_tools.math_tools_impl",
+                        "source": (
+                            "import mutagent\n"
+                            "from user_tools.math_tools import MathTools\n"
+                            "\n"
+                            "@mutagent.impl(MathTools.factorial)\n"
+                            "def factorial(self, n: int) -> str:\n"
+                            "    result = 1\n"
+                            "    for i in range(2, n + 1):\n"
+                            "        result *= i\n"
+                            "    return str(result)\n"
+                        ),
+                    },
+                )],
+            ),
+            stop_reason="tool_use",
+        )
+
+        # Step 3: Agent verifies the new tool works via run_code
+        verify_resp = Response(
+            message=Message(
+                role="assistant",
+                content="Let me verify it works.",
+                tool_calls=[ToolCall(
+                    id="tc_3",
+                    name="run_code",
+                    arguments={
+                        "code": (
+                            "from user_tools.math_tools import MathTools\n"
+                            "mt = MathTools()\n"
+                            "print(mt.factorial(5))\n"
+                        ),
+                    },
+                )],
+            ),
+            stop_reason="tool_use",
+        )
+
+        # Step 4: Agent creates a SEPARATE override module for ToolSelector
+        # (does NOT patch mutagent.builtins.selector, preserving original helpers)
+        patch_selector_resp = Response(
+            message=Message(
+                role="assistant",
+                content="Now I'll extend the ToolSelector to include the new tool.",
+                tool_calls=[ToolCall(
+                    id="tc_4",
+                    name="patch_module",
+                    arguments={
+                        "module_path": "user_tools.selector_ext",
+                        "source": (
+                            "import asyncio\n"
+                            "import mutagent\n"
+                            "from mutagent.selector import ToolSelector\n"
+                            "from mutagent.messages import ToolResult\n"
+                            "from mutagent.builtins.selector import make_schema_from_method, _TOOL_METHODS\n"
+                            "\n"
+                            "@mutagent.impl(ToolSelector.get_tools, override=True)\n"
+                            "async def get_tools(self, context):\n"
+                            "    schemas = []\n"
+                            "    for name in _TOOL_METHODS:\n"
+                            "        schemas.append(make_schema_from_method(self.essential_tools, name))\n"
+                            "    from user_tools.math_tools import MathTools\n"
+                            "    mt = MathTools()\n"
+                            "    schemas.append(make_schema_from_method(mt, 'factorial'))\n"
+                            "    return schemas\n"
+                            "\n"
+                            "@mutagent.impl(ToolSelector.dispatch, override=True)\n"
+                            "async def dispatch(self, tool_call):\n"
+                            "    method = getattr(self.essential_tools, tool_call.name, None)\n"
+                            "    if method is None:\n"
+                            "        from user_tools.math_tools import MathTools\n"
+                            "        mt = MathTools()\n"
+                            "        method = getattr(mt, tool_call.name, None)\n"
+                            "    if method is None:\n"
+                            "        return ToolResult(tool_call_id=tool_call.id, content='Unknown tool', is_error=True)\n"
+                            "    try:\n"
+                            "        result = method(**tool_call.arguments)\n"
+                            "        if asyncio.iscoroutine(result):\n"
+                            "            result = await result\n"
+                            "        return ToolResult(tool_call_id=tool_call.id, content=str(result))\n"
+                            "    except Exception as e:\n"
+                            "        return ToolResult(tool_call_id=tool_call.id, content=str(e), is_error=True)\n"
+                        ),
+                    },
+                )],
+            ),
+            stop_reason="tool_use",
+        )
+
+        # Step 5: Agent uses the new tool directly (dispatched by patched ToolSelector)
+        use_new_tool_resp = Response(
+            message=Message(
+                role="assistant",
+                content="Let me compute factorial(6).",
+                tool_calls=[ToolCall(
+                    id="tc_5",
+                    name="factorial",
+                    arguments={"n": 6},
+                )],
+            ),
+            stop_reason="tool_use",
+        )
+
+        # Step 6: Final response
+        final_resp = Response(
+            message=Message(
+                role="assistant",
+                content="factorial(6) = 720. The self-evolution is complete!",
+            ),
+            stop_reason="end_turn",
+        )
+
+        agent.client.send_message = AsyncMock(side_effect=[
+            create_decl_resp,
+            create_impl_resp,
+            verify_resp,
+            patch_selector_resp,
+            use_new_tool_resp,
+            final_resp,
+        ])
+
+        result = await agent.run("Create a factorial tool and use it")
+
+        # Verify the full workflow completed
+        assert "720" in result
+
+        # Verify run_code result: factorial(5) = 120
+        run_result = agent.messages[6].tool_results[0]
+        assert "120" in run_result.content
+
+        # Verify the new tool was dispatched and returned correct result
+        factorial_result = agent.messages[10].tool_results[0]
+        assert "720" in factorial_result.content
+        assert factorial_result.is_error is False

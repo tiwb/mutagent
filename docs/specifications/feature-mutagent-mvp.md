@@ -874,27 +874,29 @@ class ModuleManager:
 
 ## 5. 测试验证
 
+- 执行结果：**161 passed, 2 skipped** (mutagent) + **61 passed** (forwardpy) = **222 tests**
+
 ### 单元测试
-- [ ] mutagent.Object 基类继承（MutagentMeta 生效）
-- [ ] MutagentMeta: 类重定义后 id 不变
-- [ ] MutagentMeta: 重定义后 isinstance 正常
-- [ ] MutagentMeta: 重定义后 @impl 不断裂
-- [ ] MutagentMeta: 增删属性和方法
-- [ ] forwardpy 扩展: unregister_module_impls
-- [ ] forwardpy 扩展: impl 卸载后恢复 stub
-- [ ] 消息模型序列化/反序列化
-- [ ] ModuleManager: patch 完全替换语义
-- [ ] ModuleManager: patch → inspect.getsource() 验证
-- [ ] ModuleManager: 固化过渡（虚拟 → 文件）
-- [ ] ModuleManager: 虚拟父包创建
-- [ ] ImplLoader: .impl.py 发现与加载
-- [ ] Schema 自动生成（方法签名 → ToolSchema，self 排除）
-- [ ] ToolSelector: get_tools 从 EssentialTools 生成 schema
-- [ ] ToolSelector: dispatch 正确路由到 EssentialTools 方法
-- [ ] EssentialTools: 各方法 @impl 功能测试
-- [ ] Agent 主循环（mock LLM 响应）
+- [x] mutagent.Object 基类继承（MutagentMeta 生效）→ test_base.py (8 tests)
+- [x] MutagentMeta: 类重定义后 id 不变 → test_inplace_update.py::test_redefinition_preserves_identity
+- [x] MutagentMeta: 重定义后 isinstance 正常 → test_inplace_update.py::test_isinstance_works_after_redefinition
+- [x] MutagentMeta: 重定义后 @impl 不断裂 → test_inplace_update.py::test_impl_survives_redefinition
+- [x] MutagentMeta: 增删属性和方法 → test_inplace_update.py (3 tests: annotations, stubs, deleted attrs)
+- [x] forwardpy 扩展: unregister_module_impls → forwardpy/test_unregister.py (9 tests) + test_module_manager.py::test_repatch_unregisters_old_impls
+- [x] forwardpy 扩展: impl 卸载后恢复 stub → forwardpy/test_unregister.py::test_unregister_restores_stub_method + test_module_manager.py::test_repatch_without_impl_restores_stub
+- [x] 消息模型序列化/反序列化 → test_messages.py (16 tests)
+- [x] ModuleManager: patch 完全替换语义 → test_module_manager.py::test_repatch_clears_old_namespace, test_repatch_unregisters_old_impls
+- [x] ModuleManager: patch → inspect.getsource() 验证 → test_module_manager.py (4 tests: function, class, loader, virtual filename)
+- [x] ModuleManager: 固化过渡（虚拟 → 文件）→ test_module_persistence.py (12 tests)
+- [x] ModuleManager: 虚拟父包创建 → test_module_manager.py::test_parent_packages_created, test_attach_to_parent
+- [x] ImplLoader: .impl.py 发现与加载 → test_impl_loader.py (14 tests)
+- [x] Schema 自动生成（方法签名 → ToolSchema，self 排除）→ test_selector.py::TestMakeSchemaFromMethod (5 tests)
+- [x] ToolSelector: get_tools 从 EssentialTools 生成 schema → test_selector.py::test_get_tools_returns_schemas, test_get_tools_schema_structure
+- [x] ToolSelector: dispatch 正确路由到 EssentialTools 方法 → test_selector.py (3 tests: unknown tool, result, exception)
+- [x] EssentialTools: 各方法 @impl 功能测试 → test_essential_tools.py (20 tests)
+- [x] Agent 主循环（mock LLM 响应）→ test_agent.py (5 tests)
 
 ### 集成测试
-- [ ] Claude API 实际调用测试（aiohttp 直连）
-- [ ] Agent + Tools 端到端：Agent 查看模块 → patch 代码 → run_code 验证 → 固化文件
-- [ ] 自进化验证：Agent 创建新工具模块 → patch ToolSelector → 使用新工具
+- [x] Claude API 实际调用测试（aiohttp 直连）→ test_claude_impl.py::TestClaudeRealAPI (2 tests, skipped without ANTHROPIC_API_KEY)
+- [x] Agent + Tools 端到端：Agent 查看模块 → patch 代码 → run_code 验证 → 固化文件 → test_e2e.py::test_inspect_then_patch_then_run
+- [x] 自进化验证：Agent 创建新工具模块 → patch ToolSelector → 使用新工具 → test_e2e.py::TestSelfEvolution::test_create_tool_and_use_it
