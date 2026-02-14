@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, AsyncIterator
 
 import mutagent
 
 if TYPE_CHECKING:
-    from mutagent.messages import Message, Response, ToolSchema
+    from mutagent.messages import Message, StreamEvent, ToolSchema
 
 
 class LLMClient(mutagent.Object):
@@ -32,16 +32,26 @@ class LLMClient(mutagent.Object):
         messages: list[Message],
         tools: list[ToolSchema],
         system_prompt: str = "",
-    ) -> Response:
-        """Send messages to the LLM and return the response.
+        stream: bool = True,
+    ) -> AsyncIterator[StreamEvent]:
+        """Send messages to the LLM and yield streaming events.
+
+        When stream=True, the underlying HTTP request uses SSE streaming
+        and events are yielded incrementally as they arrive.
+
+        When stream=False, a regular HTTP request is made and the complete
+        response is wrapped into a small sequence of StreamEvents.
+
+        In both cases, the final event is always a ``response_done``
+        carrying the complete Response object.
 
         Args:
             messages: Conversation history.
             tools: Available tool schemas for the LLM to use.
             system_prompt: System-level instruction for the LLM.
+            stream: Whether to use SSE streaming for the HTTP request.
 
-        Returns:
-            The LLM response containing the assistant message,
-            stop reason, and token usage.
+        Yields:
+            StreamEvent instances.
         """
         ...

@@ -131,7 +131,11 @@ async def run_agent(
         **kwargs: Additional arguments passed to create_agent.
 
     Returns:
-        The agent's response.
+        The agent's final text response.
     """
     agent = create_agent(api_key=api_key, **kwargs)
-    return await agent.run(user_input)
+    text_parts = []
+    async for event in agent.run(user_input, stream=False):
+        if event.type == "text_delta":
+            text_parts.append(event.text)
+    return "".join(text_parts)

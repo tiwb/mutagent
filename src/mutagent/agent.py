@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, AsyncIterator
 
 import mutagent
 
 if TYPE_CHECKING:
     from mutagent.client import LLMClient
-    from mutagent.messages import Message, Response, ToolCall, ToolResult
+    from mutagent.messages import StreamEvent, ToolCall, ToolResult
     from mutagent.selector import ToolSelector
 
 
@@ -31,25 +31,31 @@ class Agent(mutagent.Object):
     system_prompt: str
     messages: list
 
-    async def run(self, user_input: str) -> str:
-        """Run the agent with user input and return the final response.
+    async def run(
+        self, user_input: str, stream: bool = True
+    ) -> AsyncIterator[StreamEvent]:
+        """Run the agent with user input, yielding streaming events.
 
         This is the main entry point. It adds the user message, then
         loops step/handle_tool_calls until the LLM produces an end_turn.
 
         Args:
             user_input: The user's input message.
+            stream: Whether to use SSE streaming for the HTTP request.
 
-        Returns:
-            The final text response from the LLM.
+        Yields:
+            StreamEvent instances for each piece of incremental output.
         """
         ...
 
-    async def step(self) -> Response:
-        """Execute a single LLM call with the current messages and tools.
+    async def step(self, stream: bool = True) -> AsyncIterator[StreamEvent]:
+        """Execute a single LLM call, yielding streaming events.
 
-        Returns:
-            The LLM response.
+        Args:
+            stream: Whether to use SSE streaming for the HTTP request.
+
+        Yields:
+            StreamEvent instances from the LLM client.
         """
         ...
 

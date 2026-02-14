@@ -12,9 +12,49 @@ from mutagent.agent import Agent
 from mutagent.client import LLMClient
 from mutagent.essential_tools import EssentialTools
 from mutagent.main import create_agent
-from mutagent.messages import Message, Response, ToolCall, ToolResult, ToolSchema
+from mutagent.messages import Message, Response, StreamEvent, ToolCall, ToolResult, ToolSchema
 from mutagent.runtime.module_manager import ModuleManager
 from mutagent.selector import ToolSelector
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _events_for(response: Response) -> list[StreamEvent]:
+    """Build StreamEvents that a non-streaming send_message would yield for a Response."""
+    events = []
+    if response.message.content:
+        events.append(StreamEvent(type="text_delta", text=response.message.content))
+    for tc in response.message.tool_calls:
+        events.append(StreamEvent(type="tool_use_start", tool_call=tc))
+        events.append(StreamEvent(type="tool_use_end"))
+    events.append(StreamEvent(type="response_done", response=response))
+    return events
+
+
+def _make_mock_send(responses: list[Response]):
+    """Create a mock send_message async generator from a list of Responses."""
+    event_lists = [_events_for(r) for r in responses]
+    call_idx = 0
+
+    async def mock_send(*args, **kwargs):
+        nonlocal call_idx
+        evts = event_lists[call_idx]
+        call_idx += 1
+        for e in evts:
+            yield e
+
+    return mock_send
+
+
+async def _collect_text(async_iter) -> str:
+    """Collect text from text_delta events."""
+    parts = []
+    async for event in async_iter:
+        if event.type == "text_delta":
+            parts.append(event.text)
+    return "".join(parts)
 
 
 class TestCreateAgent:
@@ -121,7 +161,7 @@ class TestEndToEnd:
             stop_reason="end_turn",
         )
 
-        agent.client.send_message = AsyncMock(side_effect=[
+        agent.client.send_message = _make_mock_send([
             inspect_response,
             patch_response,
             run_response,
@@ -129,7 +169,7 @@ class TestEndToEnd:
             final_response,
         ])
 
-        result = await agent.run("Create a helper module with an add function")
+        result = await _collect_text(agent.run("Create a helper module with an add function"))
 
         # Verify final result
         assert "Done" in result
@@ -197,9 +237,9 @@ class TestEndToEnd:
             stop_reason="end_turn",
         )
 
-        agent.client.send_message = AsyncMock(side_effect=[patch_resp, view_resp, final_resp])
+        agent.client.send_message = _make_mock_send([patch_resp, view_resp, final_resp])
 
-        result = await agent.run("Show me the Greeter class")
+        result = await _collect_text(agent.run("Show me the Greeter class"))
 
         # Verify view_source returned the source
         view_result = agent.messages[4].tool_results[0]
@@ -213,9 +253,9 @@ class TestEndToEnd:
             message=Message(role="assistant", content="Hello! I'm mutagent."),
             stop_reason="end_turn",
         )
-        agent.client.send_message = AsyncMock(return_value=response)
+        agent.client.send_message = _make_mock_send([response])
 
-        result = await agent.run("Hello")
+        result = await _collect_text(agent.run("Hello"))
         assert result == "Hello! I'm mutagent."
         assert len(agent.messages) == 2
 
@@ -394,7 +434,7 @@ class TestSelfEvolution:
             stop_reason="end_turn",
         )
 
-        agent.client.send_message = AsyncMock(side_effect=[
+        agent.client.send_message = _make_mock_send([
             create_decl_resp,
             create_impl_resp,
             verify_resp,
@@ -403,7 +443,7 @@ class TestSelfEvolution:
             final_resp,
         ])
 
-        result = await agent.run("Create a factorial tool and use it")
+        result = await _collect_text(agent.run("Create a factorial tool and use it"))
 
         # Verify the full workflow completed
         assert "720" in result

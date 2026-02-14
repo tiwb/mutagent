@@ -213,7 +213,7 @@ class TestSendMessageIntegration:
 
     @pytest.mark.asyncio
     async def test_send_message_success(self):
-        """Test send_message with a mocked aiohttp response."""
+        """Test send_message with a mocked aiohttp response (stream=False)."""
         from mutagent.client import LLMClient
 
         mock_response_data = {
@@ -240,8 +240,13 @@ class TestSendMessageIntegration:
                 base_url="https://api.anthropic.com",
             )
             messages = [Message(role="user", content="Hi")]
-            resp = await client.send_message(messages, [])
+            events = []
+            async for event in client.send_message(messages, [], stream=False):
+                events.append(event)
 
+        # Find the response_done event
+        resp_event = [e for e in events if e.type == "response_done"][0]
+        resp = resp_event.response
         assert resp.message.content == "Hello from Claude!"
         assert resp.stop_reason == "end_turn"
 
@@ -296,8 +301,12 @@ class TestSendMessageIntegration:
                 base_url="https://api.anthropic.com",
             )
             messages = [Message(role="user", content="Show me the code")]
-            resp = await client.send_message(messages, tools)
+            events = []
+            async for event in client.send_message(messages, tools, stream=False):
+                events.append(event)
 
+        resp_event = [e for e in events if e.type == "response_done"][0]
+        resp = resp_event.response
         assert resp.stop_reason == "tool_use"
         assert len(resp.message.tool_calls) == 1
         assert resp.message.tool_calls[0].name == "view_source"
@@ -309,7 +318,7 @@ class TestSendMessageIntegration:
 
     @pytest.mark.asyncio
     async def test_send_message_api_error(self):
-        """Test send_message raises on API error."""
+        """Test send_message yields error event on API error."""
         from mutagent.client import LLMClient
 
         mock_resp = AsyncMock()
@@ -331,8 +340,15 @@ class TestSendMessageIntegration:
                 api_key="bad-key",
                 base_url="https://api.anthropic.com",
             )
-            with pytest.raises(RuntimeError, match="Invalid API key"):
-                await client.send_message([Message(role="user", content="Hi")], [])
+            events = []
+            async for event in client.send_message(
+                [Message(role="user", content="Hi")], [], stream=False
+            ):
+                events.append(event)
+
+        assert len(events) == 1
+        assert events[0].type == "error"
+        assert "Invalid API key" in events[0].error
 
 
 _has_api_key = bool(os.environ.get("ANTHROPIC_API_KEY"))

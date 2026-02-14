@@ -50,6 +50,19 @@ You can evolve yourself:
 """
 
 
+def _summarize_args(args: dict) -> str:
+    """Create a short summary of tool call arguments."""
+    if not args:
+        return ""
+    parts = []
+    for key, value in args.items():
+        s = str(value)
+        if len(s) > 40:
+            s = s[:37] + "..."
+        parts.append(f"{key}={s}")
+    return ", ".join(parts)
+
+
 async def _main() -> None:
     config = load_config()
     agent = create_agent(
@@ -74,11 +87,35 @@ async def _main() -> None:
             break
 
         try:
-            result = await agent.run(user_input)
-            print(result)
+            async for event in agent.run(user_input):
+                if event.type == "text_delta":
+                    print(event.text, end="", flush=True)
+                elif event.type == "tool_exec_start":
+                    name = event.tool_call.name if event.tool_call else "?"
+                    args_summary = _summarize_args(
+                        event.tool_call.arguments if event.tool_call else {}
+                    )
+                    if args_summary:
+                        print(f"\n  [{name}({args_summary})]", flush=True)
+                    else:
+                        print(f"\n  [{name}]", flush=True)
+                elif event.type == "tool_exec_end":
+                    if event.tool_result:
+                        status = "error" if event.tool_result.is_error else "done"
+                        summary = event.tool_result.content[:100]
+                        if len(event.tool_result.content) > 100:
+                            summary += "..."
+                        print(f"  -> [{status}] {summary}", flush=True)
+                elif event.type == "error":
+                    print(f"\n[Error: {event.error}]", file=sys.stderr, flush=True)
+                elif event.type == "response_done":
+                    pass  # newline printed after the loop
+            print()
+        except KeyboardInterrupt:
+            print("\n[Interrupted]")
             print()
         except Exception as e:
-            print(f"Error: {e}", file=sys.stderr)
+            print(f"\nError: {e}", file=sys.stderr)
             print()
 
 

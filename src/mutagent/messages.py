@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
 
 @dataclass
@@ -81,3 +81,34 @@ class Response:
     message: Message
     stop_reason: str = ""
     usage: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass
+class StreamEvent:
+    """A single event in a streaming LLM response.
+
+    Attributes:
+        type: Event type. One of:
+            "text_delta"      - Incremental text from the LLM.
+            "tool_use_start"  - LLM begins constructing a tool call.
+            "tool_use_delta"  - Incremental JSON for tool call arguments.
+            "tool_use_end"    - LLM finished a tool call block.
+            "tool_exec_start" - Agent begins executing a tool.
+            "tool_exec_end"   - Agent finished executing a tool.
+            "response_done"   - One LLM call completed; carries the full Response.
+            "error"           - An error occurred.
+        text: Text fragment (for text_delta).
+        tool_call: Tool call info (for tool_use_start, tool_exec_start).
+        tool_json_delta: Partial JSON string (for tool_use_delta).
+        tool_result: Tool execution result (for tool_exec_end).
+        response: Complete Response object (for response_done).
+        error: Error description (for error).
+    """
+
+    type: str
+    text: str = ""
+    tool_call: Optional[ToolCall] = None
+    tool_json_delta: str = ""
+    tool_result: Optional[ToolResult] = None
+    response: Optional[Response] = None
+    error: str = ""
