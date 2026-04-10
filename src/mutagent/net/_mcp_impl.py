@@ -98,9 +98,13 @@ class MCPToolProvider:
         for tool_name, (instance, method_name) in self._tools.items():
             method = getattr(instance, method_name)
             schema = _infer_schema(method)
+            # 优先使用声明的 docstring，避免被 @impl 覆盖
+            doc = _get_declaration_doc(type(instance), method_name)
+            if doc is None:
+                doc = method.__doc__ or ""
             result.append({
                 "name": tool_name,
-                "description": method.__doc__ or "",
+                "description": doc,
                 "inputSchema": schema,
             })
         return result
@@ -117,6 +121,25 @@ class MCPToolProvider:
         if isinstance(result, ToolResult):
             return result
         return ToolResult.text(str(result))
+
+
+def _get_declaration_doc(cls: type, method_name: str) -> str | None:
+    """从 _impl_chain 取回声明时的原始 docstring，避免被 @impl 覆盖。
+
+    沿 MRO 遍历，跳过 __doc__ 为 None 的默认条目（子类 wrapper 可能没有 doc）。
+    """
+    try:
+        from mutobj.core import _impl_chain
+        for klass in cls.__mro__:
+            chain = _impl_chain.get((klass, method_name), [])
+            for func, source_module, _seq in chain:
+                if source_module == "__default__":
+                    doc = getattr(func, "__doc__", None)
+                    if doc is not None:
+                        return doc
+    except ImportError:
+        pass
+    return None
 
 
 def _infer_schema(fn: Any) -> dict[str, Any]:
