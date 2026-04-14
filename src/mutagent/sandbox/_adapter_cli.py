@@ -3,7 +3,7 @@
 import subprocess
 from typing import Any
 
-from mutagent.sandbox.namespace import Namespace
+from mutagent.sandbox._namespace import Namespace
 
 
 def build_cli_namespace(cli_config: dict[str, dict[str, Any]]) -> Namespace:

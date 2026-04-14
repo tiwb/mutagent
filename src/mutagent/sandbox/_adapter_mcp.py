@@ -10,7 +10,7 @@ import subprocess
 import sys
 from typing import Any
 
-from mutagent.sandbox.namespace import Namespace
+from mutagent.sandbox._namespace import Namespace
 
 # Windows: 抑制子进程弹出控制台窗口
 _POPEN_KWARGS: dict[str, Any] = {}

@@ -85,7 +85,13 @@ def _make_late_bound(instance: Any, method_name: str):
 # ---------------------------------------------------------------------------
 
 def _get_tool_prefix(cls: type) -> str:
-    """从 Toolkit 类名生成工具前缀。去掉 Toolkit 后缀。"""
+    """从 Toolkit 类名生成工具前缀。
+
+    优先使用 _tool_prefix 显式指定，否则从类名推导（去掉 Toolkit 后缀）。
+    """
+    explicit = cls.__dict__.get('_tool_prefix')
+    if explicit is not None:
+        return explicit
     name = cls.__name__
     if name.endswith("Toolkit") and name != "Toolkit":
         return name[:-7]  # 去掉 "Toolkit"
@@ -93,8 +99,10 @@ def _get_tool_prefix(cls: type) -> str:
 
 
 def _get_tool_name(cls: type, method_name: str) -> str:
-    """生成工具名称，格式为 ``{prefix}-{method_name}``。"""
+    """生成工具名称。有前缀时 ``{prefix}-{method}``，无前缀时直接用方法名。"""
     prefix = _get_tool_prefix(cls)
+    if not prefix:
+        return method_name
     return f"{prefix}-{method_name}"
 
 

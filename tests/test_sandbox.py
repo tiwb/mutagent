@@ -1,8 +1,8 @@
 """mutagent.sandbox 单元测试 — 执行引擎 + 命名空间 + 安全边界。"""
 
 import pytest
-from mutagent.sandbox.engine import execute
-from mutagent.sandbox.namespace import Namespace, NamespaceRegistry
+from mutagent.sandbox._engine import execute
+from mutagent.sandbox._namespace import Namespace, NamespaceRegistry
 
 
 # ============================================================
