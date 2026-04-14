@@ -1,47 +1,29 @@
-"""执行引擎 — 白名单 builtins + REPL 语义。"""
+"""执行引擎 — 黑名单 builtins + REPL 语义。"""
 
 import ast
+import builtins
 import io
+import traceback as _tb_mod
 from contextlib import redirect_stdout, redirect_stderr
 from typing import Any
 
 
-# 安全内置函数白名单
+# 必须排除的 builtins（安全边界）
+_BLOCKED_BUILTINS = frozenset({
+    'eval', 'exec', 'compile', '__import__',
+    'open', 'breakpoint', 'input',
+    'exit', 'quit', 'help',
+})
+
+# 从 builtins 模块取全集，排除黑名单
 _SAFE_BUILTINS = {
-    'len': len, 'range': range, 'enumerate': enumerate,
-    'zip': zip, 'map': map, 'filter': filter,
-    'sorted': sorted, 'reversed': reversed,
-    'min': min, 'max': max, 'sum': sum,
-    'any': any, 'all': all, 'abs': abs, 'round': round,
-    'isinstance': isinstance, 'print': print, 'repr': repr,
-    'int': int, 'float': float, 'str': str, 'bool': bool,
-    'list': list, 'dict': dict, 'tuple': tuple, 'set': set,
-    'bytes': bytes,
-    'chr': chr, 'ord': ord, 'hex': hex, 'bin': bin, 'oct': oct,
-    'hash': hash, 'id': id,
-    'iter': iter, 'next': next,
-    'callable': callable,
-    'Exception': Exception, 'ValueError': ValueError,
-    'TypeError': TypeError, 'KeyError': KeyError,
-    'IndexError': IndexError, 'AttributeError': AttributeError,
-    'RuntimeError': RuntimeError, 'StopIteration': StopIteration,
-    'ZeroDivisionError': ZeroDivisionError,
-    'NotImplementedError': NotImplementedError,
-    'OverflowError': OverflowError,
-    'True': True, 'False': False, 'None': None,
+    name: getattr(builtins, name)
+    for name in dir(builtins)
+    if not name.startswith('_') and name not in _BLOCKED_BUILTINS
 }
-
-# type() 限制为单参数（类型查询），禁止三参数动态建类
-_builtin_type = type
-
-
-def _safe_type(*args):
-    if len(args) != 1:
-        raise TypeError("type() takes 1 argument")
-    return _builtin_type(args[0])
-
-
-_SAFE_BUILTINS['type'] = _safe_type
+# 保留 __build_class__（class 语句需要）和 __name__
+_SAFE_BUILTINS['__build_class__'] = builtins.__build_class__
+_SAFE_BUILTINS['__name__'] = '<pysandbox>'
 
 
 def execute(code: str, namespace: dict[str, Any],
@@ -73,12 +55,10 @@ def execute(code: str, namespace: dict[str, Any],
             # REPL 语义：最后一条表达式自动返回值
             tree = ast.parse(code, '<pysandbox>', 'exec')
 
-            # AST 检查：禁止 import 和 class
+            # AST 检查：禁止 import
             for node in ast.walk(tree):
                 if isinstance(node, (ast.Import, ast.ImportFrom)):
                     raise SyntaxError("import statements are not supported")
-                if isinstance(node, ast.ClassDef):
-                    raise SyntaxError("class definitions are not supported")
 
             last_expr_value = None
             if tree.body and isinstance(tree.body[-1], ast.Expr):
@@ -109,6 +89,25 @@ def execute(code: str, namespace: dict[str, Any],
     except SyntaxError as e:
         return {"error": f"SyntaxError: {e}", "traceback": ""}
     except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
+        tb = _filter_traceback(e)
         return {"error": f"{type(e).__name__}: {e}", "traceback": tb}
+
+
+def _filter_traceback(exc: BaseException) -> str:
+    """过滤 traceback，去掉引擎入口帧，保留 <pysandbox> 及其下游所有帧。"""
+    frames = _tb_mod.extract_tb(exc.__traceback__)
+    # 找到第一个 <pysandbox> 帧，从那里开始保留
+    start = next((i for i, f in enumerate(frames) if f.filename == '<pysandbox>'), None)
+    if start is None:
+        return ""
+    kept = frames[start:]
+    # 外部函数帧：隐藏文件路径，只保留函数名
+    cleaned = []
+    for f in kept:
+        if f.filename != '<pysandbox>':
+            cleaned.append(_tb_mod.FrameSummary('<external>', 0, f.name))
+        else:
+            cleaned.append(f)
+    lines = ["Traceback (most recent call last):"]
+    lines.extend(_tb_mod.format_list(cleaned))
+    return "".join(lines).rstrip()

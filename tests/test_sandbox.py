@@ -87,10 +87,9 @@ class TestSecurity:
         assert "error" in result
         assert "SyntaxError" in result["error"]
 
-    def test_class_blocked(self):
-        result = execute("class Foo: pass", {})
-        assert "error" in result
-        assert "SyntaxError" in result["error"]
+    def test_class_allowed(self):
+        result = execute("class Foo:\n    x = 1\nFoo.x", {})
+        assert result["result"] == 1
 
     def test_eval_not_available(self):
         result = execute("eval('1+1')", {})
@@ -107,20 +106,17 @@ class TestSecurity:
         assert "error" in result
         assert "NameError" in result["error"]
 
-    def test_getattr_not_available(self):
+    def test_getattr_available(self):
         result = execute("getattr([], 'append')", {})
-        assert "error" in result
-        assert "NameError" in result["error"]
+        assert result["result"] is not None
 
-    def test_globals_not_available(self):
-        result = execute("globals()", {})
-        assert "error" in result
-        assert "NameError" in result["error"]
+    def test_globals_available(self):
+        result = execute("type(globals())", {})
+        assert result["result"] == dict
 
-    def test_dir_not_available(self):
-        result = execute("dir([])", {})
-        assert "error" in result
-        assert "NameError" in result["error"]
+    def test_dir_available(self):
+        result = execute("'append' in dir([])", {})
+        assert result["result"] is True
 
     def test_dunder_import_not_available(self):
         result = execute("__import__('os')", {})
@@ -136,10 +132,10 @@ class TestSecurity:
         result = execute("type(42)", {})
         assert result["result"] == int
 
-    def test_type_three_args_blocked(self):
-        result = execute("type('X', (int,), {})", {})
-        assert "error" in result
-        assert "TypeError" in result["error"]
+    def test_type_three_args_allowed(self):
+        result = execute("type('X', (object,), {'x': 1})", {})
+        assert result["result"] is not None
+        assert result["result"].x == 1
 
     def test_safe_builtins_available(self):
         """安全内置函数应该可用。"""
@@ -151,6 +147,39 @@ class TestSecurity:
 
         result = execute("str(42)", {})
         assert result["result"] == "42"
+
+    def test_traceback_filters_internal_frames(self):
+        """traceback 只包含 <pysandbox> 帧，不泄露引擎路径。"""
+        result = execute("x = 1\ny = x / 0", {})
+        assert "error" in result
+        assert "ZeroDivisionError" in result["error"]
+        tb = result.get("traceback", "")
+        assert "_engine.py" not in tb
+        assert "<pysandbox>" in tb
+
+    def test_traceback_no_internal_paths(self):
+        """嵌套调用的 traceback 也不应泄露内部路径。"""
+        code = "def foo():\n    raise ValueError('bad')\nfoo()"
+        result = execute(code, {})
+        assert "error" in result
+        tb = result.get("traceback", "")
+        assert "_engine.py" not in tb
+        assert "_app_impl.py" not in tb
+
+    def test_traceback_injected_function_no_leak(self):
+        """注入函数抛错时，traceback 不泄露外部路径。"""
+        def bad_fn():
+            raise RuntimeError("boom")
+
+        result = execute("bad_fn()", {"bad_fn": bad_fn})
+        assert "error" in result
+        assert "RuntimeError" in result["error"]
+        tb = result.get("traceback", "")
+        # 只保留 <pysandbox> 帧，外部调用栈不泄露
+        assert "test_sandbox.py" not in tb
+        assert "_engine.py" not in tb
+        assert "<pysandbox>" in tb
+        assert "_app_impl.py" not in tb
 
 
 # ============================================================
