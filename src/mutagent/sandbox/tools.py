@@ -18,9 +18,31 @@ class PySandboxTools(MCPToolSet):
     async def pysandbox(self, code: str) -> str | ToolResult:
         """Execute Python code in a sandboxed environment.
 
-All available functions are pre-injected as namespace objects.
-Use help(func) for detailed documentation.
-import is not supported.
+External MCP servers, CLI tools, and in-process capabilities are pre-injected
+as namespace objects (e.g. `web`, `mutbot`, `playwright`). Discover what's
+available:
+
+    help()                       -> list all namespaces
+    help(web)                    -> list functions in `web` namespace
+    help(web.fetch)              -> show docstring + signature
+
+Calling convention — all namespace functions are keyword-only:
+
+    web.fetch(url="https://example.com")           # correct
+    web.fetch("https://example.com")               # WRONG — TypeError
+
+Supported Python: variables, if/for/while, try/except, function/lambda,
+f-string, comprehensions, print(), common built-ins (len, range, sorted,
+str, int, list, dict, ...).
+
+NOT supported (will raise): import, class, eval, exec, open, getattr,
+globals, dir, __builtins__ access.
+
+Multi-step example:
+
+    results = web.search(query="Python PEP 8")
+    for r in results[:3]:
+        print(web.fetch(url=r["url"]))
 """
         if self._app is None:
             return ToolResult.error("Sandbox not initialized")
