@@ -12,7 +12,7 @@ import mutagent
 from mutagent.sandbox.app import SandboxApp
 from mutagent.sandbox._engine import execute
 from mutagent.sandbox._namespace import Namespace, NamespaceRegistry
-from mutagent.sandbox._adapter_mcp import bridge_mcp_server, StdioMCPClient
+from mutagent.sandbox._adapter_mcp import bridge_mcp_server, AnyMCPClient
 from mutagent.sandbox._adapter_cli import build_cli_namespace
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,7 @@ def _get_cli_config(self: SandboxApp) -> dict[str, dict[str, Any]]:
     return self.config.get("cli_sources", default={}) or {}
 
 
-def _get_mcp_clients(self: SandboxApp) -> dict[str, StdioMCPClient]:
+def _get_mcp_clients(self: SandboxApp) -> dict[str, AnyMCPClient]:
     clients = getattr(self, '_mcp_clients', None)
     if clients is None:
         clients = {}
@@ -191,12 +191,8 @@ async def _setup(self: SandboxApp) -> None:
 
     # MCP 连接
     for ns_name, server_config in mcp_config.items():
-        command = server_config.get("command", "")
-        args = server_config.get("args", [])
-        shell = server_config.get("shell", False)
         try:
-            ns, client = await bridge_mcp_server(
-                ns_name, command, args, shell=shell)
+            ns, client = await bridge_mcp_server(ns_name, server_config)
             registry.add(ns)
             clients[ns_name] = client
         except Exception as e:

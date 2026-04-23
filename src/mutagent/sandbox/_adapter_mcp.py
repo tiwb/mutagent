@@ -1,21 +1,50 @@
 """MCP 桥接 — 连接外部 MCP server，自动生成命名空间函数。
 
-支持 stdio 模式（subprocess + JSON-RPC over stdin/stdout）。
-TODO: 支持 Streamable HTTP 模式（通过 mutagent.net.client.MCPClient）。
+支持两种 transport:
+- stdio: 通过 subprocess + JSON-RPC over stdin/stdout（`StdioMCPClient`）
+- http : 通过 `mutio.mcp.client.MCPClient` 连接 Streamable HTTP server（`HTTPMCPClient`）
+
+两个 client 接口对齐（duck typing）:
+``connect()`` / ``list_tools()`` / ``call_tool(name, arguments)`` / ``close()``。
 """
 
 import asyncio
 import json
 import subprocess
 import sys
-from typing import Any
+from typing import Any, Union
 
 from mutagent.sandbox._namespace import Namespace
+from mutio.mcp.client import MCPClient
 
 # Windows: 抑制子进程弹出控制台窗口
 _POPEN_KWARGS: dict[str, Any] = {}
 if sys.platform == "win32":
     _POPEN_KWARGS["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+
+def _extract_content(result: dict[str, Any]) -> Any:
+    """从 MCP tool 调用结果中提取内容。
+
+    - isError=True 抛 RuntimeError
+    - 单个 text: 尝试 JSON 解析，失败返回原字符串
+    - 多个 text: 换行拼接
+    - 没有 text: 返回 raw content 列表
+    """
+    content = result.get("content", [])
+    if result.get("isError"):
+        texts = [c.get("text", "") for c in content if c.get("type") == "text"]
+        raise RuntimeError('\n'.join(texts) if texts else "MCP tool call failed")
+
+    texts = [c.get("text", "") for c in content if c.get("type") == "text"]
+    if len(texts) == 1:
+        try:
+            return json.loads(texts[0])
+        except (json.JSONDecodeError, ValueError):
+            return texts[0]
+    elif texts:
+        return '\n'.join(texts)
+    return content
 
 
 class StdioMCPClient:
@@ -74,23 +103,7 @@ class StdioMCPClient:
             "name": name,
             "arguments": arguments,
         })
-        # 提取文本内容
-        content = result.get("content", [])
-        if result.get("isError"):
-            texts = [c.get("text", "") for c in content if c.get("type") == "text"]
-            raise RuntimeError('\n'.join(texts) if texts else "MCP tool call failed")
-
-        # 返回内容：优先文本，其次原始 content
-        texts = [c.get("text", "") for c in content if c.get("type") == "text"]
-        if len(texts) == 1:
-            # 尝试解析 JSON
-            try:
-                return json.loads(texts[0])
-            except (json.JSONDecodeError, ValueError):
-                return texts[0]
-        elif texts:
-            return '\n'.join(texts)
-        return content
+        return _extract_content(result)
 
     async def close(self) -> None:
         """关闭连接。"""
@@ -160,22 +173,75 @@ class StdioMCPClient:
             self._process.stdin.flush()
 
 
-async def bridge_mcp_server(ns_name: str, command: str,
-                            args: list[str] | None = None,
-                            shell: bool = False) -> tuple[Namespace, StdioMCPClient]:
+class HTTPMCPClient:
+    """HTTP MCP client — 薄包 `mutio.mcp.client.MCPClient`，对齐 StdioMCPClient 接口。"""
+
+    def __init__(self, url: str, timeout: float = 30.0):
+        self._mcp = MCPClient(url=url, timeout=timeout)
+
+    async def connect(self) -> dict[str, Any]:
+        """连接并完成 initialize 握手。"""
+        await self._mcp.connect()
+        return {
+            "serverInfo": self._mcp.server_info,
+            "capabilities": self._mcp.server_capabilities,
+        }
+
+    async def list_tools(self) -> list[dict[str, Any]]:
+        """获取 server 的 tool 列表。"""
+        return await self._mcp.list_tools()
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        """调用 tool 并返回结果。"""
+        result = await self._mcp.call_tool(name, **arguments)
+        return _extract_content(result)
+
+    async def close(self) -> None:
+        """关闭连接。"""
+        await self._mcp.close()
+
+
+AnyMCPClient = Union[StdioMCPClient, HTTPMCPClient]
+
+
+async def bridge_mcp_server(ns_name: str,
+                            server_config: dict[str, Any]
+                            ) -> tuple[Namespace, AnyMCPClient]:
     """桥接一个 MCP server，返回命名空间和 client。
 
     Args:
-        ns_name: 命名空间名（如 "playwright"）
-        command: MCP server 启动命令
-        args: 命令参数
-        shell: 是否使用 shell 模式启动
+        ns_name: 命名空间名（如 "playwright"、"serena"）
+        server_config: server 配置，按 ``transport`` 字段分派
+            - stdio（默认）: ``command``（必需）, ``args``, ``shell``
+            - http: ``url``（必需）, ``timeout``
 
     Returns:
         (namespace, client) 元组
     """
-    client = StdioMCPClient(command, args, shell=shell)
+    transport = server_config.get("transport", "stdio")
+    client: AnyMCPClient
+    if transport == "stdio":
+        command = server_config.get("command", "")
+        if not command:
+            raise ValueError(f"MCP source '{ns_name}': stdio transport requires 'command'")
+        client = StdioMCPClient(
+            command,
+            server_config.get("args", []),
+            shell=server_config.get("shell", False),
+        )
+    elif transport == "http":
+        url = server_config.get("url", "")
+        if not url:
+            raise ValueError(f"MCP source '{ns_name}': http transport requires 'url'")
+        client = HTTPMCPClient(
+            url,
+            timeout=server_config.get("timeout", 30.0),
+        )
+    else:
+        raise ValueError(f"MCP source '{ns_name}': unknown transport {transport!r}")
+
     await client.connect()
+    main_loop = asyncio.get_running_loop()
 
     tools = await client.list_tools()
     ns = Namespace(ns_name)
@@ -186,16 +252,21 @@ async def bridge_mcp_server(ns_name: str, command: str,
         input_schema = tool.get("inputSchema", {})
 
         # 生成同步包装函数
-        fn = _make_tool_func(client, tool_name, tool_desc, input_schema)
+        fn = _make_tool_func(client, tool_name, tool_desc, input_schema, main_loop)
         ns.register(tool_name, fn, tool_desc)
 
     return ns, client
 
 
-def _make_tool_func(client: StdioMCPClient, tool_name: str,
+def _make_tool_func(client: AnyMCPClient, tool_name: str,
                     description: str,
-                    input_schema: dict) -> Any:
-    """为一个 MCP tool 生成 Python 函数。"""
+                    input_schema: dict,
+                    main_loop: asyncio.AbstractEventLoop) -> Any:
+    """为一个 MCP tool 生成 Python 函数。
+
+    MCP client 的 IO（特别是 httpx.AsyncClient）绑定在创建它的 loop 上，
+    所有调用必须通过 `run_coroutine_threadsafe` 回到 setup 时捕获的 main_loop。
+    """
     # 从 schema 提取参数信息
     properties = input_schema.get("properties", {})
     required = set(input_schema.get("required", []))
@@ -213,15 +284,11 @@ def _make_tool_func(client: StdioMCPClient, tool_name: str,
     doc = '\n'.join(doc_lines)
 
     def tool_func(**kwargs):
-        # 守护进程模式：exec_code 在线程池执行，需要 run_coroutine_threadsafe 回到主 loop
-        # 独立模式：没有 running loop，用 asyncio.run
-        try:
-            loop = asyncio.get_running_loop()
-            future = asyncio.run_coroutine_threadsafe(
-                client.call_tool(tool_name, kwargs), loop)
-            return future.result(timeout=120)
-        except RuntimeError:
-            return asyncio.run(client.call_tool(tool_name, kwargs))
+        # pysandbox 的 exec_code 在线程池里跑，没有 running loop；即使有，
+        # 也必须汇聚到 main_loop（client 资源绑在那里）。不提供独立脚本 fallback。
+        future = asyncio.run_coroutine_threadsafe(
+            client.call_tool(tool_name, kwargs), main_loop)
+        return future.result(timeout=120)
 
     tool_func.__name__ = tool_name
     tool_func.__doc__ = doc
