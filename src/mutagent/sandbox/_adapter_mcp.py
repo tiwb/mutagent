@@ -95,10 +95,11 @@ class StdioMCPClient:
     async def close(self) -> None:
         """关闭连接。"""
         if self._process:
-            try:
-                self._process.stdin.close()
-            except Exception:
-                pass
+            if self._process.stdin is not None:
+                try:
+                    self._process.stdin.close()
+                except Exception:
+                    pass
             self._process.terminate()
             try:
                 self._process.wait(timeout=5)

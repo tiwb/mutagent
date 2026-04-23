@@ -61,14 +61,15 @@ def execute(code: str, namespace: dict[str, Any],
                     raise SyntaxError("import statements are not supported")
 
             last_expr_value = None
-            if tree.body and isinstance(tree.body[-1], ast.Expr):
-                last_expr = tree.body.pop()
+            last_node = tree.body[-1] if tree.body else None
+            if isinstance(last_node, ast.Expr):
+                tree.body.pop()
                 if tree.body:
                     exec(compile(ast.Module(body=tree.body, type_ignores=[]),
                                  '<pysandbox>', 'exec'),
                          globals_dict, locals_dict)
                 last_expr_value = eval(
-                    compile(ast.Expression(body=last_expr.value),
+                    compile(ast.Expression(body=last_node.value),
                             '<pysandbox>', 'eval'),
                     globals_dict, locals_dict)
             else:
