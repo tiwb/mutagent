@@ -1,9 +1,35 @@
 """PySandbox MCP tool — 通过 MCPToolSet 暴露给外部消费者。"""
 
 import asyncio
+from typing import Any
 
 from mutagent.net.mcp import MCPToolSet
 from mutagent.net._mcp_proto import ToolResult
+
+
+def format_exec_result(result: dict[str, Any]) -> tuple[str, bool]:
+    """把 SandboxApp.exec_code 的返回拍成文本。返回 (text, is_error)。
+
+    字符串类型的 result 直接原文输出(多行原文可读);其他类型用 repr()(dict/list
+    的 repr ≈ str,自定义对象保留结构)。pysandbox 不是 REPL,不需要 REPL 式区分
+    "a"/'a' 的 repr 包装。
+    """
+    if "error" in result:
+        text = result["error"]
+        if result.get("traceback"):
+            text += "\n" + result["traceback"]
+        return text, True
+
+    parts: list[str] = []
+    if result.get("stdout"):
+        parts.append(result["stdout"])
+    value = result.get("result")
+    if value is not None:
+        if isinstance(value, str):
+            parts.append(value)
+        else:
+            parts.append(repr(value))
+    return ("\n".join(parts) if parts else "(no output)"), False
 
 
 class PySandboxTools(MCPToolSet):
@@ -50,15 +76,7 @@ Multi-step example:
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, self._app.exec_code, code)
 
-        if "error" in result:
-            text = result["error"]
-            if result.get("traceback"):
-                text += "\n" + result["traceback"]
+        text, is_error = format_exec_result(result)
+        if is_error:
             return ToolResult.error(text)
-
-        parts = []
-        if result.get("stdout"):
-            parts.append(result["stdout"])
-        if result.get("result") is not None:
-            parts.append(repr(result["result"]))
-        return '\n'.join(parts) if parts else "(no output)"
+        return text
