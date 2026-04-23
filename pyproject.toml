@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mutagent"
-version = "0.6.999"
+version = "0.7.999"
 description = "A Python AI Agent framework for runtime self-iterating code"
 readme = "README.md"
 license = "MIT"
@@ -24,8 +24,8 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "mutobj~=0.6.0",
-    "mutio~=0.1.0",
+    "mutobj~=0.7.0",
+    "mutio~=0.7.0",
 ]
 
 [project.optional-dependencies]
