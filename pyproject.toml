@@ -60,4 +60,5 @@ asyncio_mode = "auto"
 
 [tool.pyright]
 pythonVersion = "3.11"
+include = ["src"]
 extraPaths = ["src"]
