@@ -74,7 +74,7 @@ def prepare_messages(self: AgentContext) -> list[Message]:
 
 @mutagent.impl(AgentContext.update_usage)
 def update_usage(self: AgentContext, usage: dict[str, int]) -> None:
-    """累加 token 用量。"""
+    """累加 token 用量，包括 cache 字段。"""
     total = getattr(self, '_total_input_tokens', 0)
     total += usage.get('input_tokens', 0)
     object.__setattr__(self, '_total_input_tokens', total)
@@ -82,6 +82,28 @@ def update_usage(self: AgentContext, usage: dict[str, int]) -> None:
     total_out = getattr(self, '_total_output_tokens', 0)
     total_out += usage.get('output_tokens', 0)
     object.__setattr__(self, '_total_output_tokens', total_out)
+
+    # Cache read — Anthropic: cache_read_input_tokens, OpenAI: cached_tokens → cache_read_input_tokens
+    cache_read = getattr(self, '_total_cache_read_tokens', 0)
+    cache_read += usage.get('cache_read_input_tokens', 0)
+    object.__setattr__(self, '_total_cache_read_tokens', cache_read)
+
+    # Cache write — Anthropic only
+    cache_write = getattr(self, '_total_cache_write_tokens', 0)
+    cache_write += usage.get('cache_creation_input_tokens', 0)
+    object.__setattr__(self, '_total_cache_write_tokens', cache_write)
+
+
+@mutagent.impl(AgentContext.get_cache_read_tokens)
+def get_cache_read_tokens(self: AgentContext) -> int:
+    """返回累计缓存读取 token 数。"""
+    return getattr(self, '_total_cache_read_tokens', 0)
+
+
+@mutagent.impl(AgentContext.get_cache_write_tokens)
+def get_cache_write_tokens(self: AgentContext) -> int:
+    """返回累计缓存写入 token 数。"""
+    return getattr(self, '_total_cache_write_tokens', 0)
 
 
 @mutagent.impl(AgentContext.get_context_used)

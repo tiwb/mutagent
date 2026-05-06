@@ -47,6 +47,14 @@ class AgentContext(mutagent.Declaration):
         """获取 context 使用百分比。context_window=0 时返回 None。"""
         return context_impl.get_context_percent(self)
 
+    def get_cache_read_tokens(self) -> int:
+        """获取累计缓存读取 tokens。"""
+        return context_impl.get_cache_read_tokens(self)
+
+    def get_cache_write_tokens(self) -> int:
+        """获取累计缓存写入 tokens。"""
+        return context_impl.get_cache_write_tokens(self)
+
 
 from .builtins import context_impl
 mutagent.register_module_impls(context_impl)

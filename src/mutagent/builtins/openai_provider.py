@@ -245,6 +245,9 @@ def _response_from_openai(data: dict[str, Any]) -> Response:
         usage["input_tokens"] = usage_data["prompt_tokens"]
     if "completion_tokens" in usage_data:
         usage["output_tokens"] = usage_data["completion_tokens"]
+    prompt_details = usage_data.get("prompt_tokens_details", {})
+    if isinstance(prompt_details, dict) and "cached_tokens" in prompt_details:
+        usage["cache_read_input_tokens"] = prompt_details["cached_tokens"]
 
     message = Message(role="assistant", blocks=blocks)
     return Response(message=message, stop_reason=stop_reason, usage=usage)
@@ -385,6 +388,9 @@ async def _send_stream(
                         usage["input_tokens"] = usage_data["prompt_tokens"]
                     if "completion_tokens" in usage_data:
                         usage["output_tokens"] = usage_data["completion_tokens"]
+                    prompt_details = usage_data.get("prompt_tokens_details", {})
+                    if isinstance(prompt_details, dict) and "cached_tokens" in prompt_details:
+                        usage["cache_read_input_tokens"] = prompt_details["cached_tokens"]
 
                 choices = data.get("choices", [])
                 if not choices:
