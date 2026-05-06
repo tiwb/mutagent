@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import mutagent
@@ -25,6 +26,7 @@ class App(mutagent.Declaration):
     """
 
     config: Config
+    config_path: Path
     agent: Agent
     userio: UserIO
 
@@ -62,19 +64,46 @@ class App(mutagent.Declaration):
         """
         return main_impl.run(self)
 
+    def run_webui(
+        self,
+        *,
+        host: str = "127.0.0.1",
+        port: int = 0,
+        open_browser: bool = True,
+    ) -> None:
+        """Run the built-in WebUI server."""
+        return main_impl.run_webui(
+            self,
+            host=host,
+            port=port,
+            open_browser=open_browser,
+        )
+
 
 def main() -> None:
     """Bootstrap mutagent.  Not overridable.
     """
     import argparse
+    from mutagent.webui.cli import add_webui_subcommand, dispatch_webui
+
     parser = argparse.ArgumentParser(description="mutagent — AI Agent Framework")
     parser.add_argument("-V", "--version", action="version", version=f"mutagent {mutagent.__version__}")
     parser.add_argument("--config", default=".mutagent/config.json",
                         help="Path to config file (default: .mutagent/config.json)")
+    parser.add_argument("--headless", action="store_true",
+                        help="Explicitly use the default terminal UI")
+    subparsers = parser.add_subparsers(dest="command")
+    add_webui_subcommand(subparsers)
     args = parser.parse_args()
+
+    if args.command == "webui" and args.headless:
+        parser.error("--headless cannot be used together with the webui subcommand")
 
     app = App()
     app.load_config(args.config)
+    if args.command == "webui":
+        dispatch_webui(app, args)
+        return
     app.run()
 
 

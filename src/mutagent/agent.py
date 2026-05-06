@@ -8,7 +8,7 @@ import mutagent
 
 if TYPE_CHECKING:
     from mutagent.client import LLMClient
-    from mutagent.config import Config
+    from mutagent.config import Config, Disposable
     from mutagent.context import AgentContext
     from mutagent.messages import Message, StreamEvent, ToolUseBlock
     from mutagent.tools import ToolSet
@@ -65,6 +65,30 @@ class Agent(mutagent.Declaration):
             tool_calls: List of ToolUseBlock from the LLM response.
         """
         return await agent_impl.handle_tool_calls(self, tool_calls)
+
+    async def submit(self, text: str) -> None:
+        """Submit one user turn for background processing."""
+        return await agent_impl.submit(self, text)
+
+    def cancel(self) -> bool:
+        """Cancel the currently running turn if there is one."""
+        return agent_impl.cancel(self)
+
+    def subscribe(self, callback: Callable[[StreamEvent], Any]) -> Disposable:
+        """Subscribe to streaming events emitted by submit()."""
+        return agent_impl.subscribe(self, callback)
+
+    def select_model(self, name: str) -> None:
+        """Switch the model used for the next turn."""
+        return agent_impl.select_model(self, name)
+
+    def list_models(self) -> list[dict[str, Any]]:
+        """List configured models for UI selectors."""
+        return agent_impl.list_models(self)
+
+    def is_busy(self) -> bool:
+        """Return True when a turn is currently running."""
+        return agent_impl.is_busy(self)
 
 
 from .builtins import agent_impl

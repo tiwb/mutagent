@@ -28,6 +28,9 @@ dependencies = [
     "mutio~=0.7.0",
 ]
 
+[project.scripts]
+mutagent = "mutagent.main:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
@@ -36,9 +39,8 @@ dev = [
 tui = [
     "textual>=0.40",
 ]
-web = [
-    "fastapi>=0.100",
-    "uvicorn>=0.20",
+webui = [
+    "mutgui~=0.1.0",
 ]
 web-extract = [
     "readability-lxml>=0.8",
@@ -52,6 +54,9 @@ Repository = "https://github.com/tiwb/mutagent"
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["mutagent*"]
+
+[tool.setuptools.package-data]
+mutagent = ["static/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

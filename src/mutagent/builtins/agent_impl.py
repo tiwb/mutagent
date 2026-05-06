@@ -1,16 +1,20 @@
 """mutagent.builtins.agent -- Agent main loop implementation."""
 
+import asyncio
+import inspect
 import logging
 import time
-from typing import AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable
 from uuid import uuid4
 
 import mutagent
 from mutagent.agent import Agent
+from mutagent.config import Disposable
 from mutagent.messages import (
     Message, Response, StreamEvent, TextBlock, ToolUseBlock,
     TurnEndBlock, TurnStartBlock,
 )
+from mutagent.provider import LLMProvider
 from mutagent.runtime.log_store import _tool_log_buffer
 
 logger = logging.getLogger(__name__)
@@ -38,6 +42,21 @@ def _get_tool_capture_enabled(agent: Agent) -> bool:
         if log_store is not None:
             return log_store.tool_capture_enabled
     return False
+
+
+def _event_listeners(agent: Agent) -> list[Callable[[StreamEvent], Any]]:
+    listeners = getattr(agent, "_event_listeners", None)
+    if listeners is None:
+        listeners = []
+        object.__setattr__(agent, "_event_listeners", listeners)
+    return listeners
+
+
+async def _emit_event(agent: Agent, event: StreamEvent) -> None:
+    for callback in list(_event_listeners(agent)):
+        result = callback(event)
+        if inspect.isawaitable(result):
+            await result
 
 
 @mutagent.impl(Agent.run)
@@ -254,3 +273,128 @@ async def handle_tool_calls(
     for block in tool_calls:
         block.status = "running"
         await self.tools.dispatch(block)
+
+
+@mutagent.impl(Agent.subscribe)
+def subscribe(
+    self: Agent, callback: Callable[[StreamEvent], Any]
+) -> Disposable:
+    listeners = _event_listeners(self)
+    listeners.append(callback)
+
+    def _dispose() -> None:
+        if callback in listeners:
+            listeners.remove(callback)
+
+    return Disposable(_dispose)
+
+
+@mutagent.impl(Agent.is_busy)
+def is_busy(self: Agent) -> bool:
+    task = getattr(self, "_current_task", None)
+    return bool(task is not None and not task.done())
+
+
+@mutagent.impl(Agent.submit)
+async def submit(self: Agent, text: str) -> None:
+    if is_busy(self):
+        raise RuntimeError("Agent is busy")
+
+    turn_id = _gen_id()
+    logger.info("Scheduling submit turn %s (%d chars)", turn_id, len(text))
+
+    async def _single_input() -> AsyncIterator[Message]:
+        yield Message(
+            role="user",
+            blocks=[TurnStartBlock(turn_id=turn_id), TextBlock(text=text)],
+        )
+
+    async def _drive() -> None:
+        saw_turn_done = False
+        try:
+            logger.info("Submit task started (turn=%s)", turn_id)
+            async for event in self.run(_single_input()):
+                if event.type == "turn_done":
+                    saw_turn_done = True
+                await _emit_event(self, event)
+            logger.info("Submit task finished (turn=%s)", turn_id)
+        except asyncio.CancelledError:
+            logger.info("Submit task cancelled (turn=%s)", turn_id)
+            if not saw_turn_done:
+                await _emit_event(
+                    self,
+                    StreamEvent(
+                        type="turn_done",
+                        turn_id=turn_id,
+                        timestamp=time.time(),
+                    ),
+                )
+            raise
+        except Exception as exc:
+            logger.exception("Agent submit task failed")
+            await _emit_event(
+                self,
+                StreamEvent(
+                    type="error",
+                    error=str(exc),
+                    turn_id=turn_id,
+                    timestamp=time.time(),
+                ),
+            )
+            if not saw_turn_done:
+                await _emit_event(
+                    self,
+                    StreamEvent(
+                        type="turn_done",
+                        turn_id=turn_id,
+                        timestamp=time.time(),
+                    ),
+                )
+
+    task = asyncio.create_task(_drive())
+    object.__setattr__(self, "_current_task", task)
+
+    def _cleanup(done: asyncio.Task[None]) -> None:
+        current = getattr(self, "_current_task", None)
+        if current is done:
+            object.__setattr__(self, "_current_task", None)
+        try:
+            done.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("Agent submit task crashed")
+
+    task.add_done_callback(_cleanup)
+
+
+@mutagent.impl(Agent.cancel)
+def cancel(self: Agent) -> bool:
+    task = getattr(self, "_current_task", None)
+    if task is None or task.done():
+        logger.info("Cancel ignored: no running task")
+        return False
+    logger.info("Cancelling current submit task")
+    task.cancel()
+    return True
+
+
+@mutagent.impl(Agent.select_model)
+def select_model(self: Agent, name: str) -> None:
+    if is_busy(self):
+        raise RuntimeError("Cannot switch model while agent is busy")
+
+    spec = LLMProvider.resolve_model(self.config, name)
+    if spec is None:
+        raise ValueError(f"Model not found: {name}")
+
+    from mutagent.builtins.main_impl import _create_llm_client
+
+    self.llm = _create_llm_client(spec, getattr(self.llm, "api_recorder", None))
+    if self.llm.context_window:
+        self.context.context_window = self.llm.context_window
+
+
+@mutagent.impl(Agent.list_models)
+def list_models(self: Agent) -> list[dict[str, Any]]:
+    return LLMProvider.list_models(self.config)

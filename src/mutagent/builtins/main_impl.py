@@ -7,7 +7,9 @@ import json
 import logging
 import os
 import re
+import socket
 import sys
+import webbrowser
 from pathlib import Path
 from typing import Any
 
@@ -127,6 +129,25 @@ def _create_llm_client(
     )
 
 
+def _ensure_console_logging(config: Config) -> None:
+    """Attach a stdout handler for WebUI debugging when not already present."""
+    root_logger = logging.getLogger("mutagent")
+    for handler in root_logger.handlers:
+        if getattr(handler, "_mutagent_console_handler", False):
+            return
+
+    level_name = str(config.get("logging.console_level", default="INFO")).upper()
+    level = getattr(logging, level_name, logging.INFO)
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler._mutagent_console_handler = True  # type: ignore[attr-defined]
+    console_handler.setLevel(level)
+    console_handler.setFormatter(SingleLineFormatter(
+        "%(asctime)s %(levelname)-8s %(name)s - %(message)s"
+    ))
+    root_logger.addHandler(console_handler)
+    logger.info("Console logging enabled for WebUI (level=%s)", level_name)
+
+
 SYSTEM_PROMPT = """\
 You are **mutagent**, a self-evolving Python AI Agent framework.
 
@@ -238,6 +259,11 @@ def load_config(self, config_path: str = ".mutagent/config.json") -> None:
     p = Path(config_path).expanduser()
     if not p.is_absolute():
         p = (Path.cwd() / p).resolve()
+    # 项目级配置不存在时 fallback 到用户级 ~/.mutagent/config.json
+    if not p.exists():
+        user_p = Path.home() / ".mutagent" / "config.json"
+        if user_p.exists():
+            p = user_p
     if p.exists():
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
@@ -247,6 +273,7 @@ def load_config(self, config_path: str = ".mutagent/config.json") -> None:
     else:
         data = {}
     self.config = DictConfig(_data=data, _listeners=[])
+    self.config_path = p
 
     # Set environment variables from config
     for key, value in self.config.get("env", default={}).items():
@@ -515,3 +542,48 @@ def run(self) -> None:
         pass
     loop.call_soon_threadsafe(loop.stop)
     loop_thread.join(timeout=2)
+
+
+@mutagent.impl(App.run_webui)
+def run_webui(
+    self,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 0,
+    open_browser: bool = True,
+) -> None:
+    try:
+        from mutagent.webui.server import WebUIServer
+    except ImportError as exc:
+        raise SystemExit("需要先安装 WebUI 依赖：pip install mutagent[webui]") from exc
+
+    self.setup_agent(system_prompt=SYSTEM_PROMPT)
+    _ensure_console_logging(self.config)
+
+    listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        listen_sock.bind((host, port))
+    except OSError as exc:
+        listen_sock.close()
+        raise SystemExit(str(exc)) from exc
+
+    actual_host, actual_port = listen_sock.getsockname()[:2]
+    url = f"http://{actual_host}:{actual_port}/"
+    server = WebUIServer(app=self, agent=self.agent, host=actual_host, port=actual_port)
+    logger.info("Starting mutagent WebUI server at %s", url)
+
+    print(f"mutagent webui: {url}")
+    if open_browser:
+        try:
+            webbrowser.open(url)
+        except Exception:
+            logger.warning("Failed to open browser for %s", url, exc_info=True)
+
+    try:
+        server.run(listen=[listen_sock])
+    finally:
+        try:
+            listen_sock.close()
+        except OSError:
+            pass

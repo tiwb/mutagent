@@ -21,6 +21,12 @@ env/
 *.swp
 *.swo
 
+# Node / frontend
+/frontend/node_modules/
+
+# Generated frontend runtime assets
+/src/mutagent/static/
+
 # OS
 .DS_Store
 Thumbs.db

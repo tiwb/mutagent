@@ -1,10 +1,12 @@
 """Tests for Agent declaration and main loop implementation."""
 
+import asyncio
 from unittest.mock import MagicMock
 
 import pytest
 
 import mutagent
+from mutagent.builtins.main_impl import DictConfig
 from mutagent.agent import Agent
 from mutagent.client import LLMClient
 from mutagent.context import AgentContext
@@ -394,6 +396,85 @@ class TestStreamingEventSequence:
 
         text = await _collect_text(agent.run(_single_input("Test"), stream=False))
         assert text == "Non-streamed"
+
+
+# ---------------------------------------------------------------------------
+# Runtime API tests
+# ---------------------------------------------------------------------------
+
+class TestAgentRuntimeAPI:
+
+    @pytest.fixture
+    def agent(self):
+        agent, mgr = _make_agent()
+        agent.config = DictConfig(
+            _data={
+                "providers": {
+                    "test": {
+                        "provider": "AnthropicProvider",
+                        "models": {
+                            "alpha": {"model_id": "model-alpha"},
+                            "beta": {"model_id": "model-beta"},
+                        },
+                        "auth_token": "test-key",
+                        "base_url": "https://api.test.com",
+                    }
+                },
+                "default_model": "alpha",
+            },
+            _listeners=[],
+        )
+        yield agent
+        mgr.cleanup()
+
+    async def test_submit_emits_events(self, agent):
+        response = Response(
+            message=Message(role="assistant", blocks=[TextBlock(text="Hello from submit")]),
+            stop_reason="end_turn",
+        )
+
+        async def mock_send(*args, **kwargs):
+            yield StreamEvent(type="text_delta", text="Hello from submit")
+            yield StreamEvent(type="response_done", response=response)
+
+        agent.llm.send_message = mock_send
+        received: list[str] = []
+        agent.subscribe(lambda event: received.append(event.type))
+
+        await agent.submit("Hi")
+        task = getattr(agent, "_current_task")
+        assert task is not None
+        await task
+
+        assert received == ["response_start", "text_delta", "response_done", "turn_done"]
+        assert agent.is_busy() is False
+        assert _get_text(agent.context.messages[-1]) == "Hello from submit"
+
+    async def test_cancel_cancels_running_turn(self, agent):
+        async def mock_send(*args, **kwargs):
+            yield StreamEvent(type="text_delta", text="partial")
+            await asyncio.sleep(1)
+
+        agent.llm.send_message = mock_send
+        received: list[str] = []
+        agent.subscribe(lambda event: received.append(event.type))
+
+        await agent.submit("Stop soon")
+        await asyncio.sleep(0.05)
+        assert agent.cancel() is True
+        task = getattr(agent, "_current_task")
+        assert task is not None
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert received[:2] == ["response_start", "text_delta"]
+        assert received[-1] == "turn_done"
+        assert agent.is_busy() is False
+
+    def test_select_model_switches_client(self, agent):
+        assert {model["name"] for model in agent.list_models()} == {"alpha", "beta"}
+        agent.select_model("beta")
+        assert agent.llm.model == "model-beta"
 
 
 # ---------------------------------------------------------------------------
