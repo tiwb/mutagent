@@ -6,17 +6,15 @@ from unittest.mock import patch
 
 import pytest
 
-from mutagent.runtime import ansi
-from mutagent.runtime.ansi import (
+from mutagent.cli import ansi
+from mutagent.cli.ansi import (
     _BOLD, _CYAN, _DIM, _GREEN, _RED, _RESET, _YELLOW,
     bold, bold_cyan, bold_red, cyan, dim, green,
     highlight_markdown_line, red, yellow,
-)
-from mutagent.builtins.userio_impl import (
     _format_tool_call, _format_tool_result, _format_value,
     _MAX_SINGLE_LINE, _MAX_VALUE_LEN,
+    _colorize_task_line,
 )
-from mutagent.builtins.block_handlers import _colorize_task_line
 
 
 # ---------------------------------------------------------------------------

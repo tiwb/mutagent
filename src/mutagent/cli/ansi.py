@@ -1,11 +1,7 @@
-"""mutagent.runtime.ansi -- Lightweight ANSI color utilities.
+"""mutagent.cli.ansi -- ANSI color utilities + tool formatting + Markdown highlighting.
 
-Provides terminal color detection and ANSI SGR wrapper functions for the
-basic interactive mode.  Uses only standard 8-color indices (30-37) so that
-actual RGB values are determined by the user's terminal color scheme --
-dark and light themes both get readable colors automatically.
-
-Respects the ``NO_COLOR`` / ``FORCE_COLOR`` environment conventions.
+Merged from ``runtime/ansi.py``, ``builtins/userio_impl.py`` formatting helpers,
+and ``builtins/block_handlers.py`` task colorization.
 """
 
 from __future__ import annotations
@@ -125,6 +121,7 @@ def bold_cyan(text: str) -> str:
 # Markdown lightweight syntax highlighting
 # ---------------------------------------------------------------------------
 
+
 # Line-start patterns that highlight the ENTIRE line (marker + content)
 _MD_LINE_FULL = [
     re.compile(r'^#{1,6}\s'),              # headings
@@ -178,3 +175,94 @@ def _apply_inline_patterns(text: str) -> str:
     # Bold spans -- cyan
     text = _MD_BOLD_RE.sub(f"{_CYAN}\\1{_RESET}", text)
     return text
+
+
+# ---------------------------------------------------------------------------
+# Tool call / result formatting
+# ---------------------------------------------------------------------------
+
+_MAX_VALUE_LEN = 60       # max display length for a single parameter value
+_MAX_SINGLE_LINE = 80     # max total length before switching to multi-line
+_INDENT = "  "            # base indentation
+_PARAM_INDENT = "      "  # parameter indentation in multi-line mode (6 spaces)
+_PREVIEW_LINES = 4        # default number of result preview lines
+_RESULT_INDENT = "    "   # result continuation indent (4 spaces)
+
+
+def _format_value(value) -> str:
+    """Format a single argument value in Python style."""
+    if isinstance(value, str):
+        display = value
+        if len(display) > _MAX_VALUE_LEN:
+            display = display[:_MAX_VALUE_LEN - 3] + "..."
+        return f'"{display}"'
+    r = repr(value)
+    if len(r) > _MAX_VALUE_LEN:
+        r = r[:_MAX_VALUE_LEN - 3] + "..."
+    return r
+
+
+def _format_tool_call(name: str, args: dict) -> str:
+    """Format a tool call as a Python-style function call string."""
+    if not args:
+        return f"{_INDENT}{name}()"
+
+    # Build parameter strings
+    params = [f"{k}={_format_value(v)}" for k, v in args.items()]
+
+    # Try single-line first
+    single = f"{_INDENT}{name}({', '.join(params)})"
+    if len(single) <= _MAX_SINGLE_LINE:
+        return single
+
+    # Multi-line form
+    lines = [f"{_INDENT}{name}("]
+    for p in params:
+        lines.append(f"{_PARAM_INDENT}{p},")
+    lines.append(f"{_INDENT})")
+    return "\n".join(lines)
+
+
+def _format_tool_result(content: str, is_error: bool) -> str:
+    """Format a tool result with preview and line count."""
+    color = bold_red if is_error else green
+    lines = content.split("\n") if content else [""]
+
+    if len(lines) <= _PREVIEW_LINES:
+        # Short result: show everything
+        first = f"{_INDENT}\u2192 {lines[0]}"
+        result_lines = [color(first)]
+        for extra in lines[1:]:
+            result_lines.append(color(f"{_RESULT_INDENT}{extra}"))
+        return "\n".join(result_lines)
+
+    # Long result: preview + overflow indicator
+    first = f"{_INDENT}\u2192 {lines[0]}"
+    result_lines = [color(first)]
+    for extra in lines[1:_PREVIEW_LINES]:
+        result_lines.append(color(f"{_RESULT_INDENT}{extra}"))
+    remaining = len(lines) - _PREVIEW_LINES
+    result_lines.append(dim(f"{_RESULT_INDENT}... +{remaining} lines"))
+    return "\n".join(result_lines)
+
+
+# ---------------------------------------------------------------------------
+# Task line colorization
+# ---------------------------------------------------------------------------
+
+_TASK_CHECK_RE = re.compile(r'^(\s*(?:[-*])\s*)(\[[ x~]\])(.*)')
+
+
+def _colorize_task_line(line: str) -> str:
+    """Colorize task checkmark in a task list line."""
+    m = _TASK_CHECK_RE.match(line)
+    if not m:
+        return line
+    prefix, check, rest = m.group(1), m.group(2), m.group(3)
+    if check == '[x]':
+        return prefix + green(check) + rest
+    elif check == '[~]':
+        return prefix + yellow(check) + rest
+    elif check == '[ ]':
+        return prefix + dim(check) + rest
+    return line

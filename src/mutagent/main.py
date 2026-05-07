@@ -11,27 +11,21 @@ from mutagent.config import Config
 if TYPE_CHECKING:
     from mutagent.agent import Agent
     from mutagent.sandbox.app import SandboxApp
-    from mutagent.userio import UserIO
 
 
 class App(mutagent.Declaration):
     """App entry point.  Override via ``@impl`` for custom UI (e.g. TUI).
 
-    Interaction with the user (input collection, output rendering) is
-    delegated to the ``userio`` attribute, a :class:`UserIO` instance.
-
     Attributes:
         config: The loaded Config object.
         agent: The Agent for this session, set by ``setup_agent()``.
         sandbox: The SandboxApp for this session, set by ``setup_agent()``.
-        userio: The UserIO instance handling user interaction.
     """
 
     config: Config
     config_path: Path
     agent: Agent
     sandbox: SandboxApp
-    userio: UserIO
 
     def load_config(self, config_path: str = ".mutagent/config.json") -> None:
         """Load configuration from the given path and store in ``self.config``.

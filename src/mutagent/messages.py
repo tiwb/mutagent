@@ -177,12 +177,3 @@ class StreamEvent:
     timestamp: float = 0.0
 
 
-@dataclass
-class Content:
-    """A structured content block for UserIO rendering."""
-
-    type: str
-    body: str = ""
-    target: str = ""
-    source: str = ""
-    metadata: dict[str, Any] = field(default_factory=dict)
