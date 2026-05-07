@@ -36,14 +36,15 @@ def _annotation_to_json_type(annotation: Any) -> str:
 def parse_docstring(docstring: str | None) -> tuple[str, dict[str, str]]:
     """Parse a Google-style docstring.
 
-    Extracts the first-line description and the Args section.
+    Extracts the description (all text before Args/Returns/...) and the Args section.
 
     Args:
         docstring: The docstring to parse. May be None.
 
     Returns:
         A tuple of (description, {param_name: param_description}).
-        description is the first non-empty line.
+        description includes all text before the first section header (Args, Returns,
+        Raises, Notes, etc.).
         param descriptions include continuation lines (indented).
     """
     if not docstring:
@@ -51,13 +52,23 @@ def parse_docstring(docstring: str | None) -> tuple[str, dict[str, str]]:
 
     lines = docstring.strip().splitlines()
 
-    # Description: first non-empty line
-    description = ""
+    # Description: all lines before the first section header
+    SECTION_HEADERS = (
+        "Args", "Arguments", "Parameters",
+        "Returns", "Return",
+        "Raises", "Raise",
+        "Yields", "Yield",
+        "Note", "Notes",
+        "Example", "Examples",
+        "Attributes",
+    )
+    desc_lines: list[str] = []
     for line in lines:
         stripped = line.strip()
-        if stripped:
-            description = stripped
+        if re.match(r"^(%s)\s*:" % "|".join(SECTION_HEADERS), stripped):
             break
+        desc_lines.append(line.rstrip())
+    description = "\n".join(desc_lines).strip()
 
     # Find Args section
     params: dict[str, str] = {}

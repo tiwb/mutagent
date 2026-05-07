@@ -23,6 +23,13 @@ CleanupCallback = Callable[[], Any]
 PYSANDBOX_DOC = """\
 Execute Python code in a sandboxed environment.
 
+Supported Python: variables, if/for/while, try/except, function/lambda,
+f-string, comprehensions, print(), common built-ins (len, range, sorted,
+str, int, list, dict, ...).
+
+NOT supported (will raise): import, eval, exec, compile, __import__,
+open, breakpoint, input.
+
 External MCP servers, CLI tools, and in-process capabilities are pre-injected
 as namespace objects. Discover what's available:
 
@@ -34,10 +41,6 @@ Calling convention — all namespace functions are keyword-only:
 
     web.fetch(url="https://example.com")           # correct
     web.fetch("https://example.com")               # WRONG — TypeError
-
-Supported Python: variables, if/for/while, try/except, function/lambda,
-f-string, comprehensions, print(), common built-ins (len, range, sorted,
-str, int, list, dict, ...).
 
 Multi-step example:
 

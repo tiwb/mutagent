@@ -20,10 +20,6 @@ class PySandboxTools(MCPToolSet):
     _app: SandboxApp | None = None
 
     async def pysandbox(self, code: str) -> str | ToolResult:
-        """%s
-NOT supported (will raise): import, class, eval, exec, open, getattr,
-globals, dir, __builtins__ access.
-""" % PYSANDBOX_DOC
         if self._app is None:
             return ToolResult.error("Sandbox not initialized")
         loop = asyncio.get_running_loop()
@@ -33,3 +29,6 @@ globals, dir, __builtins__ access.
         if is_error:
             return ToolResult.error(text)
         return text
+
+
+PySandboxTools.pysandbox.__doc__ = PYSANDBOX_DOC

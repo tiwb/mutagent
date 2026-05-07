@@ -34,18 +34,14 @@ class SandboxToolkit(Toolkit):
     _state: dict[str, Any]
 
     async def pysandbox(self, code: str) -> str:
-        """%s
-NOT supported (will raise): import, eval, exec, open, breakpoint, input.
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None, self._app.exec_code, code, self._state)
+        text, _is_error = self._app.format_result(result)
+        return text
 
+
+# % 取模运算不会让 Python 把表达式当作函数 docstring，需显式赋值
+SandboxToolkit.pysandbox.__doc__ = PYSANDBOX_DOC + """
 Variables persist across calls in the same agent session (REPL state).
-""" % PYSANDBOX_DOC
-        ...
-
-
-@mutagent.impl(SandboxToolkit.pysandbox)
-async def _pysandbox(self: SandboxToolkit, code: str) -> str:
-    loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(
-        None, self._app.exec_code, code, self._state)
-    text, _is_error = self._app.format_result(result)
-    return text
+"""
