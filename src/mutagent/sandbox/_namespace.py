@@ -4,16 +4,28 @@ import inspect
 from typing import Any, Callable
 
 
+def _first_line(text: str) -> str:
+    """提取文本首行（非空、strip）。空文本返回空串。"""
+    if not text:
+        return ""
+    for line in text.splitlines():
+        s = line.strip()
+        if s:
+            return s
+    return ""
+
+
 class Namespace:
     """命名空间对象，通过 . 访问其中的函数。
 
-    >>> ns = Namespace("browser")
+    >>> ns = Namespace("browser", description="浏览器自动化工具")
     >>> ns.register("navigate", some_func, "Navigate to URL")
     >>> ns.navigate(url="https://example.com")
     """
 
-    def __init__(self, name: str):
+    def __init__(self, name: str, description: str = ""):
         self._name = name
+        self._description = description
         self._functions: dict[str, Callable] = {}
         self._descriptions: dict[str, str] = {}
 
@@ -21,12 +33,23 @@ class Namespace:
     def name(self) -> str:
         return self._name
 
+    @property
+    def description(self) -> str:
+        return self._description
+
     def register(self, func_name: str, func: Callable,
                  description: str = "") -> None:
-        """注册一个函数到命名空间。"""
+        """注册一个函数到命名空间。
+
+        description 存完整文本，展示时由调用方决定取首行还是全文。
+        """
         self._functions[func_name] = func
-        self._descriptions[func_name] = description or (
-            func.__doc__.strip().split('\n')[0] if func.__doc__ else '')
+        self._descriptions[func_name] = description or (func.__doc__ or '')
+        # 给函数附加 namespace 归属，help(fn) 展示时能拼前缀。best-effort。
+        try:
+            func.__namespace__ = self._name  # type: ignore[attr-defined]
+        except (AttributeError, TypeError):
+            pass
 
     def __getattr__(self, name: str) -> Any:
         if name.startswith('_'):
@@ -74,44 +97,107 @@ class NamespaceRegistry:
         registry = self
 
         def help(func_or_name: Any = None) -> str:
-            """查看函数的详细文档。
+            """查看 namespace / 函数的文档。
 
-            用法: help(playwright.browser_navigate)
+            - help()                           列出所有 namespace
+            - help(namespace)                  namespace 完整说明 + 函数列表
+            - help(namespace.function)         函数签名 + 完整文档
+            - help("namespace.function")       同上（字符串形式）
             """
+            # Layer 1: 列所有 namespace
             if func_or_name is None:
-                return "Usage: help(function) — e.g. help(playwright.browser_navigate)"
+                return _render_registry(registry)
 
+            # Layer 2: 聚焦某个 namespace
+            if isinstance(func_or_name, Namespace):
+                return _render_namespace(func_or_name)
+
+            # Layer 3: 聚焦某个函数
             if callable(func_or_name):
-                name = getattr(func_or_name, '__name__', str(func_or_name))
-                doc = getattr(func_or_name, '__doc__', None) or '(no documentation)'
-                try:
-                    sig = inspect.signature(func_or_name)
-                    return f"{name}{sig}\n{doc}"
-                except (ValueError, TypeError):
-                    return f"{name}\n{doc}"
+                return _render_function(func_or_name)
 
             if isinstance(func_or_name, str):
-                # 尝试 "namespace.func" 格式
                 parts = func_or_name.split('.', 1)
                 if len(parts) == 2:
                     ns = registry.get(parts[0])
                     if ns and parts[1] in ns._functions:
-                        fn = ns._functions[parts[1]]
-                        doc = fn.__doc__ or '(no documentation)'
-                        return f"{func_or_name}\n{doc}"
+                        return _render_function(ns._functions[parts[1]],
+                                                ns_name=parts[0],
+                                                fn_name=parts[1])
                 return f"(no documentation for '{func_or_name}')"
-
-            if isinstance(func_or_name, Namespace):
-                lines = [f"Namespace: {func_or_name.name}", ""]
-                for fname in sorted(func_or_name._functions):
-                    func = func_or_name._functions[fname]
-                    desc = func_or_name._descriptions.get(fname, '')
-                    entry = f"  {fname}"
-                    if desc:
-                        entry += f" — {desc}"
-                    lines.append(entry)
-                return '\n'.join(lines)
 
             return "(no documentation)"
 
         return help
+
+
+# ---------------------------------------------------------------------------
+# 渲染函数 — 分层显示
+# ---------------------------------------------------------------------------
+
+def _render_registry(registry: "NamespaceRegistry") -> str:
+    """Layer 1: 列所有 namespace（首行摘要）。"""
+    names = sorted(registry._namespaces.keys())
+    if not names:
+        return "No namespaces registered."
+
+    max_name = max(len(n) for n in names)
+
+    lines = ["Available namespaces:", ""]
+    for name in names:
+        ns = registry._namespaces[name]
+        count = len(ns._functions)
+        desc = _first_line(ns._description)
+        padded = f"{name:<{max_name}}"
+        if desc:
+            lines.append(f"  {padded} — {desc} ({count} functions)")
+        else:
+            lines.append(f"  {padded} ({count} functions)")
+    lines.append("")
+    lines.append("Use help(<namespace>) for details, "
+                 "e.g. help(" + names[0] + ").")
+    return '\n'.join(lines)
+
+
+def _render_namespace(ns: Namespace) -> str:
+    """Layer 2: namespace 完整 description + 函数首行摘要列表。"""
+    lines = [f"Namespace: {ns._name}", ""]
+
+    desc = ns._description.strip() if ns._description else ""
+    if desc:
+        lines.append(desc)
+        lines.append("")
+
+    count = len(ns._functions)
+    lines.append(f"{count} Functions:")
+    lines.append("")
+
+    if ns._functions:
+        fnames = sorted(ns._functions.keys())
+        max_fname = max(len(f) for f in fnames)
+        for fname in fnames:
+            fdesc = _first_line(ns._descriptions.get(fname, ''))
+            padded = f"{fname:<{max_fname}}"
+            if fdesc:
+                lines.append(f"  {padded}  {fdesc}")
+            else:
+                lines.append(f"  {padded}")
+
+    lines.append("")
+    lines.append(f"Use help({ns._name}.<function>) for function details.")
+    return '\n'.join(lines)
+
+
+def _render_function(func: Callable, ns_name: str = "",
+                     fn_name: str = "") -> str:
+    """Layer 3: 函数签名 + 完整 docstring。"""
+    name = fn_name or getattr(func, '__name__', str(func))
+    prefix = ns_name or getattr(func, '__namespace__', '')
+    qualified = f"{prefix}.{name}" if prefix else name
+
+    doc = getattr(func, '__doc__', None) or '(no documentation)'
+    try:
+        sig = inspect.signature(func)
+        return f"{qualified}{sig}\n\n{doc}"
+    except (ValueError, TypeError):
+        return f"{qualified}\n\n{doc}"

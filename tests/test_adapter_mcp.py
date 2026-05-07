@@ -74,6 +74,7 @@ class _MockMCPClient:
         self.timeout = timeout
         self.server_info: dict = {}
         self.server_capabilities: dict = {}
+        self.server_instructions: str = ""
         self.connected = False
         self.closed = False
         self.calls: list = []
@@ -108,6 +109,7 @@ class TestHTTPMCPClient:
 
         assert info["serverInfo"] == {"name": "mock", "version": "0.0.1"}
         assert info["capabilities"] == {"tools": {}}
+        assert info["instructions"] == ""  # mock 默认空
         mock = cast(_MockMCPClient, client._mcp)
         assert mock.connected is True
         assert mock.url == "http://example/mcp"
@@ -171,6 +173,21 @@ class TestHTTPMCPClient:
 
         assert cast(_MockMCPClient, client._mcp).closed is True
 
+    @pytest.mark.asyncio
+    async def test_connect_missing_instructions_attr(self, monkeypatch):
+        """防御式：旧版 mutio 的 MCPClient 没有 server_instructions 字段也不报错。"""
+        class _OldClient(_MockMCPClient):
+            def __init__(self, url, timeout=30.0):
+                super().__init__(url, timeout)
+                del self.server_instructions  # 模拟旧版无此字段
+
+        monkeypatch.setattr(
+            "mutagent.sandbox._adapter_mcp.MCPClient", _OldClient)
+
+        client = HTTPMCPClient(url="http://example/mcp")
+        info = await client.connect()
+        assert info["instructions"] == ""
+
 
 # ============================================================
 # bridge_mcp_server 分派
@@ -217,6 +234,68 @@ class TestBridgeDispatch:
         assert isinstance(client, HTTPMCPClient)
         assert ns._name == "serena"
         assert "echo" in ns._functions
+
+    @pytest.mark.asyncio
+    async def test_http_fills_namespace_description_from_instructions(self, monkeypatch):
+        """MCP instructions 应成为 Namespace.description。"""
+        def _factory(url, timeout=30.0):
+            mock = _MockMCPClient(url=url, timeout=timeout)
+            mock.tools_payload = []
+            mock.server_instructions = "Use this server for X and Y."
+            return mock
+
+        monkeypatch.setattr(
+            "mutagent.sandbox._adapter_mcp.MCPClient", _factory)
+
+        ns, _ = await bridge_mcp_server("svc", {
+            "transport": "http",
+            "url": "http://example/mcp",
+        })
+        assert ns._description == "Use this server for X and Y."
+
+    @pytest.mark.asyncio
+    async def test_http_falls_back_to_server_title(self, monkeypatch):
+        """无 instructions 时退化到 serverInfo.title。"""
+        class _TitleMock(_MockMCPClient):
+            async def connect(self):
+                self.connected = True
+                self.server_info = {"name": "mock", "title": "My Nice Server"}
+                self.server_capabilities = {}
+                self.server_instructions = ""
+
+        monkeypatch.setattr(
+            "mutagent.sandbox._adapter_mcp.MCPClient", _TitleMock)
+
+        ns, _ = await bridge_mcp_server("svc", {
+            "transport": "http",
+            "url": "http://example/mcp",
+        })
+        assert ns._description == "My Nice Server"
+
+    @pytest.mark.asyncio
+    async def test_stdio_fills_description_from_instructions(self, monkeypatch):
+        """Stdio 分支：connect() 返回的 instructions 传给 Namespace。"""
+        class _FakeStdio:
+            def __init__(self, command, args=None, shell=False):
+                pass
+
+            async def connect(self):
+                return {
+                    "serverInfo": {"name": "x"},
+                    "instructions": "Stdio server docs.",
+                }
+
+            async def list_tools(self):
+                return []
+
+            async def close(self):
+                pass
+
+        monkeypatch.setattr(
+            "mutagent.sandbox._adapter_mcp.StdioMCPClient", _FakeStdio)
+
+        ns, _ = await bridge_mcp_server("s", {"command": "cmd"})
+        assert ns._description == "Stdio server docs."
 
     @pytest.mark.asyncio
     async def test_stdio_default_transport(self, monkeypatch):

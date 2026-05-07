@@ -185,6 +185,7 @@ class HTTPMCPClient:
         return {
             "serverInfo": self._mcp.server_info,
             "capabilities": self._mcp.server_capabilities,
+            "instructions": getattr(self._mcp, "server_instructions", ""),
         }
 
     async def list_tools(self) -> list[dict[str, Any]]:
@@ -240,11 +241,20 @@ async def bridge_mcp_server(ns_name: str,
     else:
         raise ValueError(f"MCP source '{ns_name}': unknown transport {transport!r}")
 
-    await client.connect()
+    init_result = await client.connect()
     main_loop = asyncio.get_running_loop()
 
+    # namespace-level description：优先 instructions（MCP 协议标准字段），
+    # 退化到 serverInfo.title，再退化为空串（不使用 serverInfo.name，
+    # 通常等于 ns_name 信息冗余）。
+    ns_desc = (
+        (init_result.get("instructions") or "").strip()
+        or (init_result.get("serverInfo") or {}).get("title", "")
+        or ""
+    )
+
     tools = await client.list_tools()
-    ns = Namespace(ns_name)
+    ns = Namespace(ns_name, description=ns_desc)
 
     for tool in tools:
         tool_name = tool["name"]

@@ -80,7 +80,7 @@ def _build_declaration_namespaces(self: SandboxApp) -> dict[str, Namespace]:
             logger.debug("Cannot instantiate %s, skipping", cls.__name__)
             continue
 
-        ns = Namespace(ns_name)
+        ns = Namespace(ns_name, description=inspect.getdoc(cls) or "")
         for method_name in dir(cls):
             if method_name.startswith("_"):
                 continue

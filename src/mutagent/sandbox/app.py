@@ -34,8 +34,8 @@ External MCP servers, CLI tools, and in-process capabilities are pre-injected
 as namespace objects. Discover what's available:
 
     help()                       -> list all namespaces
-    help(web)                    -> list functions in `web` namespace
-    help(web.fetch)              -> show docstring + signature
+    help(web)                    -> describe `web` namespace + list functions
+    help(web.fetch)              -> show function signature + full docstring
 
 Calling convention — all namespace functions are keyword-only:
 
