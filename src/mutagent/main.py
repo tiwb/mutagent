@@ -10,6 +10,7 @@ from mutagent.config import Config
 
 if TYPE_CHECKING:
     from mutagent.agent import Agent
+    from mutagent.sandbox.app import SandboxApp
     from mutagent.userio import UserIO
 
 
@@ -22,12 +23,14 @@ class App(mutagent.Declaration):
     Attributes:
         config: The loaded Config object.
         agent: The Agent for this session, set by ``setup_agent()``.
+        sandbox: The SandboxApp for this session, set by ``setup_agent()``.
         userio: The UserIO instance handling user interaction.
     """
 
     config: Config
     config_path: Path
     agent: Agent
+    sandbox: SandboxApp
     userio: UserIO
 
     def load_config(self, config_path: str = ".mutagent/config.json") -> None:
@@ -44,7 +47,12 @@ class App(mutagent.Declaration):
     def setup_agent(self, system_prompt: str = "") -> Agent:
         """Initialise the session Agent and store it in ``self.agent``.
 
-        Also creates the UserIO instance and stores it in ``self.userio``.
+        Also creates the UserIO instance (``self.userio``) and an empty
+        SandboxApp (``self.sandbox``).  This method is **synchronous and
+        does NOT connect to MCP/CLI sources**—call ``connect_sources()``
+        in the appropriate event loop afterwards to populate sandbox
+        namespaces.
+
         Override to customise component assembly (different tools,
         different LLMClient, etc.).
 
@@ -55,6 +63,17 @@ class App(mutagent.Declaration):
             The created Agent instance (also stored as ``self.agent``).
         """
         return main_impl.setup_agent(self, system_prompt=system_prompt)
+
+    async def connect_sources(self) -> None:
+        """Connect ``mcp_sources`` / ``cli_sources`` and inject namespaces
+        into ``self.sandbox``.
+
+        Must be awaited in the event loop where the agent will run—MCP
+        clients (httpx-based and stdio-based) bind to the loop captured
+        at connection time.  Calling from a temporary loop (e.g.
+        ``asyncio.run``) will deactivate clients once that loop exits.
+        """
+        return await main_impl.connect_sources(self)
 
     def run(self) -> None:
         """Run the agent session loop.
@@ -85,6 +104,7 @@ def main() -> None:
     """
     import argparse
     from mutagent.webui.cli import add_webui_subcommand, dispatch_webui
+    from mutagent.cli.pysandbox import add_pysandbox_subcommand, dispatch_pysandbox
 
     parser = argparse.ArgumentParser(description="mutagent — AI Agent Framework")
     parser.add_argument("-V", "--version", action="version", version=f"mutagent {mutagent.__version__}")
@@ -94,6 +114,7 @@ def main() -> None:
                         help="Explicitly use the default terminal UI")
     subparsers = parser.add_subparsers(dest="command")
     add_webui_subcommand(subparsers)
+    add_pysandbox_subcommand(subparsers)
     args = parser.parse_args()
 
     if args.command == "webui" and args.headless:
@@ -103,6 +124,9 @@ def main() -> None:
     app.load_config(args.config)
     if args.command == "webui":
         dispatch_webui(app, args)
+        return
+    if args.command == "pysandbox":
+        dispatch_pysandbox(app, args)
         return
     app.run()
 

@@ -39,7 +39,13 @@ def _create_test_agent(
     base_url: str = "https://api.anthropic.com",
     system_prompt: str = "",
 ) -> Agent:
-    """Create an Agent for testing via App.setup_agent()."""
+    """Create an Agent for testing via App.setup_agent().
+
+    Manually attaches ModuleToolkit + LogToolkit for legacy tests that
+    drive 'Module-inspect' / 'Module-define' / 'Module-save' tool calls.
+    Default ``setup_agent`` only registers SandboxToolkit (post-refactor),
+    so tests that need module tools restore them here.
+    """
     config = DictConfig(_data={
         "providers": {"test": {
             "provider": "AnthropicProvider",
@@ -52,6 +58,21 @@ def _create_test_agent(
     }, _listeners=[])
     entry = App(config=config)
     entry.setup_agent(system_prompt=system_prompt)
+
+    # 重装 ModuleToolkit + LogToolkit 供旧 e2e 测试使用
+    from pathlib import Path
+    from mutagent.runtime.module_manager import ModuleManager
+    from mutagent.runtime.log_store import LogStore
+    from mutagent.toolkits.module_toolkit import ModuleToolkit
+    from mutagent.toolkits.log_toolkit import LogToolkit
+
+    module_manager = ModuleManager(search_dirs=[
+        Path.home() / ".mutagent",
+        Path.cwd() / ".mutagent",
+    ])
+    entry.agent.tools.add(ModuleToolkit(module_manager=module_manager))
+    entry.agent.tools.add(LogToolkit(log_store=LogStore()))
+
     return entry.agent
 
 

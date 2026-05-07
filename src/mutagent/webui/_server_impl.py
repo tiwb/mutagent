@@ -15,6 +15,19 @@ from mutio.net.server import HTMLResponse, StaticView, WebSocketConnection, WebS
 logger = logging.getLogger(__name__)
 
 
+@mutagent.impl(WebUIServer.on_startup)
+async def _on_startup(self: WebUIServer) -> None:
+    """在 server 自己的 event loop 上连接 mcp_sources / cli_sources。
+
+    必须在这里 await（而不是 setup_agent 后马上），因为 MCP client 会绑定到
+    调用时的 event loop，后续 agent.run 也跑在此 loop。
+    """
+    try:
+        await self.app.connect_sources()
+    except Exception:
+        logger.exception("connect_sources failed during WebUI startup")
+
+
 def _module_registry() -> ModuleRegistry:
     registry = ModuleRegistry()
     registry.add_from_package("mutgui")

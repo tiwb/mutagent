@@ -16,18 +16,18 @@ from typing import Any
 import mutagent
 from mutagent.config import Config, ConfigChangeEvent, ChangeCallback, Disposable
 from mutagent.agent import Agent
-from mutagent.toolkits.agent_toolkit import AgentToolkit
 from mutagent.client import LLMClient
 from mutagent.context import AgentContext
 from mutagent.messages import Message, TextBlock
-from mutagent.toolkits.log_toolkit import LogToolkit
 from mutagent.main import App
-from mutagent.toolkits.module_toolkit import ModuleToolkit
-from mutagent.runtime.module_manager import ModuleManager
 from mutagent.runtime.log_store import (
-    LogStore, LogStoreHandler, SingleLineFormatter, ToolLogCaptureHandler,
+    LogStore, LogStoreHandler, SingleLineFormatter,
 )
 from mutagent.runtime.api_recorder import ApiRecorder
+from mutagent.sandbox.app import SandboxApp
+from mutagent.sandbox._adapter_mcp import bridge_mcp_server
+from mutagent.sandbox._adapter_cli import build_cli_namespace
+from mutagent.sandbox.entry_agent import SandboxToolkit
 from mutagent.tools import ToolSet
 from mutagent.userio import UserIO
 from mutagent.provider import LLMProvider
@@ -149,109 +149,9 @@ def _ensure_console_logging(config: Config) -> None:
 
 
 SYSTEM_PROMPT = """\
-You are **mutagent**, a self-evolving Python AI Agent framework.
-
-## Identity
-You are built on the mutobj declaration-implementation separation pattern. \
-Your own source code is organized as declarations (.py) with implementations (_impl.py), \
-and you can inspect, modify, and hot-reload any of it at runtime — including yourself.
-
-## Core Tools
-- **inspect(module_path, depth)** — Browse module structure. Call with no arguments to see unsaved modules.
-- **view_source(target)** — Read source code of any module, class, or function.
-- **define(module_path, source)** — Define or redefine a Python module in memory (not persisted until saved).
-- **save(module_path, level)** — Persist a module to disk. level="project" (default, ./.mutagent/) or "user" (~/.mutagent/).
-- **query(pattern, level, limit, tool_capture)** — Search logs or configure logging. \
-Use tool_capture="on" to include logs in tool output for debugging.
-
-## Tool Development
-To create a new tool, define a Toolkit subclass with `define_module`:
-
-    define_module("my_tools", \"\"\"
-    import mutagent
-
-    class MyTools(mutagent.Toolkit):
-        def my_tool(self, arg: str, count: int = 1) -> str:
-            '''Tool description.
-
-            Args:
-                arg: Argument description.
-                count: How many times. Default 1.
-
-            Returns:
-                Result description.
-            '''
-            return arg * count
-    \"\"\")
-
-The tool is **automatically available** after define — no registration needed. \
-Test it by calling it directly. If the result is wrong, redefine the module — changes take effect immediately. \
-Once validated, use save to persist.
-
-Rules:
-- Every tool method MUST have type annotations and a Google-style docstring with Args section.
-- The docstring is shown to you as the tool description — write it clearly.
-- Test with diverse inputs before saving.
-- Keep one Toolkit class per module for clarity.
-- To create test functions, define them as methods on a Toolkit subclass (e.g. test_my_tool).
-
-## Workflow
-When modifying code, follow this cycle:
-1. **inspect** — Understand the current structure
-2. **view_source** — Read the specific code to change
-3. **define** — Apply changes in runtime (module is in memory only)
-4. **inspect** — Verify the module structure is correct
-5. **view_source** — Verify the code was applied as expected
-6. **save** — Persist to disk once validated
-
-Do NOT create throwaway test modules. Validate changes by inspecting and viewing source.
-
-## Module Naming
-- New modules should use **functional names** based on their purpose (e.g. "web_search", "file_utils", "math_tools").
-- Do NOT place new modules under the "mutagent" namespace. The mutagent namespace is for the framework itself.
-- NEVER redefine existing mutagent.* modules with define — this replaces the entire module. \
-To change a specific behavior, create a new _impl module and use @impl to override just that method.
-- Modules are saved to .mutagent/ directories which are automatically in sys.path.
-
-## Key Concepts
-- **Declaration (.py)** = stable interface (class + stub methods). Safe to import.
-- **Implementation (_impl.py)** = replaceable logic via @impl. Loaded at startup via direct import.
-- **define_module = write + restart**: defining a module completely replaces its namespace.
-- **DeclarationMeta**: classes that inherit mutagent.Declaration are updated in-place on redefinition (id preserved, isinstance works, @impl survives).
-- **Toolkit**: classes that inherit mutagent.Toolkit have their public methods auto-discovered as tools.
-- **Module path is first-class**: everything is addressed as `package.module.Class.method`.
-- **Namespace packages**: submodules of the same package can live in different .mutagent/ directories (project-level and user-level).
-
-## Debugging
-- All internal logs (DEBUG level) are captured in memory.
-- Use query() to view recent activity or search for specific events.
-- Use query(tool_capture="on") to attach logs to tool results — useful for diagnosing issues.
-- API calls are automatically recorded to .mutagent/logs/ for session replay.
-
-## Self-Evolution
-You can evolve yourself:
-- Override any existing tool implementation: create a NEW module (e.g. "my_agent_impl") with @impl(Agent.run), \
-then define + save. Do NOT redefine mutagent.agent or mutagent.builtins.* — later @impl registrations auto-override.
-- Create entirely new tool classes: define a new mutagent.Toolkit subclass — its methods become tools automatically.
-- Extend ToolSet: add new tools to the Agent's tool set.
-
-## Task Discipline
-- Complete the CORE task first. Do NOT create additional versions, documentation modules, \
-demos, guides, or summaries unless explicitly requested.
-- After completing the core implementation, STOP and report results to the user. \
-Let the user decide if further work is needed.
-- define is for CODE only. Do NOT use it to create documentation, READMEs, \
-guides, or text content. If the user needs documentation, describe it in your response text.
-- Keep module names lowercase_with_underscores. Do NOT use ALL_CAPS module names.
-- Before calling define, carefully review your source code for:
-  - Indentation errors (Python is whitespace-sensitive)
-  - Full-width characters in code (use ASCII punctuation only)
-  - Import errors (verify the library is available)
-
-## Guidelines
-- When redefining declarations, remember DeclarationMeta preserves class identity.
-- When redefining implementations, the old @impl is automatically unregistered.
-- Use Chinese or English based on the user's language.
+You are mutagent assistant.
+- Help users with their tasks using your knowledge and available tools
+- Always respond in the user's language
 """
 
 @mutagent.impl(App.load_config)
@@ -299,7 +199,6 @@ def load_config(self, config_path: str = ".mutagent/config.json") -> None:
 
 @mutagent.impl(App.setup_agent)
 def setup_agent(self, system_prompt: str = "") -> Agent:
-    from pathlib import Path
     from datetime import datetime
 
     spec = LLMProvider.resolve_model(self.config)
@@ -343,12 +242,8 @@ def setup_agent(self, system_prompt: str = "") -> Agent:
         ))
         root_logger.addHandler(file_handler)
 
-    # 4. Tool log capture handler (always installed, activated via flag)
-    capture_handler = ToolLogCaptureHandler()
-    capture_handler.setFormatter(logging.Formatter(
-        "%(asctime)s %(levelname)-8s %(name)s - %(message)s"
-    ))
-    root_logger.addHandler(capture_handler)
+    # 4. ToolLogCaptureHandler 不再安装：开关只能由已移除的 LogToolkit.query 设置，
+    #    安装后无人激活。未来需要时重新设计暴露方式。
 
     logger.info("Logging initialized (session=%s)", session_ts)
 
@@ -360,69 +255,16 @@ def setup_agent(self, system_prompt: str = "") -> Agent:
         api_recorder = ApiRecorder(log_dir, mode=api_mode, session_ts=session_ts)
         logger.info("API recorder started (mode=%s)", api_mode)
 
-    # --- Components ---
-    search_dirs: list[str | Path] = [
-        Path.home() / ".mutagent",
-        Path.cwd() / ".mutagent",
-    ]
-    module_manager = ModuleManager(search_dirs=search_dirs)
-    module_tools = ModuleToolkit(module_manager=module_manager)
-    log_tools = LogToolkit(log_store=log_store)
-    tool_set = ToolSet(auto_discover=True)
-    tool_set.add(module_tools)
-    tool_set.add(log_tools)
+    # --- SandboxApp (空 registry, MCP/CLI 由 connect_sources 后续注入) ---
+    self.sandbox = SandboxApp()
+
+    # --- ToolSet: 唯一工具 SandboxToolkit ---
+    tool_set = ToolSet()
+    tool_set.add(SandboxToolkit(_app=self.sandbox, _state={}))
+
     client = _create_llm_client(model, api_recorder)
 
-    # --- Sub-Agents & AgentToolkit ---
-    agents_config = self.config.get("agents", default={})
-    if agents_config:
-        sub_agents = {}
-        for agent_name, agent_conf in agents_config.items():
-            # Create sub-agent ToolSet with specified tools
-            sub_tool_set = ToolSet()
-            sub_tool_methods = agent_conf.get("tools", [])
-            if sub_tool_methods:
-                sub_tool_set.add(module_tools, methods=sub_tool_methods)
-                # Add log tools if query is requested
-                if "query" in sub_tool_methods:
-                    sub_tool_set.add(log_tools, methods=["query"])
-            else:
-                sub_tool_set.add(module_tools)
-                sub_tool_set.add(log_tools)
-
-            # Use specified model or share the main client
-            sub_model_name = agent_conf.get("model")
-            if sub_model_name:
-                sub_spec = LLMProvider.resolve_model(self.config, sub_model_name)
-                if sub_spec is None:
-                    logger.warning("Sub-agent '%s': model '%s' not found, using main client", agent_name, sub_model_name)
-                    sub_client = client
-                else:
-                    sub_client = _create_llm_client(sub_spec, api_recorder)
-            else:
-                sub_client = client
-
-            sub_prompt = agent_conf.get("system_prompt", f"You are a sub-agent named '{agent_name}'.")
-            sub_context = AgentContext()
-            sub_context.prompts.append(
-                Message(role="system", blocks=[TextBlock(text=sub_prompt)], label="base")
-            )
-            sub_agent = Agent(
-                llm=sub_client,
-                tools=sub_tool_set,
-                context=sub_context,
-                config=self.config,
-            )
-            sub_tool_set.agent = sub_agent
-            sub_agents[agent_name] = sub_agent
-            logger.info("Sub-agent '%s' created (tools=%s)", agent_name,
-                        [t.name for t in sub_tool_set.get_tools()])
-
-        agent_toolkit = AgentToolkit(agents=sub_agents)
-        tool_set.add(agent_toolkit, methods=["delegate"])
-        logger.info("AgentToolkit registered with %d sub-agents", len(sub_agents))
-
-    # Record session metadata
+    # Record session metadata (现在只有 1 个 tool: pysandbox)
     if api_recorder is not None:
         effective_prompt = system_prompt or SYSTEM_PROMPT
         tool_schemas = tool_set.get_tools()
@@ -433,11 +275,7 @@ def setup_agent(self, system_prompt: str = "") -> Agent:
         )
 
     if not system_prompt:
-        system_prompt = (
-            "You are a Python AI Agent with the ability to inspect, modify, "
-            "and run Python code at runtime. Use the available tools to help "
-            "the user with their tasks."
-        )
+        system_prompt = SYSTEM_PROMPT
     context = AgentContext()
     context.prompts.append(
         Message(role="system", blocks=[TextBlock(text=system_prompt)], label="base")
@@ -452,6 +290,31 @@ def setup_agent(self, system_prompt: str = "") -> Agent:
     )
     tool_set.agent = self.agent
     return self.agent
+
+
+@mutagent.impl(App.connect_sources)
+async def connect_sources(self) -> None:
+    """在 agent 将运行的 event loop 上连接 mcp_sources / cli_sources。"""
+    sandbox = getattr(self, "sandbox", None)
+    if sandbox is None:
+        logger.warning("connect_sources called before setup_agent; skipping")
+        return
+
+    mcp_sources = self.config.get("mcp_sources", default={}) or {}
+    for ns_name, server_cfg in mcp_sources.items():
+        try:
+            ns, client = await bridge_mcp_server(ns_name, server_cfg)
+            sandbox.add_namespace(ns, on_remove=client.close)
+            logger.info("MCP source '%s' connected (%d functions)",
+                        ns_name, len(ns._functions))
+        except Exception as e:
+            logger.warning("MCP source '%s' failed: %s", ns_name, e)
+
+    cli_sources = self.config.get("cli_sources", default={}) or {}
+    if cli_sources:
+        cli_ns = build_cli_namespace(cli_sources)
+        sandbox.add_namespace(cli_ns)
+        logger.info("CLI namespace built (%d functions)", len(cli_ns._functions))
 
 
 @mutagent.impl(App.run)
@@ -473,6 +336,16 @@ def run(self) -> None:
     loop = asyncio.new_event_loop()
     loop_thread = threading.Thread(target=loop.run_forever, daemon=True)
     loop_thread.start()
+
+    # 在 loop 上连接 MCP/CLI sources。MCP client 必须绑定到 loop（后续
+    # agent.run 也跑在此 loop），不能在临时 loop 上连。
+    try:
+        asyncio.run_coroutine_threadsafe(
+            self.connect_sources(), loop
+        ).result(timeout=120)
+    except Exception as e:
+        logger.warning("connect_sources failed: %s", e)
+        print(f"Warning: failed to connect sources: {e}", file=sys.stderr)
 
     event_q: queue.Queue[StreamEvent | None] = queue.Queue()
     future: concurrent.futures.Future[None] | None = None
@@ -533,7 +406,13 @@ def run(self) -> None:
         except Exception as e:
             print(f"\n[Error: {e}]", file=sys.stderr, flush=True)
 
-    # 清理 event loop：取消运行中的任务 → 关闭异步生成器 → 停止循环
+    # 清理 sandbox + event loop
+    sandbox = getattr(self, "sandbox", None)
+    if sandbox is not None:
+        try:
+            asyncio.run_coroutine_threadsafe(sandbox.close(), loop).result(timeout=5)
+        except Exception:
+            pass
     if future is not None and not future.done():
         future.cancel()
     try:
