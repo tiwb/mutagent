@@ -8,6 +8,7 @@
   mutagent pysandbox script.py      # 脚本文件
   mutagent pysandbox -                # 从 stdin 读
   echo "code" | mutagent pysandbox    # 管道
+  mutagent pysandbox                  # 进入交互式 REPL（类似 python）
 
 MSYS2 兼容：含 `/` 的参数（URL/正则/路径）通过 stdin 或 ``--config`` 传入，
 避免 Git Bash 自动转换为 Windows 路径。
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import code
 import logging
 import sys
 from typing import Any
@@ -65,13 +67,8 @@ def _read_code(args: argparse.Namespace) -> str:
     sys.exit(2)
 
 
-async def _run(config: Any, code: str) -> int:
-    """构造 sandbox → 执行 → 清理。返回 exit code。
-
-    MCP 连接走与 App.connect_sources 一致的 MCPConnection 路径：
-    autostart=true 后台连（不阻塞，调用时会 wait）；
-    autostart=false 完全 lazy。
-    """
+def _build_sandbox(config: Any) -> Any:
+    """构造 SandboxApp 并注入 MCP/CLI namespaces，返回 sandbox。"""
     from mutagent.sandbox.app import SandboxApp
     from mutagent.sandbox._adapter_mcp import MCPConnection
     from mutagent.sandbox._adapter_cli import build_cli_namespace
@@ -106,8 +103,43 @@ async def _run(config: Any, code: str) -> int:
         cli_ns = build_cli_namespace(cli_sources)
         sandbox.add_namespace(cli_ns)
 
+    return sandbox
+
+
+class SandboxConsole(code.InteractiveConsole):
+    """交互式 REPL 控制台，将代码执行委托给 SandboxApp。
+
+    复写 ``runsource``：先通过 ``code.compile_command`` 判断输入是否完整，
+    完整时通过 ``sandbox.exec_code(source, self.locals)`` 执行，
+    利用 ``self.locals`` 保持变量跨步骤存活。
+    """
+
+    def __init__(self, sandbox: Any) -> None:
+        super().__init__(locals={})
+        self.sandbox = sandbox
+
+    def runsource(self, source: str,
+                  filename: str = '<pysandbox>',
+                  symbol: str = 'single') -> bool:
+        try:
+            code_obj = code.compile_command(source, filename, symbol)
+        except (OverflowError, SyntaxError, ValueError):
+            self.showsyntaxerror(filename)
+            return False
+        if code_obj is None:
+            return True  # 输入不完整，提示 ... 继续
+
+        result = self.sandbox.exec_code(source, self.locals)
+        text, is_error = self.sandbox.format_result(result)
+        if text:
+            print(text, file=sys.stderr if is_error else sys.stdout)
+        return False
+
+
+async def _run(config: Any, code: str) -> int:
+    """构造 sandbox → 执行 → 清理。返回 exit code。"""
+    sandbox = _build_sandbox(config)
     try:
-        # exec_code 是 sync，丢到 executor 避免阻塞 loop（MCP 调用走 loop 回调）
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, sandbox.exec_code, code, None)
     finally:
@@ -123,11 +155,34 @@ async def _run(config: Any, code: str) -> int:
     return 1 if is_error else 0
 
 
+async def _run_repl(config: Any) -> None:
+    """构造 sandbox → 进入交互 REPL → 清理。"""
+    sandbox = _build_sandbox(config)
+    banner = (
+        "Python sandbox (mutagent pysandbox)\n"
+        "Type 'help()' to discover available namespaces, Ctrl-D to exit.\n"
+    )
+    try:
+        console = SandboxConsole(sandbox)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, console.interact, banner)
+    finally:
+        try:
+            await sandbox.close()
+        except Exception:
+            logger.exception("sandbox.close() failed")
+
+
 def dispatch_pysandbox(app: Any, args: argparse.Namespace) -> None:
     """由 main() 调用：app 已 load_config 完毕。"""
     if args.code is not None and args.script is not None:
         print("Error: -c CODE and script file are mutually exclusive", file=sys.stderr)
         sys.exit(2)
+
+    # 无参数 + 交互式终端 → 进入 REPL
+    if args.code is None and args.script is None and sys.stdin.isatty():
+        asyncio.run(_run_repl(app.config))
+        return
 
     code = _read_code(args)
     if not code.strip():
