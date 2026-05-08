@@ -8,7 +8,7 @@ import httpx
 import mutobj
 
 import mutagent
-from mutagent.net.client import HttpClient
+from mutio.net.client import HttpClient
 from mutagent.messages import ToolSchema
 from mutagent.toolkits.web_toolkit import FetchImpl, SearchImpl, WebToolkit
 

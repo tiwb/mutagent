@@ -7,7 +7,7 @@ from typing import Any, AsyncGenerator, AsyncIterator
 
 import httpx
 
-from mutagent.net.client import HttpClient
+from mutio.net.client import HttpClient
 from mutagent.messages import (
     ContentBlock,
     DocumentBlock,

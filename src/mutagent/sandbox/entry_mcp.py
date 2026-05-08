@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from mutagent.net.mcp import MCPToolSet
-from mutagent.net._mcp_proto import ToolResult
+from mutio.mcp.toolset import MCPToolSet
+from mutio.mcp.protocol import ToolResult
 from mutagent.sandbox.app import SandboxApp, PYSANDBOX_DOC
 
 

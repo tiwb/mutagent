@@ -14,7 +14,7 @@ from markdownify import markdownify as md
 from readability import Document as ReadabilityDoc
 
 import mutagent
-from mutagent.net.client import HttpClient
+from mutio.net.client import HttpClient
 from mutagent.toolkits.web_toolkit import FetchImpl
 
 if TYPE_CHECKING:
