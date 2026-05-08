@@ -9,6 +9,7 @@ import os
 import re
 import socket
 import sys
+import asyncio
 import webbrowser
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,7 @@ from mutagent.runtime.log_store import (
 )
 from mutagent.runtime.api_recorder import ApiRecorder
 from mutagent.sandbox.app import SandboxApp
-from mutagent.sandbox._adapter_mcp import bridge_mcp_server
+from mutagent.sandbox._adapter_mcp import MCPConnection
 from mutagent.sandbox._adapter_cli import build_cli_namespace
 from mutagent.sandbox.entry_agent import SandboxToolkit
 from mutagent.tools import ToolSet
@@ -288,21 +289,54 @@ def setup_agent(self, system_prompt: str = "") -> Agent:
 
 @mutagent.impl(App.connect_sources)
 async def connect_sources(self) -> None:
-    """在 agent 将运行的 event loop 上连接 mcp_sources / cli_sources。"""
+    """在 agent 将运行的 event loop 上连接 mcp_sources / cli_sources。
+
+    MCP 连接采用「长生命周期代理 + 懒连 + 自动重连」模型：
+
+    - 为每个 mcp source 创建 :class:`MCPConnection` 并常驻注册 namespace；
+      连接失败不会丢 namespace，下次调用会重试。
+    - ``autostart=true``（默认）：启动后开后台任务异步连，不阻塞 setup。
+    - ``autostart=false``：完全 lazy，首次访问 namespace 成员时才连。
+    - ``retry_cooldown``（默认 5s，0 禁用）：失败后冷却期内不重试。
+    """
     sandbox = getattr(self, "sandbox", None)
     if sandbox is None:
         logger.warning("connect_sources called before setup_agent; skipping")
         return
 
+    main_loop = asyncio.get_running_loop()
     mcp_sources = self.config.get("mcp_sources", default={}) or {}
     for ns_name, server_cfg in mcp_sources.items():
+        autostart = bool(server_cfg.get("autostart", True))
+        retry_cooldown = float(server_cfg.get("retry_cooldown", 5.0))
         try:
-            ns, client = await bridge_mcp_server(ns_name, server_cfg)
-            sandbox.add_namespace(ns, on_remove=client.close)
-            logger.info("MCP source '%s' connected (%d functions)",
-                        ns_name, len(ns._functions))
+            conn = MCPConnection(
+                ns_name, server_cfg, main_loop,
+                retry_cooldown=retry_cooldown)
         except Exception as e:
-            logger.warning("MCP source '%s' failed: %s", ns_name, e)
+            # 连设置都走不通 — 跳过，但记个 log
+            logger.warning("MCP source '%s' init failed: %s", ns_name, e)
+            continue
+
+        # namespace 全程注册，cleanup 绑 connection.close（而非单个 client，
+        # 避免重连后 cleanup 调到旧 client）
+        sandbox.add_namespace(conn.namespace, on_remove=conn.close)
+
+        if autostart:
+            # 后台连，不阻塞 setup；失败只 log，不影响其他 namespace
+            async def _bg_connect(c: MCPConnection = conn,
+                                  n: str = ns_name) -> None:
+                try:
+                    await c.ensure_connected()
+                    logger.info("MCP source '%s' connected (%d functions)",
+                                n, len(c.namespace._functions))
+                except Exception as exc:
+                    logger.warning(
+                        "MCP source '%s' autostart failed: %s", n, exc)
+            asyncio.create_task(_bg_connect())
+        else:
+            logger.info(
+                "MCP source '%s' registered (lazy, autostart=false)", ns_name)
 
     cli_sources = self.config.get("cli_sources", default={}) or {}
     if cli_sources:

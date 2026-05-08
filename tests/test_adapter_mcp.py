@@ -15,7 +15,11 @@ import pytest
 
 from mutagent.sandbox._adapter_mcp import (
     HTTPMCPClient,
+    MCPConnection,
+    MCPToolError,
+    MCPTransportError,
     _extract_content,
+    _is_transport_error,
     bridge_mcp_server,
 )
 
@@ -31,12 +35,12 @@ class TestExtractContent:
             "isError": True,
             "content": [{"type": "text", "text": "boom"}],
         }
-        with pytest.raises(RuntimeError, match="boom"):
+        with pytest.raises(MCPToolError, match="boom"):
             _extract_content(result)
 
     def test_is_error_without_text(self):
         result = {"isError": True, "content": []}
-        with pytest.raises(RuntimeError, match="MCP tool call failed"):
+        with pytest.raises(MCPToolError, match="MCP tool call failed"):
             _extract_content(result)
 
     def test_single_text_json(self):
@@ -159,7 +163,7 @@ class TestHTTPMCPClient:
             "isError": True,
             "content": [{"type": "text", "text": "fail"}],
         }
-        with pytest.raises(RuntimeError, match="fail"):
+        with pytest.raises(MCPToolError, match="fail"):
             await client.call_tool("broken", {})
 
     @pytest.mark.asyncio
@@ -406,3 +410,489 @@ class TestToolFuncCrossThread:
 
         results = await main_loop.run_in_executor(None, worker)
         assert results == ["pong"] * 5
+
+
+# ============================================================
+# _is_transport_error
+# ============================================================
+
+class TestIsTransportError:
+
+    def test_mcp_transport_error(self):
+        assert _is_transport_error(MCPTransportError("x")) is True
+
+    def test_mcp_tool_error_is_not_transport(self):
+        assert _is_transport_error(MCPToolError("user-facing")) is False
+
+    def test_broken_pipe(self):
+        assert _is_transport_error(BrokenPipeError("pipe")) is True
+
+    def test_connection_reset(self):
+        assert _is_transport_error(ConnectionResetError("reset")) is True
+
+    def test_eof(self):
+        assert _is_transport_error(EOFError()) is True
+
+    def test_httpx_connect_error(self):
+        import httpx
+        assert _is_transport_error(httpx.ConnectError("x")) is True
+
+    def test_httpx_read_error(self):
+        import httpx
+        assert _is_transport_error(httpx.ReadError("x")) is True
+
+    def test_httpx_status_404_is_transport(self):
+        import httpx
+        req = httpx.Request("POST", "http://x/")
+        resp = httpx.Response(404, request=req)
+        exc = httpx.HTTPStatusError("not found", request=req, response=resp)
+        assert _is_transport_error(exc) is True
+
+    def test_httpx_status_410_is_transport(self):
+        import httpx
+        req = httpx.Request("POST", "http://x/")
+        resp = httpx.Response(410, request=req)
+        exc = httpx.HTTPStatusError("gone", request=req, response=resp)
+        assert _is_transport_error(exc) is True
+
+    def test_httpx_status_500_is_not_transport(self):
+        import httpx
+        req = httpx.Request("POST", "http://x/")
+        resp = httpx.Response(500, request=req)
+        exc = httpx.HTTPStatusError("oops", request=req, response=resp)
+        assert _is_transport_error(exc) is False
+
+    def test_runtime_closed_unexpectedly(self):
+        assert _is_transport_error(RuntimeError("MCP server closed unexpectedly")) is True
+
+    def test_other_runtime_error(self):
+        assert _is_transport_error(RuntimeError("MCP error -32601: method not found")) is False
+
+    def test_value_error_is_not_transport(self):
+        assert _is_transport_error(ValueError("bad")) is False
+
+
+# ============================================================
+# MCPConnection 状态机 / 重连 / 冷却 / 锁
+# ============================================================
+
+class _FakeClient:
+    """通用伪 client，可控制 connect / list_tools / call_tool 行为。"""
+
+    def __init__(self, instructions: str = "", tools: list | None = None):
+        self.instructions = instructions
+        self.tools = tools if tools is not None else []
+        self.connect_calls = 0
+        self.close_calls = 0
+        self.call_log: list = []
+        # 注入异常（按顺序消费）
+        self.connect_errors: list = []
+        self.list_tools_errors: list = []
+        self.call_tool_errors: list = []
+
+    async def connect(self):
+        self.connect_calls += 1
+        if self.connect_errors:
+            raise self.connect_errors.pop(0)
+        return {
+            "instructions": self.instructions,
+            "serverInfo": {"name": "fake"},
+        }
+
+    async def list_tools(self):
+        if self.list_tools_errors:
+            raise self.list_tools_errors.pop(0)
+        return list(self.tools)
+
+    async def call_tool(self, name, arguments):
+        self.call_log.append((name, arguments))
+        if self.call_tool_errors:
+            err = self.call_tool_errors.pop(0)
+            raise err
+        return f"ok:{name}"
+
+    async def close(self):
+        self.close_calls += 1
+
+
+class TestMCPConnectionStateMachine:
+
+    @pytest.mark.asyncio
+    async def test_initial_state_is_disconnected(self):
+        loop = asyncio.get_running_loop()
+        conn = MCPConnection("ns", {"transport": "http", "url": "http://x"}, loop)
+        assert conn.state == "disconnected"
+        assert conn.client is None
+        assert conn.namespace.connection_state == "disconnected"
+        assert conn.namespace._connection is conn
+
+    @pytest.mark.asyncio
+    async def test_reconnect_success(self, monkeypatch):
+        loop = asyncio.get_running_loop()
+        fake = _FakeClient(
+            instructions="hello",
+            tools=[{"name": "echo", "description": "", "inputSchema": {}}])
+        monkeypatch.setattr(
+            "mutagent.sandbox._adapter_mcp.make_client",
+            lambda ns, cfg: fake)
+
+        conn = MCPConnection("ns", {"transport": "http", "url": "http://x"}, loop)
+        await conn.reconnect()
+
+        assert conn.state == "connected"
+        assert conn.client is fake
+        assert "echo" in conn.namespace._functions
+        assert conn.namespace._description == "hello"
+        assert conn.namespace.connection_state == "connected"
+
+    @pytest.mark.asyncio
+    async def test_reconnect_failure_marks_failed(self, monkeypatch):
+        loop = asyncio.get_running_loop()
+        fake = _FakeClient()
+        fake.connect_errors.append(MCPTransportError("connect refused"))
+        monkeypatch.setattr(
+            "mutagent.sandbox._adapter_mcp.make_client",
+            lambda ns, cfg: fake)
+
+        conn = MCPConnection("ns", {"transport": "http", "url": "http://x"}, loop)
+        with pytest.raises(MCPTransportError, match="connect refused"):
+            await conn.reconnect()
+
+        assert conn.state == "failed"
+        assert conn.client is None
+        assert "connect refused" in (conn.last_error or "")
+        assert conn.namespace.connection_state == "failed"
+        assert conn.namespace.connection_error is not None
+
+    @pytest.mark.asyncio
+    async def test_ensure_connected_idempotent(self, monkeypatch):
+        loop = asyncio.get_running_loop()
+        fake = _FakeClient()
+        monkeypatch.setattr(
+            "mutagent.sandbox._adapter_mcp.make_client",
+            lambda ns, cfg: fake)
+
+        conn = MCPConnection("ns", {"transport": "http", "url": "http://x"}, loop)
+        await conn.ensure_connected()
+        await conn.ensure_connected()
+        await conn.ensure_connected()
+
+        # 只真实 connect 一次（连上后短路）
+        assert fake.connect_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_cooldown_blocks_retry(self, monkeypatch):
+        loop = asyncio.get_running_loop()
+        fake = _FakeClient()
+        fake.connect_errors.append(MCPTransportError("first fail"))
+        monkeypatch.setattr(
+            "mutagent.sandbox._adapter_mcp.make_client",
+            lambda ns, cfg: fake)
+
+        conn = MCPConnection(
+            "ns", {"transport": "http", "url": "http://x"},
+            loop, retry_cooldown=10.0)
+
+        with pytest.raises(MCPTransportError, match="first fail"):
+            await conn.ensure_connected()
+
+        assert conn.state == "failed"
+        # 冷却期内：直接抛上次的错，不重新发起 connect
+        with pytest.raises(MCPTransportError, match="cooldown"):
+            await conn.ensure_connected()
+
+        assert fake.connect_calls == 1  # 未重试
+
+    @pytest.mark.asyncio
+    async def test_cooldown_zero_disables(self, monkeypatch):
+        loop = asyncio.get_running_loop()
+        fake = _FakeClient()
+        # 第一次 fail，第二次成功
+        fake.connect_errors.append(MCPTransportError("transient"))
+        monkeypatch.setattr(
+            "mutagent.sandbox._adapter_mcp.make_client",
+            lambda ns, cfg: fake)
+
+        conn = MCPConnection(
+            "ns", {"transport": "http", "url": "http://x"},
+            loop, retry_cooldown=0.0)
+
+        with pytest.raises(MCPTransportError):
+            await conn.ensure_connected()
+        # cooldown=0：立即重试
+        await conn.ensure_connected()
+        assert conn.state == "connected"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_ensure_connected_only_one_real_connect(self, monkeypatch):
+        loop = asyncio.get_running_loop()
+
+        # 模拟 connect 慢一点，给并发留窗口
+        class _SlowClient(_FakeClient):
+            async def connect(self):
+                await asyncio.sleep(0.05)
+                return await super().connect()
+
+        fake = _SlowClient()
+        monkeypatch.setattr(
+            "mutagent.sandbox._adapter_mcp.make_client",
+            lambda ns, cfg: fake)
+
+        conn = MCPConnection("ns", {"transport": "http", "url": "http://x"}, loop)
+
+        # 5 个并发 ensure_connected
+        await asyncio.gather(*[conn.ensure_connected() for _ in range(5)])
+
+        assert fake.connect_calls == 1  # Lock 起作用
+        assert conn.state == "connected"
+
+    @pytest.mark.asyncio
+    async def test_close_resets_state(self, monkeypatch):
+        loop = asyncio.get_running_loop()
+        fake = _FakeClient()
+        monkeypatch.setattr(
+            "mutagent.sandbox._adapter_mcp.make_client",
+            lambda ns, cfg: fake)
+
+        conn = MCPConnection("ns", {"transport": "http", "url": "http://x"}, loop)
+        await conn.ensure_connected()
+        await conn.close()
+
+        assert conn.state == "disconnected"
+        assert conn.client is None
+        assert fake.close_calls == 1
+
+        # 多次 close 幂等
+        await conn.close()
+        assert fake.close_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_reconnect_refreshes_tools(self, monkeypatch):
+        loop = asyncio.get_running_loop()
+        fake = _FakeClient(
+            tools=[{"name": "old", "description": "", "inputSchema": {}}])
+        monkeypatch.setattr(
+            "mutagent.sandbox._adapter_mcp.make_client",
+            lambda ns, cfg: fake)
+
+        conn = MCPConnection("ns", {"transport": "http", "url": "http://x"}, loop)
+        await conn.reconnect()
+        assert "old" in conn.namespace._functions
+
+        # server 重启，tool 列表变了
+        fake.tools = [{"name": "new", "description": "", "inputSchema": {}}]
+        await conn.reconnect()
+        assert "new" in conn.namespace._functions
+        assert "old" not in conn.namespace._functions  # 旧 tool 被删
+
+
+class TestToolFuncAutoReconnect:
+
+    @pytest.mark.asyncio
+    async def test_call_succeeds_lazy(self, monkeypatch):
+        """autostart=false 时首次调用触发 connect。"""
+        loop = asyncio.get_running_loop()
+        fake = _FakeClient(
+            tools=[{"name": "ping", "description": "", "inputSchema": {}}])
+        monkeypatch.setattr(
+            "mutagent.sandbox._adapter_mcp.make_client",
+            lambda ns, cfg: fake)
+
+        conn = MCPConnection("ns", {"transport": "http", "url": "http://x"}, loop)
+        # 没 autostart，未 connect
+        assert conn.state == "disconnected"
+
+        # 通过 namespace 取函数 — __getattr__ 触发 ensure_connected
+        # 注意：__getattr__ 用 run_coroutine_threadsafe，必须在另一个线程
+        result_box: dict = {}
+
+        def worker():
+            fn = conn.namespace.ping  # 触发懒连接
+            result_box["result"] = fn()
+
+        await loop.run_in_executor(None, worker)
+        assert result_box["result"] == "ok:ping"
+        assert conn.state == "connected"
+
+    @pytest.mark.asyncio
+    async def test_call_retries_after_transport_error(self, monkeypatch):
+        """call 出现传输错 → 自动重连重试一次后成功。"""
+        loop = asyncio.get_running_loop()
+
+        clients: list = []
+
+        def factory(ns, cfg):
+            c = _FakeClient(
+                tools=[{"name": "do", "description": "", "inputSchema": {}}])
+            if not clients:
+                # 第一个 client 的 call 会抛传输错
+                c.call_tool_errors.append(MCPTransportError("conn dropped"))
+            clients.append(c)
+            return c
+
+        monkeypatch.setattr(
+            "mutagent.sandbox._adapter_mcp.make_client", factory)
+
+        conn = MCPConnection(
+            "ns", {"transport": "http", "url": "http://x"},
+            loop, retry_cooldown=0.0)
+        await conn.ensure_connected()  # 拿到第一个 client
+
+        result_box: dict = {}
+
+        def worker():
+            result_box["result"] = conn.namespace.do()
+
+        await loop.run_in_executor(None, worker)
+
+        assert result_box["result"] == "ok:do"
+        assert len(clients) == 2  # 重连建了第二个 client
+        assert conn.state == "connected"
+
+    @pytest.mark.asyncio
+    async def test_tool_error_does_not_reconnect(self, monkeypatch):
+        """业务错（MCPToolError）直接抛给用户，不触发重连。"""
+        loop = asyncio.get_running_loop()
+        clients: list = []
+
+        def factory(ns, cfg):
+            c = _FakeClient(
+                tools=[{"name": "do", "description": "", "inputSchema": {}}])
+            c.call_tool_errors.append(MCPToolError("user input invalid"))
+            clients.append(c)
+            return c
+
+        monkeypatch.setattr(
+            "mutagent.sandbox._adapter_mcp.make_client", factory)
+
+        conn = MCPConnection("ns", {"transport": "http", "url": "http://x"}, loop)
+        await conn.ensure_connected()
+
+        result_box: dict = {}
+
+        def worker():
+            try:
+                conn.namespace.do()
+                result_box["result"] = "no-error"
+            except Exception as exc:
+                result_box["error"] = exc
+
+        await loop.run_in_executor(None, worker)
+
+        assert isinstance(result_box["error"], MCPToolError)
+        assert "user input invalid" in str(result_box["error"])
+        assert len(clients) == 1  # 没重连
+        assert conn.state == "connected"  # 状态保持
+
+    @pytest.mark.asyncio
+    async def test_double_failure_raises(self, monkeypatch):
+        """重试一次仍失败 → 抛 MCPTransportError。"""
+        loop = asyncio.get_running_loop()
+        clients: list = []
+
+        def factory(ns, cfg):
+            c = _FakeClient(
+                tools=[{"name": "do", "description": "", "inputSchema": {}}])
+            # 第一个 client 的 call 失败；重连后第二个 client 的 call 也失败
+            c.call_tool_errors.append(MCPTransportError("net" + str(len(clients) + 1)))
+            clients.append(c)
+            return c
+
+        monkeypatch.setattr(
+            "mutagent.sandbox._adapter_mcp.make_client", factory)
+
+        conn = MCPConnection(
+            "ns", {"transport": "http", "url": "http://x"},
+            loop, retry_cooldown=0.0)
+        await conn.ensure_connected()
+
+        result_box: dict = {}
+
+        def worker():
+            try:
+                conn.namespace.do()
+            except Exception as exc:
+                result_box["error"] = exc
+
+        await loop.run_in_executor(None, worker)
+        assert isinstance(result_box["error"], MCPTransportError)
+
+
+# ============================================================
+# Namespace render — 状态显示
+# ============================================================
+
+class TestNamespaceRender:
+
+    def _make_registry(self, namespaces):
+        from mutagent.sandbox._namespace import NamespaceRegistry
+        reg = NamespaceRegistry()
+        for ns in namespaces:
+            reg.add(ns)
+        return reg
+
+    def _mcp_ns(self, name, state, error=None, functions=None):
+        from mutagent.sandbox._namespace import Namespace
+        ns = Namespace(name, description="")
+        # 模拟有 connection（非 None 即可触发 MCP 渲染分支）
+        ns._connection = object()  # type: ignore[assignment]
+        ns.connection_state = state
+        ns.connection_error = error
+        for fname in functions or []:
+            ns.register(fname, lambda **k: None, "")
+        return ns
+
+    def test_connected_no_state_label(self):
+        from mutagent.sandbox._namespace import _render_registry
+        ns = self._mcp_ns("playwright", "connected", functions=["a", "b"])
+        text = _render_registry(self._make_registry([ns]))
+        assert "[connecting" not in text
+        assert "[failed" not in text
+        assert "[disconnected" not in text
+        assert "playwright" in text
+        assert "(2 functions)" in text
+
+    def test_connecting_label(self):
+        from mutagent.sandbox._namespace import _render_registry
+        ns = self._mcp_ns("serena", "connecting")
+        text = _render_registry(self._make_registry([ns]))
+        assert "[connecting...]" in text
+
+    def test_disconnected_unknown_count(self):
+        from mutagent.sandbox._namespace import _render_registry
+        ns = self._mcp_ns("experimental", "disconnected")
+        text = _render_registry(self._make_registry([ns]))
+        assert "[disconnected]" in text
+        assert "(? functions)" in text  # 从未连过
+
+    def test_failed_with_reason(self):
+        from mutagent.sandbox._namespace import _render_registry
+        ns = self._mcp_ns("weather", "failed", error="connection refused")
+        text = _render_registry(self._make_registry([ns]))
+        assert "[failed: connection refused]" in text
+
+    def test_failed_reason_truncated(self):
+        from mutagent.sandbox._namespace import _render_registry
+        long = "x" * 200
+        ns = self._mcp_ns("weather", "failed", error=long)
+        text = _render_registry(self._make_registry([ns]))
+        # 60 字符截断
+        assert "..." in text
+        # 不应出现完整 200 字符
+        assert ("x" * 100) not in text
+
+    def test_render_namespace_failed_hint(self):
+        from mutagent.sandbox._namespace import _render_namespace
+        ns = self._mcp_ns("weather", "failed", error="ECONNREFUSED")
+        text = _render_namespace(ns)
+        assert "Connection failed: ECONNREFUSED" in text
+        assert "Calling any function will retry" in text
+
+    def test_non_mcp_namespace_no_state(self):
+        """普通 NamespaceTools / CLI namespace 不显示状态标签。"""
+        from mutagent.sandbox._namespace import Namespace, _render_registry
+        ns = Namespace("fs", description="")
+        ns.register("read", lambda **k: None, "")
+        text = _render_registry(self._make_registry([ns]))
+        assert "[" not in text.split("Use help")[0]  # 状态标签不出现
+        assert "(1 functions)" in text

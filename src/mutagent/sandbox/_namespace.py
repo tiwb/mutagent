@@ -1,7 +1,12 @@
 """命名空间机制 — 能力源函数的分组访问和按需查询。"""
 
+import asyncio
 import inspect
-from typing import Any, Callable
+import time
+from typing import Any, Callable, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from mutagent.sandbox._adapter_mcp import MCPConnection
 
 
 def _first_line(text: str) -> str:
@@ -28,6 +33,10 @@ class Namespace:
         self._description = description
         self._functions: dict[str, Callable] = {}
         self._descriptions: dict[str, str] = {}
+        # 仅 MCP namespace 有意义；其他 namespace 留 None，渲染时跳过状态显示
+        self._connection: "MCPConnection | None" = None
+        self.connection_state: str | None = None
+        self.connection_error: str | None = None
 
     @property
     def name(self) -> str:
@@ -52,10 +61,28 @@ class Namespace:
             pass
 
     def __getattr__(self, name: str) -> Any:
+        # 私有属性 / dunder 不走懒触发，否则会与 hasattr 检查死循环
         if name.startswith('_'):
             raise AttributeError(name)
-        if name in self._functions:
-            return self._functions[name]
+        # 已注册（含连过又断的「last seen」函数）直接返回
+        functions = self.__dict__.get('_functions', {})
+        if name in functions:
+            return functions[name]
+        # MCP namespace 且未连：阻塞式触发 ensure_connected
+        connection = self.__dict__.get('_connection')
+        state = self.__dict__.get('connection_state')
+        if connection is not None and state != "connected":
+            future = asyncio.run_coroutine_threadsafe(
+                connection.ensure_connected(), connection.main_loop)
+            try:
+                # 30s 余量覆盖 stdio 冷启动 / npx 下载场景
+                future.result(timeout=30)
+            except Exception as exc:
+                # 重连失败 — 给用户清晰的错误信息（包含原因）
+                raise AttributeError(
+                    f"'{self._name}' is not connected: {exc}") from exc
+            if name in functions:
+                return functions[name]
         raise AttributeError(
             f"'{self._name}' has no function '{name}'")
 
@@ -135,6 +162,32 @@ class NamespaceRegistry:
 # 渲染函数 — 分层显示
 # ---------------------------------------------------------------------------
 
+def _format_state_label(state: str | None, error: str | None) -> str:
+    """渲染连接状态标签。connected / None 不显示标签。"""
+    if state in (None, "connected"):
+        return ""
+    if state == "connecting":
+        return "[connecting...]"
+    if state == "disconnected":
+        return "[disconnected]"
+    if state == "failed":
+        reason = (error or "").strip().splitlines()[0] if error else ""
+        if len(reason) > 60:
+            reason = reason[:57] + "..."
+        return f"[failed: {reason}]" if reason else "[failed]"
+    return f"[{state}]"
+
+
+def _format_function_count(ns: "Namespace") -> str:
+    """函数数显示：连过的显示真实数；从未连过的（MCP 且无函数）显示 (? functions)。"""
+    count = len(ns._functions)
+    is_mcp = ns._connection is not None
+    state = ns.connection_state
+    if is_mcp and count == 0 and state != "connected":
+        return "(? functions)"
+    return f"({count} functions)"
+
+
 def _render_registry(registry: "NamespaceRegistry") -> str:
     """Layer 1: 列所有 namespace（首行摘要）。"""
     names = sorted(registry._namespaces.keys())
@@ -146,13 +199,18 @@ def _render_registry(registry: "NamespaceRegistry") -> str:
     lines = ["Available namespaces:", ""]
     for name in names:
         ns = registry._namespaces[name]
-        count = len(ns._functions)
         desc = _first_line(ns._description)
+        count_text = _format_function_count(ns)
+        label = _format_state_label(ns.connection_state, ns.connection_error)
         padded = f"{name:<{max_name}}"
+        # 状态标签紧跟 namespace 名后；desc 在标签之后
+        suffix_parts: list[str] = []
+        if label:
+            suffix_parts.append(label)
         if desc:
-            lines.append(f"  {padded} — {desc} ({count} functions)")
-        else:
-            lines.append(f"  {padded} ({count} functions)")
+            suffix_parts.append(f"— {desc}")
+        suffix_parts.append(count_text)
+        lines.append(f"  {padded} " + " ".join(suffix_parts))
     lines.append("")
     lines.append("Use help(<namespace>) for details, "
                  "e.g. help(" + names[0] + ").")
@@ -166,6 +224,25 @@ def _render_namespace(ns: Namespace) -> str:
     desc = ns._description.strip() if ns._description else ""
     if desc:
         lines.append(desc)
+        lines.append("")
+
+    # MCP 失败状态附 hint
+    if ns.connection_state == "failed":
+        reason = (ns.connection_error or "").strip() or "(unknown)"
+        lines.append(f"⚠ Connection failed: {reason}")
+        last_attempt = None
+        connection = ns._connection
+        if connection is not None and getattr(connection, "last_attempt_at", None):
+            last_attempt = time.strftime(
+                "%Y-%m-%d %H:%M:%S",
+                time.localtime(connection.last_attempt_at))
+        if last_attempt:
+            lines.append(f"  Last attempt: {last_attempt}")
+        lines.append("  Calling any function will retry the connection.")
+        lines.append("")
+    elif ns.connection_state in ("connecting", "disconnected") and ns._connection is not None:
+        label = ns.connection_state
+        lines.append(f"(connection state: {label})")
         lines.append("")
 
     count = len(ns._functions)

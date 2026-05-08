@@ -66,6 +66,18 @@ class App(mutagent.Declaration):
         clients (httpx-based and stdio-based) bind to the loop captured
         at connection time.  Calling from a temporary loop (e.g.
         ``asyncio.run``) will deactivate clients once that loop exits.
+
+        MCP source config supports two extra fields:
+
+        - ``autostart`` (default ``true``): if true, kick off connection in
+          the background; otherwise the connection is deferred until the
+          first attribute access on the namespace (lazy).
+        - ``retry_cooldown`` (seconds, default ``5``): after a failed
+          connection attempt, calls within this window raise the cached
+          error instead of re-attempting.  Set ``0`` to disable.
+
+        Connection failures never drop the namespace—``help()`` will
+        show the connection state and the next call attempt will retry.
         """
         return await main_impl.connect_sources(self)
 

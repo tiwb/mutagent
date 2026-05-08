@@ -66,21 +66,40 @@ def _read_code(args: argparse.Namespace) -> str:
 
 
 async def _run(config: Any, code: str) -> int:
-    """构造 sandbox → 执行 → 清理。返回 exit code。"""
+    """构造 sandbox → 执行 → 清理。返回 exit code。
+
+    MCP 连接走与 App.connect_sources 一致的 MCPConnection 路径：
+    autostart=true 后台连（不阻塞，调用时会 wait）；
+    autostart=false 完全 lazy。
+    """
     from mutagent.sandbox.app import SandboxApp
-    from mutagent.sandbox._adapter_mcp import bridge_mcp_server
+    from mutagent.sandbox._adapter_mcp import MCPConnection
     from mutagent.sandbox._adapter_cli import build_cli_namespace
     import logging
     _logger = logging.getLogger(__name__)
 
     sandbox = SandboxApp()
+    main_loop = asyncio.get_running_loop()
     mcp_sources = config.get("mcp_sources", default={}) or {}
     for ns_name, server_cfg in mcp_sources.items():
+        autostart = bool(server_cfg.get("autostart", True))
+        retry_cooldown = float(server_cfg.get("retry_cooldown", 5.0))
         try:
-            ns, client = await bridge_mcp_server(ns_name, server_cfg)
-            sandbox.add_namespace(ns, on_remove=client.close)
+            conn = MCPConnection(
+                ns_name, server_cfg, main_loop,
+                retry_cooldown=retry_cooldown)
         except Exception as e:
-            _logger.warning("MCP source '%s' failed: %s", ns_name, e)
+            _logger.warning("MCP source '%s' init failed: %s", ns_name, e)
+            continue
+        sandbox.add_namespace(conn.namespace, on_remove=conn.close)
+        if autostart:
+            async def _bg(c: MCPConnection = conn, n: str = ns_name) -> None:
+                try:
+                    await c.ensure_connected()
+                except Exception as exc:
+                    _logger.warning(
+                        "MCP source '%s' autostart failed: %s", n, exc)
+            asyncio.create_task(_bg())
 
     cli_sources = config.get("cli_sources", default={}) or {}
     if cli_sources:
