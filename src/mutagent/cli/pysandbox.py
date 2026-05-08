@@ -21,8 +21,11 @@ import asyncio
 import code
 import logging
 import sys
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
+from mutagent.runtime.log_store import LogStore, LogStoreHandler, SingleLineFormatter
 
 logger = logging.getLogger(__name__)
 
@@ -67,13 +70,46 @@ def _read_code(args: argparse.Namespace) -> str:
     sys.exit(2)
 
 
+def _setup_pysandbox_logging(config: Any) -> None:
+    """配置 pysandbox 的基础 logging管线（LogStore + 文件），不挂 console handler。
+
+    和 ``setup_agent()`` 的 logging 部分保持一致的 session 命名与目录结构，
+    但不包括 API Recorder 等重型组件。
+    """
+    session_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_dir = Path(config.get("logging.log_dir", default=".mutagent/logs"))
+
+    root_logger = logging.getLogger()  # root logger，捕获所有库的日志
+    root_logger.setLevel(logging.DEBUG)
+
+    # Memory handler
+    log_store = LogStore()
+    mem_handler = LogStoreHandler(log_store)
+    mem_handler.setFormatter(logging.Formatter("%(message)s"))
+    root_logger.addHandler(mem_handler)
+
+    # File handler
+    if config.get("logging.file_log", default=True):
+        log_dir.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(
+            log_dir / f"{session_ts}.log", encoding="utf-8"
+        )
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(SingleLineFormatter(
+            "%(asctime)s %(levelname)-8s %(name)s - %(message)s"
+        ))
+        root_logger.addHandler(file_handler)
+
+    logger.info("Pysandbox logging initialized (session=%s)", session_ts)
+
+
 def _build_sandbox(config: Any) -> Any:
     """构造 SandboxApp 并注入 MCP/CLI namespaces，返回 sandbox。"""
     from mutagent.sandbox.app import SandboxApp
     from mutagent.sandbox._adapter_mcp import MCPConnection
     from mutagent.sandbox._adapter_cli import build_cli_namespace
-    import logging
-    _logger = logging.getLogger(__name__)
+
+    _setup_pysandbox_logging(config)
 
     sandbox = SandboxApp()
     main_loop = asyncio.get_running_loop()
@@ -86,7 +122,7 @@ def _build_sandbox(config: Any) -> Any:
                 ns_name, server_cfg, main_loop,
                 retry_cooldown=retry_cooldown)
         except Exception as e:
-            _logger.warning("MCP source '%s' init failed: %s", ns_name, e)
+            logger.warning("MCP source '%s' init failed: %s", ns_name, e)
             continue
         sandbox.add_namespace(conn.namespace, on_remove=conn.close)
         if autostart:
@@ -94,7 +130,7 @@ def _build_sandbox(config: Any) -> Any:
                 try:
                     await c.ensure_connected()
                 except Exception as exc:
-                    _logger.warning(
+                    logger.warning(
                         "MCP source '%s' autostart failed: %s", n, exc)
             asyncio.create_task(_bg())
 
@@ -166,6 +202,9 @@ async def _run_repl(config: Any) -> None:
         console = SandboxConsole(sandbox)
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, console.interact, banner)
+    except asyncio.CancelledError:
+        # Ctrl+C 触发的 asyncio task cancel — 静默，走 finally 清理
+        pass
     finally:
         try:
             await sandbox.close()
@@ -181,7 +220,10 @@ def dispatch_pysandbox(app: Any, args: argparse.Namespace) -> None:
 
     # 无参数 + 交互式终端 → 进入 REPL
     if args.code is None and args.script is None and sys.stdin.isatty():
-        asyncio.run(_run_repl(app.config))
+        try:
+            asyncio.run(_run_repl(app.config))
+        except KeyboardInterrupt:
+            pass  # Ctrl+C 干净退出，不打印 traceback
         return
 
     code = _read_code(args)
@@ -189,5 +231,8 @@ def dispatch_pysandbox(app: Any, args: argparse.Namespace) -> None:
         print("Error: empty code.", file=sys.stderr)
         sys.exit(2)
 
-    exit_code = asyncio.run(_run(app.config, code))
+    try:
+        exit_code = asyncio.run(_run(app.config, code))
+    except KeyboardInterrupt:
+        exit_code = 0  # Ctrl+C 干净退出
     sys.exit(exit_code)

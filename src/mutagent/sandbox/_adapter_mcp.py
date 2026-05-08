@@ -14,6 +14,7 @@
 import asyncio
 import json
 import logging
+import re
 import subprocess
 import sys
 import time
@@ -384,6 +385,34 @@ def make_client(ns_name: str, server_config: dict[str, Any]) -> AnyMCPClient:
 ConnectionState = str  # Literal["disconnected", "connecting", "connected", "failed"]
 
 
+def _sanitize_ns_name(name: str) -> str:
+    """将 MCP namespace 名转换为合法 Python 标识符。
+
+    规则：
+    - 字母、数字、下划线保留
+    - 其他字符替换为 ``_``
+    - 连续 ``_`` 折叠为一个
+    - 首尾 ``_`` 去掉
+    - 以数字开头时前补 ``_``
+    - 全特殊字符映射后为空时返回 ``_``
+
+    >>> _sanitize_ns_name("My MCP")
+    'My_MCP'
+    >>> _sanitize_ns_name("my-srv")
+    'my_srv'
+    >>> _sanitize_ns_name("!@#$")
+    '_'
+    """
+    sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', name)
+    sanitized = re.sub(r'_+', '_', sanitized)
+    sanitized = sanitized.strip('_')
+    if not sanitized:
+        return '_'
+    if sanitized[0].isdigit():
+        sanitized = '_' + sanitized
+    return sanitized
+
+
 class MCPConnection:
     """一个 MCP source 的长生命周期代理。
 
@@ -397,7 +426,7 @@ class MCPConnection:
     def __init__(self, ns_name: str, server_config: dict[str, Any],
                  main_loop: asyncio.AbstractEventLoop,
                  retry_cooldown: float = 5.0):
-        self.ns_name = ns_name
+        self.ns_name = ns_name  # 原始名，用于日志
         self.config = server_config
         self.main_loop = main_loop
         self.retry_cooldown = max(0.0, float(retry_cooldown))
@@ -409,7 +438,9 @@ class MCPConnection:
         self._lock = asyncio.Lock()
 
         # 始终存在的 namespace；失败 / 未连状态下函数表为空
-        self.namespace = Namespace(ns_name, description="")
+        # namespace 名用 sanitized 版本，确保可作为 Python 标识符访问
+        safe_name = _sanitize_ns_name(ns_name)
+        self.namespace = Namespace(safe_name, description="")
         self.namespace._connection = self  # type: ignore[attr-defined]
         self.namespace.connection_state = self.state  # type: ignore[attr-defined]
         self.namespace.connection_error = None  # type: ignore[attr-defined]

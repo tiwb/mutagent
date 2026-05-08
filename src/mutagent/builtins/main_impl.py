@@ -216,8 +216,8 @@ def setup_agent(self, system_prompt: str = "") -> Agent:
     # 1. Create LogStore (in-memory, no capacity limit)
     log_store = LogStore()
 
-    # 2. Configure Python logging
-    root_logger = logging.getLogger("mutagent")
+    # 2. Configure Python logging — 用 root logger 捕获所有库的日志
+    root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)
 
     # Memory handler — message only (timestamp stored in LogEntry.timestamp)
