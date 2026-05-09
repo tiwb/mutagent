@@ -131,6 +131,12 @@ def _wrap_async(app: SandboxApp, coro_fn: Any) -> Any:
     函数，供已经在主 loop 异步上下文里的调用方（如
     ``share.py:_handle_call``）绕过 sync wrapper 直接 ``await``，
     避免「同线程同步等自己排队的 coroutine」死锁。
+
+    超时行为可通过 SandboxApp 属性配置：
+    - ``_wrap_async_timeout``: float | None — 超时秒数，None 使用默认 120s
+    - ``_on_wrap_async_timeout``: Callable | None — 超时回调
+      签名: ``(fn_name: str, future: concurrent.futures.Future) -> Any``
+      返回值作为 wrapper 返回值。未设置时超时抛 TimeoutError。
     """
     def wrapper(**kwargs: Any) -> Any:
         loop = getattr(app, '_async_loop', None)
@@ -148,8 +154,19 @@ def _wrap_async(app: SandboxApp, coro_fn: Any) -> Any:
                 "the target event loop thread; use await or call from worker thread"
             )
 
+        timeout = getattr(app, '_wrap_async_timeout', None) or 120
+        on_timeout = getattr(app, '_on_wrap_async_timeout', None)
+
+        fn_name = getattr(coro_fn, '__name__', '?')
         future = asyncio.run_coroutine_threadsafe(coro_fn(**kwargs), loop)
-        return future.result(timeout=120)
+        try:
+            return future.result(timeout=timeout)
+        except TimeoutError:
+            if future.done():
+                return future.result()
+            if on_timeout is not None:
+                return on_timeout(fn_name, future)
+            raise
 
     # 暴露原 coroutine 函数：异步上下文（如 share.py 的 RPC handler）
     # 检测到该属性后可直接 await，跳过 sync wrapper 的 future 调度。
