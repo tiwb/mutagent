@@ -223,13 +223,13 @@ def _build_namespace_dict(self: SandboxApp) -> dict[str, Any]:
     # WARN-once 状态才能跨 cache lifetime 保留。。。但 cache 按代位
     # 重建的场景下，view 实例仍是 registry._views[name] 同一个，OK）
     if decl_namespaces:
-        # decl ns 不在 main registry，需合入临时视图
+        # decl 先注册 → 本地 NamespaceTools 优先于外部 peer
         temp_registry = NamespaceRegistry()
+        for ns in decl_namespaces.values():
+            temp_registry.add(ns)
         for providers in registry._namespaces.values():
             for p in providers:
                 temp_registry.add(p)
-        for ns in decl_namespaces.values():
-            temp_registry.add(ns)
         ns_dict = temp_registry.build_namespace_dict()
     else:
         # 没 decl namespace 时直接走主 registry，避免 temp view 覆盖主 view、

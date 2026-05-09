@@ -163,8 +163,16 @@ class MergedNamespaceView:
 
     @property
     def _description(self) -> str:
-        # 多 provider 视图本身不另起 description；render 层会单独列 providers 段
-        return self._providers[0]._description if self._providers else ""
+        # 取第一个有 active 函数的 provider 的描述；
+        # 全空壳时退化为 _providers[0]._description
+        if not self._providers:
+            return ""
+        resolved = self._resolved_functions()
+        active_ids = {id(rf.active) for rf in resolved.values()}
+        for p in self._providers:
+            if id(p) in active_ids:
+                return p._description
+        return self._providers[0]._description
 
     @property
     def description(self) -> str:
@@ -456,15 +464,20 @@ def _format_function_count(ns: "NamespaceLike") -> str:
 
 
 def _displayed_providers(ns: "NamespaceLike") -> list[Namespace]:
-    """返回「真正贡献函数」的 provider 列表（过滤 functions=0 的空壳）。
+    """返回真正贡献 active 函数的 provider 列表。
+
+    两个过滤条件：
+    1. ``_functions`` 非空（过滤空壳 tool ns）
+    2. 至少有一个 active（非 shadowed）函数（过滤全被覆盖的 provider）
 
     用于 multi-provider 渲染分支判定与归属编号；非 view 直接返回空。
-    rationale：`MergedNamespaceView._resolved_functions` 中 active/shadowed
-    必然各有 ≥1 函数，过滤空壳不会丢失任何已 resolve 的归属信息。
     """
     if not isinstance(ns, MergedNamespaceView):
         return []
-    return [p for p in ns.providers if p._functions]
+    resolved = ns._resolved_functions()
+    active_ids = {id(rf.active) for rf in resolved.values()}
+    return [p for p in ns.providers
+            if p._functions and id(p) in active_ids]
 
 
 def _render_registry(registry: "NamespaceRegistry") -> str:
