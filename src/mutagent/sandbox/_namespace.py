@@ -159,20 +159,43 @@ class MergedNamespaceView:
     def providers(self) -> list[Namespace]:
         return self._providers
 
+    # -- “选主”语义：displayed / primary（唯一权威）---------------------
+
+    @property
+    def displayed(self) -> list[Namespace]:
+        """参与渲染的 provider 列表：贡献了至少一个 active 函数的 provider。
+
+        两个过滤条件：
+        1. ``_functions`` 非空（过滤空壳 tool ns、连接前函数表空）
+        2. 至少有一个 active（非 shadowed）函数（过滤全被覆盖的 provider）
+
+        这是“权威 provider”的根本属性，primary / multi-provider 渲染都从这里派生。
+        """
+        if not self._providers:
+            return []
+        resolved = self._resolved_functions()
+        active_ids = {id(rf.active) for rf in resolved.values()}
+        return [p for p in self._providers
+                if p._functions and id(p) in active_ids]
+
+    @property
+    def primary(self) -> Namespace | None:
+        """合并视图的主 provider。``displayed[0]`` 的派生。
+
+        全空壳时退化为 ``_providers[0]``；无 provider 返回 None。
+        """
+        d = self.displayed
+        if d:
+            return d[0]
+        return self._providers[0] if self._providers else None
+
     # -- 兼容 Namespace 接口（供 help 渲染 / 同代码路径复用）-----------------
 
     @property
     def _description(self) -> str:
-        # 取第一个有 active 函数的 provider 的描述；
-        # 全空壳时退化为 _providers[0]._description
-        if not self._providers:
-            return ""
-        resolved = self._resolved_functions()
-        active_ids = {id(rf.active) for rf in resolved.values()}
-        for p in self._providers:
-            if id(p) in active_ids:
-                return p._description
-        return self._providers[0]._description
+        # 描述走 primary；全空壳 view 由 primary 退化为 _providers[0] 负责。
+        p = self.primary
+        return p._description if p is not None else ""
 
     @property
     def description(self) -> str:
@@ -317,6 +340,52 @@ class MergedNamespaceView:
 
 # 给 type hint / isinstance 用的统一类型别名
 NamespaceLike = "Namespace | MergedNamespaceView"
+
+
+# ---------------------------------------------------------------------------
+# 模块级 helper：view / Namespace 统一的“选主”访问入口
+# ---------------------------------------------------------------------------
+
+def primary_of(ns: "Namespace | MergedNamespaceView") -> "Namespace":
+    """统一访问主 provider — ``Namespace`` / ``MergedNamespaceView`` 通吃。
+
+    - ``Namespace``：返回自身
+    - ``MergedNamespaceView``：返回 ``view.primary``（无 displayed 时退化首个 provider）
+
+    用于消费者（help 渲染、share export、adapter 描述提取）避免到处写 ``isinstance``。
+    """
+    if isinstance(ns, MergedNamespaceView):
+        return ns.primary or ns._providers[0]
+    return ns
+
+
+def displayed_of(ns: "Namespace | MergedNamespaceView") -> list["Namespace"]:
+    """统一访问 displayed providers 列表。
+
+    单 ``Namespace`` 返回空列表（表示“单 provider 路径，无多 provider 渲染”）。
+    """
+    if isinstance(ns, MergedNamespaceView):
+        return ns.displayed
+    return []
+
+
+def flatten_view(view: MergedNamespaceView) -> Namespace:
+    """把 multi-provider view 拍平成对端可见的单 ``Namespace``。
+
+    - ``description`` / ``provider_kind`` 走 :func:`primary_of`
+    - ``functions`` / ``descriptions`` 走 view 合并后的 active 集
+      （与 exec_code 路径函数可见集完全一致）
+
+    拍平后的临时 ``Namespace`` **不挂** ``_connection`` / state：
+    对端拿到的是“快照”，不应感知本端的 MCP 连接细节。
+    """
+    p = primary_of(view)
+    flat = Namespace(view.name, description=p._description,
+                     provider_kind=p.provider_kind)
+    # view._functions / _descriptions 已是 active 视角的合并集
+    for fn_name, fn in view._functions.items():
+        flat.register(fn_name, fn, view._descriptions.get(fn_name, ""))
+    return flat
 
 
 class NamespaceRegistry:
@@ -464,20 +533,12 @@ def _format_function_count(ns: "NamespaceLike") -> str:
 
 
 def _displayed_providers(ns: "NamespaceLike") -> list[Namespace]:
-    """返回真正贡献 active 函数的 provider 列表。
+    """[Deprecated alias] 请改用 :func:`displayed_of`。
 
-    两个过滤条件：
-    1. ``_functions`` 非空（过滤空壳 tool ns）
-    2. 至少有一个 active（非 shadowed）函数（过滤全被覆盖的 provider）
-
-    用于 multi-provider 渲染分支判定与归属编号；非 view 直接返回空。
+    原算法已上提为 ``MergedNamespaceView.displayed`` property（带缓存），
+    本函数仅为保证外部 import 不断裂而保留。
     """
-    if not isinstance(ns, MergedNamespaceView):
-        return []
-    resolved = ns._resolved_functions()
-    active_ids = {id(rf.active) for rf in resolved.values()}
-    return [p for p in ns.providers
-            if p._functions and id(p) in active_ids]
+    return displayed_of(ns)
 
 
 def _render_registry(registry: "NamespaceRegistry") -> str:
@@ -499,7 +560,7 @@ def _render_registry(registry: "NamespaceRegistry") -> str:
         padded = f"{name:<{max_name}}"
         # multi-provider badge — 按 displayed（贡献函数的 provider）数算
         provider_badge = ""
-        displayed = _displayed_providers(ns)
+        displayed = displayed_of(ns)
         if len(displayed) > 1:
             provider_badge = f"[{len(displayed)} providers]"
         suffix_parts: list[str] = []
@@ -538,7 +599,7 @@ def _render_namespace(ns: "NamespaceLike") -> str:
         lines.append("")
 
     # 多 provider 时列出 providers + 状态（仅算 displayed = 贡献函数的 provider）
-    displayed = _displayed_providers(ns)
+    displayed = displayed_of(ns)
     is_multi = len(displayed) > 1
     if is_multi:
         lines.append(f"Providers ({len(displayed)}):")

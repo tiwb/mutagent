@@ -731,6 +731,18 @@ class MCPConnection:
             fn = _make_tool_func(self, tool_name, tool_desc, input_schema)
             ns.register(tool_name, fn, tool_desc)
 
+        # 函数表已变更，通知所属 view 失效缓存。
+        # MergedNamespaceView._resolved_cache_key = tuple(id(p) for p in providers)，
+        # 只在 providers 列表变化时失效；本函数直改 ns._functions（id 不变），
+        # 导致 view.displayed / primary / _description 拿到旧结果。
+        sandbox = getattr(self, "_sandbox", None)
+        if sandbox is not None:
+            registry = getattr(sandbox, "_registry", None)
+            if registry is not None:
+                view = registry._views.get(ns.name)
+                if view is not None:
+                    view.invalidate()
+
 
 # ---------------------------------------------------------------------------
 # tool wrapper

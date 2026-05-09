@@ -274,6 +274,7 @@ shadowed 列表：`(shadowed: #1, #3)`。
 - [x] `_adapter_mcp.py` — `_do_rebuild` 后段 peer 构建 + 冲突检测纳入统一 try（D11）；`_check_peer_name_conflicts` 重写为只检 peer 互撞；`close` 走 instance-级移除入口
 - [x] `_adapter_pysandbox.py` — peer namespace 标 `provider_kind="peer"`
 - [x] `share.py` — `_all_namespaces` 在 multi-provider registry 下选「active provider」作单代表 export
+      > **2026-05-09 补正**（`refactor-namespace-provider-selection.md`）：改为走 `flatten_view`，同名多 provider 拍平为单 Namespace，描述走 `primary_of(view)` (= displayed[0])，函数集 = view 合并后的 active 集。修复原“decl 整个覆盖 external”丢函数的 bug。
 - [x] `mutbot/src/mutbot/web/server.py` — 去掉本地 namespace-级冲突检测；conn.namespace 标 `provider_kind="tool"`，peer 接入路径走新 API
 - [x] **BUGFIX**：`_adapter_mcp.py` — `MCPConnection._sandbox` 回引；`_do_rebuild` 事务式同步 peer providers 到 sandbox registry（`_sync_peer_providers`）；D11 异常路径中摘除残留 peers；`close` 同步清理；`builtins/main_impl.py` + `cli/pysandbox.py` + `mutbot/web/server.py` 设置 `conn._sandbox`
 - [x] **R1+R2+R3 渲染改进**：`_namespace.py` `_render_registry` / `_render_namespace` 按 `displayed = [p for p in providers if p._functions]` 过滤；徽标 / 分支判定 / 函数归属编号统一以 displayed 为基准；归属标签改为 `[from #N]` / `(shadowed: #i, #j)`

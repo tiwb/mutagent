@@ -44,36 +44,48 @@ PYSANDBOX_CAPABILITY: dict[str, Any] = {"pysandbox": {"version": "1"}}
 # ---------------------------------------------------------------------------
 
 def _all_namespaces(sandbox: "SandboxApp") -> dict[str, "Namespace"]:
-    """收集 sandbox 当前可见的全部 namespace。
+    """收集 sandbox 当前可见的全部 namespace（拍平成单 provider）。
 
     包含两类来源：
     1. 外部注入（``add_namespace``）—— 走 ``_registry._namespaces``
-       （multi-provider：同名下多个 provider 只选代表者 export，优先 active，
-       其次首个）
     2. NamespaceTools Declaration 子类自动发现 —— 走 ``_build_declaration_namespaces``
 
-    同名冲突策略：decl 覆盖外部（与 ``exec_code`` 构建 globals 同表）。
+    合并策略与 ``_build_namespace_dict``（exec_code 路径）严格一致：
+    用同一个 temp_registry 按 decl 先 + external 后的顺序装入，
+    同名多 provider 时拍平成单 :class:`Namespace`：
+
+    - ``description`` / ``provider_kind`` 取 :func:`primary_of`
+    - ``functions`` 集 = view 合并后的 active 集，不丢 external 的非冲突函数
+
+    这保证 export 函数集与本地 ``exec_code`` 可见函数集严格一致。
     """
     # 复用 _app_impl 的 declaration 发现逻辑，避免重复实现
     from mutagent.sandbox._app_impl import _build_declaration_namespaces
-
-    result: dict[str, "Namespace"] = {}
-
-    registry = getattr(sandbox, "_registry", None)
-    if registry is not None:
-        for name, providers in registry._namespaces.items():
-            if not providers:
-                continue
-            # 选代表者：优先 active provider；其次首个
-            chosen = providers[0]
-            for p in providers:
-                if p.connection_state == "connected":
-                    chosen = p
-                    break
-            result[name] = chosen
+    from mutagent.sandbox._namespace import (
+        MergedNamespaceView,
+        NamespaceRegistry,
+        flatten_view,
+    )
 
     decl_namespaces = _build_declaration_namespaces(sandbox)
-    result.update(decl_namespaces)
+    registry = getattr(sandbox, "_registry", None)
+
+    temp_registry = NamespaceRegistry()
+    # decl 先注册 → 本地 NamespaceTools 优先于外部 peer（与 exec_code 同序）
+    for ns in decl_namespaces.values():
+        temp_registry.add(ns)
+    if registry is not None:
+        for providers in registry._namespaces.values():
+            for p in providers:
+                temp_registry.add(p)
+
+    result: dict[str, "Namespace"] = {}
+    for name in temp_registry._namespaces:
+        ns = temp_registry.get(name)
+        if isinstance(ns, MergedNamespaceView):
+            result[name] = flatten_view(ns)
+        elif ns is not None:
+            result[name] = ns
     return result
 
 
