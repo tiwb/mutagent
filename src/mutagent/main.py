@@ -110,7 +110,9 @@ def main() -> None:
     """
     import argparse
     from mutagent.webui.cli import add_webui_subcommand, dispatch_webui
-    from mutagent.cli.pysandbox import add_pysandbox_subcommand, dispatch_pysandbox
+    from mutagent.cli.pysandbox import (
+        add_pysandbox_subcommand, dispatch_pysandbox, validate_args as _validate_pysandbox,
+    )
 
     parser = argparse.ArgumentParser(description="mutagent — AI Agent Framework")
     parser.add_argument("-V", "--version", action="version", version=f"mutagent {mutagent.__version__}")
@@ -120,14 +122,20 @@ def main() -> None:
                         help="Explicitly use the default terminal UI")
     subparsers = parser.add_subparsers(dest="command")
     add_webui_subcommand(subparsers)
-    add_pysandbox_subcommand(subparsers)
+    pysandbox_parser = add_pysandbox_subcommand(subparsers)
     args = parser.parse_args()
 
     if args.command == "webui" and args.headless:
         parser.error("--headless cannot be used together with the webui subcommand")
 
+    if args.command == "pysandbox":
+        _validate_pysandbox(pysandbox_parser, args)
+
     app = App()
-    app.load_config(args.config)
+    # Client 模式不需要本地 config（纯RPC）——跳过加载避免不必要的 IO / 错误
+    skip_config = (args.command == "pysandbox" and not args.serve)
+    if not skip_config:
+        app.load_config(args.config)
     if args.command == "webui":
         dispatch_webui(app, args)
         return

@@ -7,9 +7,11 @@ import json
 from typing import Any
 
 import mutagent
+from mutagent.sandbox.tools import PySandboxTools
 from mutagent.webui.conversation import Conversation
 from mutagent.webui.server import WebUIServer
 from mutgui import Channel, ModuleRegistry, ViewPort
+from mutio.mcp.view import MCPView
 from mutio.net.server import HTMLResponse, StaticView, WebSocketConnection, WebSocketDisconnect
 
 logger = logging.getLogger(__name__)
@@ -156,4 +158,13 @@ def __init__(
             {"path": path, "directory": str(directory)},
         ))
 
-    self.views = (_HTTPRoot, _WSView, *static_views)
+    # PySandbox MCP endpoint —— 注入 sandbox 后注册 MCPView，
+    # PySandboxTools.path == "/mcp" 会自动挂接到该 view。
+    PySandboxTools._app = self.app.sandbox
+
+    class _MCPView(MCPView):
+        path = "/mcp"
+        name = "mutagent-webui"
+        version = mutagent.__version__
+
+    self.views = (_HTTPRoot, _WSView, _MCPView, *static_views)
