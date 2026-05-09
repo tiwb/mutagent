@@ -788,6 +788,12 @@ def _make_tool_func(conn: MCPConnection, tool_name: str,
             assert conn.client is not None
             return await conn.client.call_tool(tool_name, kwargs)
 
+    # _async_original: 供 share.py:_handle_call 等在事件循环线程上的
+    # 调用方直接 await，避免 sync wrapper 的 run_coroutine_threadsafe
+    # + future.result() 同线程死锁（与 _wrap_async 的 _async_original 模式一致）。
+    async def _tool_async(**kwargs: Any) -> Any:
+        return await call_with_retry(kwargs)
+
     def tool_func(**kwargs: Any) -> Any:
         future = asyncio.run_coroutine_threadsafe(
             call_with_retry(kwargs), conn.main_loop)
@@ -795,6 +801,7 @@ def _make_tool_func(conn: MCPConnection, tool_name: str,
 
     tool_func.__name__ = tool_name
     tool_func.__doc__ = doc
+    tool_func._async_original = _tool_async  # type: ignore[attr-defined]
     return tool_func
 
 

@@ -102,12 +102,18 @@ def _make_namespace_func(
             peer = PysandboxPeerClient(client)
             return await peer.call_namespace(ns_name, fn_name, kwargs)
 
+    # _async_original: 供 share.py:_handle_call 直接 await，避免
+    # sync wrapper 的同线程死锁（与 _wrap_async 模式一致）。
+    async def _ns_async(**kwargs: Any) -> Any:
+        return await call_with_retry(kwargs)
+
     def ns_func(**kwargs: Any) -> Any:
         future = asyncio.run_coroutine_threadsafe(
             call_with_retry(kwargs), conn.main_loop)
         return future.result(timeout=120)
 
     ns_func.__name__ = fn_name
+    ns_func._async_original = _ns_async  # type: ignore[attr-defined]
     # signature_str 已经是 ``(arg1, *, kwarg=...)`` 风格的字符串，直接拼到 doc
     # 顶部，help() 渲染时 inspect.signature 取本地空 wrapper 的 sig，但用户能
     # 在 doc 顶看到远端真实签名。
