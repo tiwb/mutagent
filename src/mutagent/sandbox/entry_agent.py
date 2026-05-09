@@ -35,6 +35,8 @@ class SandboxToolkit(Toolkit):
 
     async def pysandbox(self, code: str) -> str:
         loop = asyncio.get_running_loop()
+        # 注入主 loop 供 _wrap_async 投递 async NamespaceTools 方法
+        self._app.bind_main_loop()
         result = await loop.run_in_executor(
             None, self._app.exec_code, code, self._state)
         text, _is_error = self._app.format_result(result)

@@ -11,6 +11,7 @@
 import asyncio
 import inspect
 import logging
+import threading
 import time
 from typing import Any, Callable
 
@@ -99,9 +100,9 @@ def _build_declaration_namespaces(self: SandboxApp) -> dict[str, Namespace]:
             bound = getattr(instance, method_name)
             desc = (bound.__doc__ or '').strip().split('\n')[0]
 
-            # async 方法包装为 sync（sandbox 在工作线程中同步执行）
+            # async 方法包装为 sync：投递到 app 捕获的主 loop 执行
             if inspect.iscoroutinefunction(bound):
-                fn = _wrap_async(bound)
+                fn = _wrap_async(self, bound)
                 fn.__name__ = method_name
                 fn.__doc__ = bound.__doc__
             else:
@@ -117,16 +118,53 @@ def _build_declaration_namespaces(self: SandboxApp) -> dict[str, Namespace]:
     return result
 
 
-def _wrap_async(coro_fn: Any) -> Any:
-    """将 async 函数包装为 sync，在工作线程中安全调用 event loop。"""
+def _wrap_async(app: SandboxApp, coro_fn: Any) -> Any:
+    """将 async NamespaceTools 方法包装为 sync。
+
+    把 coroutine 投递到 SandboxApp 上捕获的主 event loop 执行，
+    不创建临时 event loop，避免 async tool 在错误线程/loop 执行。
+
+    主 loop 由调用方（PySandboxTools / SandboxToolkit / 其他 entry）在
+    ``run_in_executor`` 前通过 ``app.bind_main_loop()`` 注入。
+    """
     def wrapper(**kwargs: Any) -> Any:
-        try:
-            loop = asyncio.get_running_loop()
-            future = asyncio.run_coroutine_threadsafe(coro_fn(**kwargs), loop)
-            return future.result(timeout=120)
-        except RuntimeError:
-            return asyncio.run(coro_fn(**kwargs))
+        loop = getattr(app, '_async_loop', None)
+        if loop is None:
+            raise RuntimeError(
+                "SandboxApp._async_loop not set; "
+                "caller must call app.bind_main_loop() before exec_code"
+            )
+
+        # 同线程死锁保护
+        loop_thread_id = getattr(app, '_async_loop_thread_id', None)
+        if loop_thread_id is not None and threading.get_ident() == loop_thread_id:
+            raise RuntimeError(
+                "Cannot synchronously call async NamespaceTools from "
+                "the target event loop thread; use await or call from worker thread"
+            )
+
+        future = asyncio.run_coroutine_threadsafe(coro_fn(**kwargs), loop)
+        return future.result(timeout=120)
+
     return wrapper
+
+
+def _bind_main_loop(self: SandboxApp) -> None:
+    """把当前 event loop 注入 SandboxApp，作为 async NamespaceTools 的目标 loop。
+
+    必须在主 loop 线程里调用（典型场景：每个 pysandbox entry 在
+    ``run_in_executor`` 之前一次）。重复调用幂等。
+
+    这是「3 处 entry 都要写的注入代码」的统一入口。新增 entry
+    时只需 ``self._app.bind_main_loop()`` 一行，避免遗漏。
+    """
+    loop = asyncio.get_running_loop()
+    object.__setattr__(self, '_async_loop', loop)
+    object.__setattr__(self, '_async_loop_thread_id', threading.get_ident())
+
+
+# 辅助方法挂到 SandboxApp 上，供所有 pysandbox entry 复用
+SandboxApp.bind_main_loop = _bind_main_loop  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
