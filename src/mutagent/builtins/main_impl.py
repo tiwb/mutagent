@@ -321,6 +321,9 @@ async def connect_sources(self) -> None:
         # namespace 全程注册，cleanup 绑 connection.close（而非单个 client，
         # 避免重连后 cleanup 调到旧 client）
         sandbox.add_namespace(conn.namespace, on_remove=conn.close)
+        # 回引 sandbox，供 _do_rebuild 同步注册 peer namespaces。
+        # 详见 feature-namespace-multi-provider.md。
+        conn._sandbox = sandbox
 
         if autostart:
             # 后台连，不阻塞 setup；失败只 log，不影响其他 namespace

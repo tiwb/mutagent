@@ -440,7 +440,9 @@ class MCPConnection:
         # 始终存在的 namespace；失败 / 未连状态下函数表为空
         # namespace 名用 sanitized 版本，确保可作为 Python 标识符访问
         safe_name = _sanitize_ns_name(ns_name)
-        self.namespace = Namespace(safe_name, description="")
+        # provider_kind="tool"：本 conn 主 namespace 由 MCP tools 列表驱动
+        self.namespace = Namespace(safe_name, description="",
+                                   provider_kind="tool")
         self.namespace._connection = self  # type: ignore[attr-defined]
         self.namespace.connection_state = self.state  # type: ignore[attr-defined]
         self.namespace.connection_error = None  # type: ignore[attr-defined]
@@ -450,6 +452,14 @@ class MCPConnection:
         # 共享本 conn 的连接状态。详见
         # ``mutagent/docs/specifications/feature-pysandbox-namespace-sharing.md``。
         self.peer_namespaces: list[Namespace] = []
+
+        # SandboxApp 回引：由调用方（connect_sources / pysandbox._build_sandbox）
+        # 在 ``sandbox.add_namespace(conn.namespace)`` 之后立即赋值。
+        # 用于 _do_rebuild 中把 peer namespaces 同步注册到 sandbox registry，
+        # 以及 close 时摘除。允许为 None：单元测试或裸 conn 自测场景下
+        # 不挂 sandbox，peer 同步逻辑自动 no-op。详见
+        # ``mutagent/docs/specifications/feature-namespace-multi-provider.md``。
+        self._sandbox: Any | None = None
 
     # -- 状态变更 helper（保证 namespace 状态字段同步）-------------------
 
@@ -509,7 +519,12 @@ class MCPConnection:
             await self._do_rebuild()
 
     async def _do_rebuild(self) -> None:
-        """实际重建逻辑 — 调用者需持有 self._lock。"""
+        """实际重建逻辑 — 调用者需持有 self._lock。
+
+        D11：入口设 connecting 后，**所有出口要么 connected 要么 failed**。
+        peer 构建 / 冲突检测等任何后置逻辑都必须在统一 try 范围内，
+        否则 state 卡 connecting + cooldown 失效，autostart 会静默吞错。
+        """
         self._set_state("connecting", None)
         self.last_attempt_at = time.time()
 
@@ -531,65 +546,95 @@ class MCPConnection:
             self._set_state("failed", str(exc))
             self.last_attempt_at = time.time()
             raise
+
+        # ------------------------------------------------------------
+        # 主重建段：connect / list_tools / refresh_namespace /
+        # build_peer_namespaces / _check_peer_name_conflicts / set connected
+        # 任意一步异常 → failed（D11）
+        # ------------------------------------------------------------
         try:
             init_result = await new_client.connect()
             tools = await new_client.list_tools()
-        except Exception as exc:
+
+            # 检测 pysandbox capability（D3）— 决定是否过滤对端 pysandbox tool
+            # 自身（D2）以及是否融合 peer namespaces（D4 Eager 拉取）
+            from mutagent.sandbox._adapter_pysandbox import (
+                build_peer_namespaces,
+                has_pysandbox_capability,
+            )
+            is_peer = (
+                isinstance(new_client, HTTPMCPClient)
+                and has_pysandbox_capability(init_result)
+            )
+            if is_peer:
+                # D2: 隐藏对端 pysandbox tool 自身，避免递归调用语义混乱
+                tools = [t for t in tools if t.get("name") != "pysandbox"]
+
+            self.client = new_client
+            self._refresh_namespace(init_result, tools)
+
+            # 融合 peer namespaces（multi-provider 模型下不再做 namespace-级
+            # 全局冲突检测；只查同 conn 内 peer 互撞 — 见 _check_peer_name_conflicts）
+            new_peer_namespaces: list[Namespace] = []
+            if is_peer:
+                assert isinstance(new_client, HTTPMCPClient)
+                new_peer_namespaces = await build_peer_namespaces(
+                    self, init_result, new_client)
+                self._check_peer_name_conflicts(new_peer_namespaces)
+            # multi-provider 同步：把 new 注册到 sandbox，把 old 中不在 new
+            # 的从 sandbox registry 摘掉。事务式更新，按实例 id 区分。
+            self._sync_peer_providers(self.peer_namespaces,
+                                      new_peer_namespaces)
+            self.peer_namespaces = new_peer_namespaces
+
+            self._set_state("connected", None)
+            if new_peer_namespaces:
+                logger.info(
+                    "MCP '%s' connected (%d functions, merged %d namespaces from %s)",
+                    self.ns_name, len(self.namespace._functions),
+                    len(new_peer_namespaces), self.ns_name)
+            else:
+                logger.info("MCP '%s' connected (%d functions)",
+                            self.ns_name, len(self.namespace._functions))
+        except MCPTransportError as exc:
             reason = str(exc) or exc.__class__.__name__
             self._set_state("failed", reason)
             self.last_attempt_at = time.time()
-            logger.warning("MCP '%s' reconnect failed: %s",
+            logger.warning("MCP '%s' rebuild failed (transport): %s",
                            self.ns_name, reason)
-            if isinstance(exc, MCPTransportError):
-                raise
+            # 清空 client，避免 failed 状态下还残留旧引用
+            self.client = None
+            raise
+        except Exception as exc:
+            # D11 兜底：peer 构建 / 冲突检测 / 任何编程错都进 failed，
+            # 不允许 state 留在 connecting
+            reason = str(exc) or exc.__class__.__name__
+            self._set_state("failed", reason)
+            self.last_attempt_at = time.time()
+            logger.warning("MCP '%s' rebuild failed: %s",
+                           self.ns_name, reason)
+            # 清空 client / peer 列表，避免 failed 状态残留。
+            # 把已注册到 sandbox 的旧 peer providers 全部摘掉，与 D11
+            # 「出口要么 connected 要么 failed，状态绝对一致」对齐。
+            self.client = None
+            self._sync_peer_providers(self.peer_namespaces, [])
+            self.peer_namespaces = []
+            # 包成 MCPTransportError 让上层 cooldown 生效
             raise MCPTransportError(
-                f"MCP '{self.ns_name}' reconnect failed: {reason}"
+                f"MCP '{self.ns_name}' rebuild failed: {reason}"
             ) from exc
-
-        # 检测 pysandbox capability（D3）— 决定是否过滤对端 pysandbox tool
-        # 自身（D2）以及是否融合 peer namespaces（D4 Eager 拉取）
-        from mutagent.sandbox._adapter_pysandbox import (
-            build_peer_namespaces,
-            has_pysandbox_capability,
-        )
-        is_peer = (
-            isinstance(new_client, HTTPMCPClient)
-            and has_pysandbox_capability(init_result)
-        )
-        if is_peer:
-            # D2: 隐藏对端 pysandbox tool 自身，避免递归调用语义混乱
-            tools = [t for t in tools if t.get("name") != "pysandbox"]
-
-        self.client = new_client
-        self._refresh_namespace(init_result, tools)
-
-        # 融合 peer namespaces（D1 重名冲突在 conn 内自检；与外部 registry
-        # 的冲突由调用方挂入时再判一次）
-        new_peer_namespaces: list[Namespace] = []
-        if is_peer:
-            assert isinstance(new_client, HTTPMCPClient)
-            new_peer_namespaces = await build_peer_namespaces(
-                self, init_result, new_client)
-            self._check_peer_name_conflicts(new_peer_namespaces)
-        self.peer_namespaces = new_peer_namespaces
-
-        self._set_state("connected", None)
-        if new_peer_namespaces:
-            logger.info(
-                "MCP '%s' connected (%d functions, merged %d namespaces from %s)",
-                self.ns_name, len(self.namespace._functions),
-                len(new_peer_namespaces), self.ns_name)
-        else:
-            logger.info("MCP '%s' connected (%d functions)",
-                        self.ns_name, len(self.namespace._functions))
 
     async def close(self) -> None:
         """彻底关闭 — sandbox cleanup 入口。多次调用幂等。"""
         async with self._lock:
+            # 摘掉本 conn 注册到 sandbox 的全部 peer providers。
+            # conn.namespace 自己由 SandboxApp 用 on_remove → conn.close
+            # 持有，不在这里清（会循环）。
+            self._sync_peer_providers(self.peer_namespaces, [])
+            self.peer_namespaces = []
+
             client = self.client
             self.client = None
-            # peer namespaces 不再可用，但保留对象（其状态已被 _set_state
-            # 同步为 disconnected），调用方在自身 registry 中按需移除
             self._set_state("disconnected", None)
             if client is not None:
                 try:
@@ -600,21 +645,53 @@ class MCPConnection:
 
     # -- 内部 helper -----------------------------------------------------
 
+    def _sync_peer_providers(
+        self,
+        old_peers: list[Namespace],
+        new_peers: list[Namespace],
+    ) -> None:
+        """把 peer namespaces 的注册状态同步到 SandboxApp registry。
+
+        按实例 id 做 diff：
+
+        - 在 ``old_peers`` 但不在 ``new_peers`` 的 → 从 sandbox 摘除
+        - 在 ``new_peers`` 但不在 ``old_peers`` 的 → 注册到 sandbox
+
+        ``self._sandbox`` 为 None（未挂 sandbox 的纯 conn / 单元测试）时
+        no-op。peer 注册时不传 ``on_remove``——peer 是 conn 的从属，移除
+        时只需从 registry 摘掉，不应反向触发 ``conn.close``（会循环）。
+        """
+        sandbox = self._sandbox
+        if sandbox is None:
+            return
+        new_ids = {id(p) for p in new_peers}
+        old_ids = {id(p) for p in old_peers}
+        for old in old_peers:
+            if id(old) not in new_ids:
+                sandbox.remove_provider(old)
+        for new in new_peers:
+            if id(new) not in old_ids:
+                sandbox.add_namespace(new)
+
     def _check_peer_name_conflicts(
         self, peer_namespaces: list[Namespace]) -> None:
-        """D1: 启动期重名冲突检测 — 直接抛 RuntimeError。
+        """D1 (multi-provider 重写)：只检查 peer 之间是否重名。
 
-        本方法只检查 conn 自身范围内的冲突（peer 互相之间 + 与 tool ns）。
-        与外部 registry / 其他 source 的冲突由 ``SandboxApp`` 注册时检查。
+        旧逻辑还检查 peer vs 本 conn 的 tool ns 同名 → 阻塞注册。
+        新模型下「source 名 = peer ns 名」是常态，撞名由 SandboxApp 走
+        :class:`MergedNamespaceView` 在调用/help 级处理，启动期不阻塞。
+
+        但同一 server 自我 export 两个同名 peer namespace 必然是 server bug，
+        仍然抛 RuntimeError。
         """
-        seen: dict[str, str] = {self.namespace.name: f"tools of '{self.ns_name}'"}
+        seen: set[str] = set()
         for peer in peer_namespaces:
             if peer.name in seen:
                 raise RuntimeError(
-                    f"Pysandbox namespace conflict on source '{self.ns_name}': "
-                    f"peer namespace '{peer.name}' clashes with {seen[peer.name]}"
+                    f"Pysandbox peer-namespace duplicate on source '{self.ns_name}': "
+                    f"server exported namespace '{peer.name}' more than once"
                 )
-            seen[peer.name] = f"peer namespace from '{self.ns_name}'"
+            seen.add(peer.name)
 
     def _in_cooldown(self) -> bool:
         if self.retry_cooldown <= 0:

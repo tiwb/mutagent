@@ -356,13 +356,15 @@ class TestMCPConnectionPeerIntegration:
             loop.run_until_complete(conn.close())
             loop.close()
 
-    def test_d1_peer_name_conflict_raises(
+    def test_d1_peer_name_conflict_no_longer_raises(
             self, monkeypatch: pytest.MonkeyPatch):
-        """D1: peer namespace 与 conn 自身的 tool namespace 撞名应直接 RuntimeError。"""
+        """D1 (multi-provider 重写)：peer namespace 与本 conn 的 tool ns 同名
+        不再阻塞。两者作为同名 namespace 的不同 provider 并存，
+        冲突在调用/help 级走 :class:`MergedNamespaceView` 处理。详
+        ``mutagent/docs/specifications/feature-namespace-multi-provider.md``。
+        """
         from mutagent.sandbox import _adapter_mcp
 
-        # 让 sandbox 上 share 一个名为 "mutbot_remote" 的 namespace —— 与 conn 自己
-        # 的 ns_name 撞
         sandbox = _FakeSandbox()
         clash_ns = Namespace("mutbot_remote", description="clash")
         clash_ns.register("noop", lambda: None, "")
@@ -383,8 +385,48 @@ class TestMCPConnectionPeerIntegration:
         try:
             conn = _adapter_mcp.MCPConnection(
                 "mutbot_remote", {"url": "http://x"}, loop)
-            with pytest.raises(RuntimeError, match="namespace conflict"):
+            # 不再抛错：conn 成功 connected，peer 列表含同名 ns
+            loop.run_until_complete(conn.reconnect())
+            assert conn.state == "connected"
+            peer_names = [p.name for p in conn.peer_namespaces]
+            assert "mutbot_remote" in peer_names
+        finally:
+            loop.run_until_complete(conn.close())
+            loop.close()
+
+    def test_d1_peer_self_duplicate_still_raises(
+            self, monkeypatch: pytest.MonkeyPatch):
+        """D1：同一 server 自我 export 两个同名 peer namespace 仍是 server bug，
+        仍然报错。"""
+        from mutagent.sandbox import _adapter_mcp, _adapter_pysandbox
+
+        async def fake_build(conn, init_result, client):
+            # 模拟 server 返回两个同名 peer ns
+            return [Namespace("dup"), Namespace("dup")]
+
+        sandbox = _FakeSandbox()
+        dispatch = _make_server_dispatch(sandbox)
+        fake_client = _FakeHTTPClientForConn(
+            dispatch, PYSANDBOX_CAPABILITY, [])
+
+        monkeypatch.setattr(
+            _adapter_mcp, "make_client", lambda *a, **kw: fake_client)
+        monkeypatch.setattr(
+            _adapter_mcp, "HTTPMCPClient", _FakeHTTPClientForConn)
+        monkeypatch.setattr(_adapter_pysandbox, "HTTPMCPClient",
+                            _FakeHTTPClientForConn, raising=False)
+        monkeypatch.setattr(_adapter_pysandbox, "build_peer_namespaces",
+                            fake_build)
+
+        loop = asyncio.new_event_loop()
+        try:
+            conn = _adapter_mcp.MCPConnection(
+                "buggy_server", {"url": "http://x"}, loop)
+            with pytest.raises(_adapter_mcp.MCPTransportError,
+                               match="peer-namespace duplicate"):
                 loop.run_until_complete(conn.reconnect())
+            # D11：异常后 state 必须是 failed，不能卡 connecting
+            assert conn.state == "failed"
         finally:
             loop.run_until_complete(conn.close())
             loop.close()

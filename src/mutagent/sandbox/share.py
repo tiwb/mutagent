@@ -48,10 +48,11 @@ def _all_namespaces(sandbox: "SandboxApp") -> dict[str, "Namespace"]:
 
     包含两类来源：
     1. 外部注入（``add_namespace``）—— 走 ``_registry._namespaces``
+       （multi-provider：同名下多个 provider 只选代表者 export，优先 active，
+       其次首个）
     2. NamespaceTools Declaration 子类自动发现 —— 走 ``_build_declaration_namespaces``
 
-    与 sandbox 在 ``exec_code`` 时构建 globals 的合并规则保持一致：
-    后者覆盖前者（若同名）。
+    同名冲突策略：decl 覆盖外部（与 ``exec_code`` 构建 globals 同表）。
     """
     # 复用 _app_impl 的 declaration 发现逻辑，避免重复实现
     from mutagent.sandbox._app_impl import _build_declaration_namespaces
@@ -60,7 +61,16 @@ def _all_namespaces(sandbox: "SandboxApp") -> dict[str, "Namespace"]:
 
     registry = getattr(sandbox, "_registry", None)
     if registry is not None:
-        result.update(registry._namespaces)
+        for name, providers in registry._namespaces.items():
+            if not providers:
+                continue
+            # 选代表者：优先 active provider；其次首个
+            chosen = providers[0]
+            for p in providers:
+                if p.connection_state == "connected":
+                    chosen = p
+                    break
+            result[name] = chosen
 
     decl_namespaces = _build_declaration_namespaces(sandbox)
     result.update(decl_namespaces)

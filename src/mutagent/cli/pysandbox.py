@@ -125,6 +125,9 @@ def _build_sandbox(config: Any) -> Any:
             logger.warning("MCP source '%s' init failed: %s", ns_name, e)
             continue
         sandbox.add_namespace(conn.namespace, on_remove=conn.close)
+        # 回引 sandbox，供 _do_rebuild 同步注册 peer namespaces。
+        # 详见 feature-namespace-multi-provider.md。
+        conn._sandbox = sandbox
         if autostart:
             async def _bg(c: MCPConnection = conn, n: str = ns_name) -> None:
                 try:

@@ -35,8 +35,13 @@ def _get_registry(self: SandboxApp) -> NamespaceRegistry:
     return registry
 
 
-def _get_cleanups(self: SandboxApp) -> dict[str, CleanupCallback]:
-    """ns_name -> on_remove 回调。"""
+def _get_cleanups(self: SandboxApp) -> dict[int, tuple[Namespace, CleanupCallback]]:
+    """id(ns) -> (ns, on_remove)。
+
+    multi-provider 下同名 ns 有多个实例，按名存会互盖。
+    改为按实例 id 存，remove 时才能唯一定位。
+    为了能从 name 反查 cleanup，同时保存 ns 引用。
+    """
     cleanups = getattr(self, '_cleanups', None)
     if cleanups is None:
         cleanups = {}
@@ -134,6 +139,9 @@ def _build_namespace_dict(self: SandboxApp) -> dict[str, Any]:
     缓存失效条件：
     - mutobj 类注册表 generation 变化（NamespaceTools 新增/变更）
     - 显式调用 add_namespace / remove_namespace（自动 invalidate）
+
+    multi-provider：同名 2+ providers 走 ``MergedNamespaceView``；
+    单 provider 名仍返回 Namespace 实例。详 ``_namespace.NamespaceRegistry``。
     """
     cached = getattr(self, '_cached_ns', None)
     cached_gen = getattr(self, '_cached_gen', -1)
@@ -144,24 +152,26 @@ def _build_namespace_dict(self: SandboxApp) -> dict[str, Any]:
 
     registry = _get_registry(self)
 
-    # 从数据源完整重建
-    ns_dict: dict[str, Any] = {}
-
-    # 1. 外部注入的命名空间（MCP / CLI / 业务）
-    for name, ns in registry._namespaces.items():
-        ns_dict[name] = ns
-
-    # 2. NamespaceTools（Declaration 自动发现）
+    # NamespaceTools（Declaration 自动发现）— 按名合入 temp registry
     decl_namespaces = _build_declaration_namespaces(self)
-    ns_dict.update(decl_namespaces)
 
-    # 3. help 函数
-    all_namespaces = dict(registry._namespaces)
-    all_namespaces.update(decl_namespaces)
-    temp_registry = NamespaceRegistry()
-    for ns in all_namespaces.values():
-        temp_registry.add(ns)
-    ns_dict['help'] = temp_registry._make_help()
+    # 构合完整 view：外部注入的全部 providers + decl namespaces
+    # 直接复用主 registry 的 provider list（view 实例也复用，
+    # WARN-once 状态才能跨 cache lifetime 保留。。。但 cache 按代位
+    # 重建的场景下，view 实例仍是 registry._views[name] 同一个，OK）
+    if decl_namespaces:
+        # decl ns 不在 main registry，需合入临时视图
+        temp_registry = NamespaceRegistry()
+        for providers in registry._namespaces.values():
+            for p in providers:
+                temp_registry.add(p)
+        for ns in decl_namespaces.values():
+            temp_registry.add(ns)
+        ns_dict = temp_registry.build_namespace_dict()
+    else:
+        # 没 decl namespace 时直接走主 registry，避免 temp view 覆盖主 view、
+        # 导致 WARN-once 跨 cache 周期重复触发
+        ns_dict = registry.build_namespace_dict()
 
     # 缓存
     object.__setattr__(self, '_cached_ns', ns_dict)
@@ -212,36 +222,74 @@ def _add_namespace(
     ns: Namespace,
     on_remove: CleanupCallback | None = None,
 ) -> None:
+    """注入 namespace（multi-provider）。
+
+    同名 ns 不再互相覆盖：作为同名 namespace 的另一个 provider 并存，
+    调用时走 :class:`MergedNamespaceView` 按「先注册先赢」解析。
+    """
     _get_start_time(self)
     registry = _get_registry(self)
     cleanups = _get_cleanups(self)
 
-    # 同名替换：先调旧的 cleanup，再覆盖
-    if ns.name in cleanups:
-        old_cb = cleanups.pop(ns.name)
-        _schedule_cleanup_sync(ns.name, old_cb)
-
     registry.add(ns)
     if on_remove is not None:
-        cleanups[ns.name] = on_remove
+        cleanups[id(ns)] = (ns, on_remove)
 
     _invalidate_cache(self)
-    logger.debug("Namespace '%s' added (on_remove=%s)",
-                 ns.name, on_remove is not None)
+    logger.debug("Namespace '%s' added (kind=%s, on_remove=%s)",
+                 ns.name, ns.provider_kind, on_remove is not None)
 
 
 @mutagent.impl(SandboxApp.remove_namespace)
 def _remove_namespace(self: SandboxApp, name: str) -> None:
+    """按 name 移除该名下的**全部** providers（向后兼容接口）。
+
+    同时调度所有被移除 provider 的 cleanup。
+    按实例级别移除请用 :func:`_remove_namespace_provider`。
+    """
     registry = _get_registry(self)
     cleanups = _get_cleanups(self)
 
+    providers = list(registry._namespaces.get(name, ()))
     registry.remove(name)
-    cb = cleanups.pop(name, None)
-    if cb is not None:
-        _schedule_cleanup_sync(name, cb)
+    # 收 cleanup
+    for p in providers:
+        entry = cleanups.pop(id(p), None)
+        if entry is not None:
+            _, cb = entry
+            _schedule_cleanup_sync(name, cb)
 
     _invalidate_cache(self)
-    logger.debug("Namespace '%s' removed", name)
+    logger.debug("Namespace '%s' removed (%d providers)", name, len(providers))
+
+
+def _remove_namespace_provider(self: SandboxApp, ns: Namespace) -> bool:
+    """按实例移除一个 provider。
+
+    不是 Declaration 接口 —— 作为 SandboxApp 上的辅助函数暴露（
+    调用者可走 ``sandbox_app.remove_provider(ns)``）。详
+    feature-namespace-multi-provider。
+    """
+    registry = _get_registry(self)
+    cleanups = _get_cleanups(self)
+
+    removed = registry.remove_provider(ns)
+    if not removed:
+        return False
+
+    entry = cleanups.pop(id(ns), None)
+    if entry is not None:
+        _, cb = entry
+        _schedule_cleanup_sync(ns.name, cb)
+
+    _invalidate_cache(self)
+    logger.debug("Namespace provider '%s' (%s) removed",
+                 ns.name, ns.provider_kind)
+    return True
+
+
+# 辅助方法挂到 SandboxApp 上，方便外部调用 sandbox_app.remove_provider(ns)
+SandboxApp.remove_provider = _remove_namespace_provider  # type: ignore[attr-defined]
 
 
 @mutagent.impl(SandboxApp.exec_code)
@@ -257,13 +305,13 @@ async def _close(self: SandboxApp) -> None:
     registry = _get_registry(self)
 
     # 拷贝并清空，避免重入
-    items = list(cleanups.items())
+    items = list(cleanups.values())
     cleanups.clear()
-    for name in [ns_name for ns_name in registry._namespaces]:
+    for name in list(registry._namespaces):
         registry.remove(name)
 
-    for name, cb in items:
-        await _invoke_cleanup(name, cb)
+    for ns, cb in items:
+        await _invoke_cleanup(ns.name, cb)
 
     _invalidate_cache(self)
 

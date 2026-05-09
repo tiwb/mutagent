@@ -171,7 +171,7 @@ async def build_peer_namespaces(
         else:
             full_desc = f"(shared from {source_label})"
 
-        ns = Namespace(name, description=full_desc)
+        ns = Namespace(name, description=full_desc, provider_kind="peer")
         # peer namespace 也要随 conn 一起跑状态，help() 才能正确显示
         ns._connection = conn  # type: ignore[attr-defined]
         ns.connection_state = conn.state  # type: ignore[attr-defined]
