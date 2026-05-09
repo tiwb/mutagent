@@ -126,6 +126,11 @@ def _wrap_async(app: SandboxApp, coro_fn: Any) -> Any:
 
     主 loop 由调用方（PySandboxTools / SandboxToolkit / 其他 entry）在
     ``run_in_executor`` 前通过 ``app.bind_main_loop()`` 注入。
+
+    返回的 wrapper 上挂 ``_async_original`` 属性，指向原始 coroutine
+    函数，供已经在主 loop 异步上下文里的调用方（如
+    ``share.py:_handle_call``）绕过 sync wrapper 直接 ``await``，
+    避免「同线程同步等自己排队的 coroutine」死锁。
     """
     def wrapper(**kwargs: Any) -> Any:
         loop = getattr(app, '_async_loop', None)
@@ -146,6 +151,9 @@ def _wrap_async(app: SandboxApp, coro_fn: Any) -> Any:
         future = asyncio.run_coroutine_threadsafe(coro_fn(**kwargs), loop)
         return future.result(timeout=120)
 
+    # 暴露原 coroutine 函数：异步上下文（如 share.py 的 RPC handler）
+    # 检测到该属性后可直接 await，跳过 sync wrapper 的 future 调度。
+    wrapper._async_original = coro_fn  # type: ignore[attr-defined]
     return wrapper
 
 

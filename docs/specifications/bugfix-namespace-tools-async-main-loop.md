@@ -18,6 +18,7 @@
 - `src/mutagent/sandbox/entry_mcp.py` — `PySandboxTools.pysandbox()` 使用 `loop.run_in_executor(None, self._app.exec_code, code)`，导致 sandbox 代码在线程池执行。
 - `src/mutagent/sandbox/entry_agent.py` — `SandboxToolkit.pysandbox()` 相同模式。
 - `src/mutbot/builtins/pysandbox_toolkit.py` — mutbot 侧的 PySandboxToolkit @impl，相同模式。
+- `src/mutagent/sandbox/share.py:_handle_call()` — pysandbox namespace sharing 协议的 RPC handler，**直接调用 `ns._functions[fn_name](**arguments)`**，绕过 pysandbox tool 入口；这是 v2 修复新增覆盖的路径。
 - `src/mutagent/sandbox/_adapter_mcp.py` — 已有相同模式：MCP tool function 通过 `run_coroutine_threadsafe(main_loop)` 跨线程调度。
 
 ## 设计方案
@@ -54,9 +55,42 @@ result = await loop.run_in_executor(None, self._app.exec_code, code)
    - 抛出 `RuntimeError`，提示调用方需先 `app.bind_main_loop()`。
    - **不再 fallback 到 `asyncio.run()`**，因为临时 loop 会让 async tool 在调用线程执行，async tool 内部发起的 I/O（如 `mutbot.status()` 中的 `urllib.request.urlopen` / `mutbot.restart()` / `mutbot.exec_frontend()` 等）无法回到主 loop 完成。
 
+返回的 wrapper 上额外挂 ``_async_original`` 属性指向原 coroutine 函数，供
+已经在 async 上下文里的调用方（见下文 share.py 路径）绕过 sync wrapper
+直接 ``await``。
+
+### share.py RPC 路径（v2 新增）
+
+`pysandbox/namespaces.call` 是 pysandbox namespace sharing 协议的 RPC
+handler（`share.py:_handle_call`）。它直接从 ``ns._functions`` 取函数
+并调用，**完全绕过 pysandbox tool 入口**，因此：
+
+- `bind_main_loop()` 在该路径上不会被触发（handler 注册在 view dispatcher
+  上，不经过 entry）。
+- 即使强行在该 handler 里 `bind_main_loop()`，它本身就跑在主 loop 线程，
+  sync wrapper 会用 `run_coroutine_threadsafe` + `future.result()` 同步
+  等自己排队的 coroutine——**立刻死锁**，并触发同线程保护抛错。
+
+正确语义是：handler 已经在主 loop 的 async 上下文里，**应该直接
+``await`` 原始 async 方法**，跳过 sync wrapper。修复方式：
+
+```python
+# share.py:_handle_call
+async_original = getattr(fn, "_async_original", None)
+if async_original is not None:
+    result = await async_original(**arguments)
+else:
+    result = fn(**arguments)
+    if inspect.isawaitable(result):
+        result = await result
+```
+
+这样还顺带省掉一次「主 loop → 工作线程 → run_coroutine_threadsafe 回主 loop」
+的来回。
+
 ### timeout
 
-沿用 `future.result(timeout=120)`。
+沿用 `future.result(timeout=120)`。share.py 路径不走 future，无 timeout。
 
 ### 兼容性
 
@@ -64,6 +98,8 @@ result = await loop.run_in_executor(None, self._app.exec_code, code)
 - 同步 sandbox 代码仍通过普通函数调用 async `NamespaceTools`。
 - async 实际执行线程变为主 loop 线程，满足 Qt/编辑器宿主线程亲和性。
 - 对未注入 `_async_loop` 直接调用 async `NamespaceTools` 的场景，明确报错。
+- `share.py` 路径下 async NamespaceTools 直接在 RPC handler 所在主 loop
+  上 await，无需 `bind_main_loop()`。
 
 ## 消费者场景
 
@@ -72,6 +108,7 @@ result = await loop.run_in_executor(None, self._app.exec_code, code)
 | mutagent pysandbox REPL | 通过 MCP 连到 mutbot / mutagent --serve，调用 `mutbot.status()` 等 async 函数 | async tool 在目标 mutbot/mutagent 主 loop 线程执行 | mutbot 不卡死；pysandbox 不超时 |
 | AI Agent | 通过 SandboxToolkit 调用 async NamespaceTools 方法 | wrapper 返回 async 方法结果 | async 方法观察到的 thread id 等于主 loop thread id |
 | 直接调用方 | 未 `bind_main_loop()` 时调用 async wrapper | 明确生命周期错误 | 抛出 `RuntimeError` |
+| 跨实例 namespace sharing | mutagent webui 把 mutbot 的 namespace 通过 `pysandbox/namespaces.*` 协议融合后，pysandbox 内调用 `mutbot.status()` | 远端 mutbot RPC handler 直接 await 原 async 方法，无 sync wrapper 死锁 | RPC 不报 `_async_loop not set` 也不报 `Cannot synchronously call ...`；返回 status payload |
 
 ## 实施步骤清单
 
@@ -79,4 +116,7 @@ result = await loop.run_in_executor(None, self._app.exec_code, code)
 - [x] 在 3 个入口点（`PySandboxTools.pysandbox` / `SandboxToolkit.pysandbox` / mutbot `PySandboxToolkit.pysandbox`）注入 `_async_loop` + `_async_loop_thread_id`。
 - [x] 抽 `SandboxApp.bind_main_loop()` helper，3 个 entry 改为单行调用。
 - [x] 补回归测试：worker 线程同步调用的主 loop 路由、未 bind 报错、同线程同步调用报错、bind_main_loop 幂等。
+- [x] `_wrap_async` 返回的 wrapper 挂 `_async_original` 指向原 coroutine。
+- [x] `share.py:_handle_call` 检测 `_async_original`，绕过 sync wrapper 直接 await，覆盖 namespace sharing RPC 路径。
+- [x] 补 share.py RPC 路径回归测试。
 - [x] 编写本规范文档。

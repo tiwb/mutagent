@@ -180,10 +180,18 @@ def register_pysandbox_methods(
 
         # 业务异常 → JSON-RPC error（不复用 transport-error 通道,不触发 client 重连）
         try:
-            result = fn(**arguments)
-            # 同步函数返回 awaitable 时 await（罕见，但兼容）
-            if inspect.isawaitable(result):
-                result = await result
+            # async NamespaceTools 方法被 _wrap_async 包成 sync wrapper
+            # 后，原 coroutine 函数被挂在 ``_async_original`` 上。本 handler
+            # 本身已在主 loop 的 async 上下文里，直接 await 原 coroutine
+            # 可避免「sync wrapper run_coroutine_threadsafe 同线程等」死锁。
+            async_original = getattr(fn, "_async_original", None)
+            if async_original is not None:
+                result = await async_original(**arguments)
+            else:
+                result = fn(**arguments)
+                # 同步函数返回 awaitable 时 await（罕见，但兼容）
+                if inspect.isawaitable(result):
+                    result = await result
         except JsonRpcError:
             raise
         except TypeError as exc:
