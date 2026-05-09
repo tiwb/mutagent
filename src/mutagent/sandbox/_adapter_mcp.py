@@ -445,6 +445,12 @@ class MCPConnection:
         self.namespace.connection_state = self.state  # type: ignore[attr-defined]
         self.namespace.connection_error = None  # type: ignore[attr-defined]
 
+        # 通过 pysandbox/namespaces.* 扩展协议从对端融合进来的 peer
+        # namespaces。每次 _do_rebuild 重建；与 self.namespace 一样
+        # 共享本 conn 的连接状态。详见
+        # ``mutagent/docs/specifications/feature-pysandbox-namespace-sharing.md``。
+        self.peer_namespaces: list[Namespace] = []
+
     # -- 状态变更 helper（保证 namespace 状态字段同步）-------------------
 
     def _set_state(self, state: ConnectionState,
@@ -453,6 +459,10 @@ class MCPConnection:
         self.last_error = error
         self.namespace.connection_state = state  # type: ignore[attr-defined]
         self.namespace.connection_error = error  # type: ignore[attr-defined]
+        # peer namespaces 共享同一连接状态（D6）
+        for peer in self.peer_namespaces:
+            peer.connection_state = state  # type: ignore[attr-defined]
+            peer.connection_error = error  # type: ignore[attr-defined]
 
     def mark_disconnected(self, reason: str) -> None:
         """tool 调用发现传输错时，标记当前 client 已不可用。
@@ -536,17 +546,50 @@ class MCPConnection:
                 f"MCP '{self.ns_name}' reconnect failed: {reason}"
             ) from exc
 
+        # 检测 pysandbox capability（D3）— 决定是否过滤对端 pysandbox tool
+        # 自身（D2）以及是否融合 peer namespaces（D4 Eager 拉取）
+        from mutagent.sandbox._adapter_pysandbox import (
+            build_peer_namespaces,
+            has_pysandbox_capability,
+        )
+        is_peer = (
+            isinstance(new_client, HTTPMCPClient)
+            and has_pysandbox_capability(init_result)
+        )
+        if is_peer:
+            # D2: 隐藏对端 pysandbox tool 自身，避免递归调用语义混乱
+            tools = [t for t in tools if t.get("name") != "pysandbox"]
+
         self.client = new_client
         self._refresh_namespace(init_result, tools)
+
+        # 融合 peer namespaces（D1 重名冲突在 conn 内自检；与外部 registry
+        # 的冲突由调用方挂入时再判一次）
+        new_peer_namespaces: list[Namespace] = []
+        if is_peer:
+            assert isinstance(new_client, HTTPMCPClient)
+            new_peer_namespaces = await build_peer_namespaces(
+                self, init_result, new_client)
+            self._check_peer_name_conflicts(new_peer_namespaces)
+        self.peer_namespaces = new_peer_namespaces
+
         self._set_state("connected", None)
-        logger.info("MCP '%s' connected (%d functions)",
-                    self.ns_name, len(self.namespace._functions))
+        if new_peer_namespaces:
+            logger.info(
+                "MCP '%s' connected (%d functions, merged %d namespaces from %s)",
+                self.ns_name, len(self.namespace._functions),
+                len(new_peer_namespaces), self.ns_name)
+        else:
+            logger.info("MCP '%s' connected (%d functions)",
+                        self.ns_name, len(self.namespace._functions))
 
     async def close(self) -> None:
         """彻底关闭 — sandbox cleanup 入口。多次调用幂等。"""
         async with self._lock:
             client = self.client
             self.client = None
+            # peer namespaces 不再可用，但保留对象（其状态已被 _set_state
+            # 同步为 disconnected），调用方在自身 registry 中按需移除
             self._set_state("disconnected", None)
             if client is not None:
                 try:
@@ -556,6 +599,22 @@ class MCPConnection:
                                  self.ns_name, exc)
 
     # -- 内部 helper -----------------------------------------------------
+
+    def _check_peer_name_conflicts(
+        self, peer_namespaces: list[Namespace]) -> None:
+        """D1: 启动期重名冲突检测 — 直接抛 RuntimeError。
+
+        本方法只检查 conn 自身范围内的冲突（peer 互相之间 + 与 tool ns）。
+        与外部 registry / 其他 source 的冲突由 ``SandboxApp`` 注册时检查。
+        """
+        seen: dict[str, str] = {self.namespace.name: f"tools of '{self.ns_name}'"}
+        for peer in peer_namespaces:
+            if peer.name in seen:
+                raise RuntimeError(
+                    f"Pysandbox namespace conflict on source '{self.ns_name}': "
+                    f"peer namespace '{peer.name}' clashes with {seen[peer.name]}"
+                )
+            seen[peer.name] = f"peer namespace from '{self.ns_name}'"
 
     def _in_cooldown(self) -> bool:
         if self.retry_cooldown <= 0:
