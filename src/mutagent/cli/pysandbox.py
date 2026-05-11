@@ -58,6 +58,7 @@ import asyncio
 import code
 import json
 import logging
+import os
 import socket
 import sys
 from datetime import datetime
@@ -92,11 +93,25 @@ def add_pysandbox_subcommand(subparsers: Any) -> argparse.ArgumentParser:
         default="127.0.0.1",
         help="server 地址（默认 127.0.0.1，与 webui 对齐）",
     )
+    env_port_str = os.environ.get("MUTAGENT_PORT")
+    env_port: int | None = None
+    if env_port_str:
+        try:
+            env_port = int(env_port_str)
+        except ValueError:
+            print(
+                f"Warning: ignoring invalid MUTAGENT_PORT={env_port_str!r} "
+                "(expected an integer)",
+                file=sys.stderr,
+            )
     parser.add_argument(
         "--port",
         type=int,
-        default=None,
-        help="server 端口（必填）。client 模式下若用 --url 则可省",
+        default=env_port,
+        help=(
+            "server 端口（必填）。client 模式下若用 --url 则可省。"
+            "未显式指定时从环境变量 MUTAGENT_PORT 读取默认值"
+        ),
     )
 
     # client only
@@ -151,6 +166,7 @@ def _validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
         if args.port is None:
             parser.error(
                 "--port is required with --serve\n"
+                "  (or set MUTAGENT_PORT environment variable)\n"
                 "\n"
                 "Example:\n"
                 "  mutagent pysandbox --serve --port 8080"
@@ -166,7 +182,7 @@ def _validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
             parser.error("-c CODE and script file are mutually exclusive")
         if args.url is None and args.port is None:
             parser.error(
-                "--port is required (or use --url for full endpoint)\n"
+                "--port is required (or set MUTAGENT_PORT, or use --url for full endpoint)\n"
                 "\n"
                 "Examples:\n"
                 "  mutagent pysandbox --port 8080 -c 'help()'\n"
@@ -326,6 +342,7 @@ class PysandboxClient:
             f"Or point to a different server:\n"
             f"  {self.prog} pysandbox --port PORT -c '...'\n"
             f"  {self.prog} pysandbox --url URL    -c '...'\n"
+            f"  (or set MUTAGENT_PORT to inherit a parent server's port)\n"
         )
 
     def no_code_examples(self) -> list[str]:
@@ -583,6 +600,8 @@ async def _serve(config: Any, host: str, port: int) -> None:
 
     actual_host, actual_port = listen_sock.getsockname()[:2]
     url = f"http://{actual_host}:{actual_port}/mcp"
+    # 曝光端口给子进程（pi agent / mutagent pysandbox client 可自动发现）
+    os.environ["MUTAGENT_PORT"] = str(actual_port)
 
     server = PySandboxServer(host=actual_host, port=actual_port)
     print(f"mutagent sandbox server: {url}")

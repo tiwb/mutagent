@@ -475,6 +475,8 @@ def run_webui(
 
     actual_host, actual_port = listen_sock.getsockname()[:2]
     url = f"http://{actual_host}:{actual_port}/"
+    # 曝光端口给子进程（pi agent / mutagent pysandbox client 可自动发现）
+    os.environ["MUTAGENT_PORT"] = str(actual_port)
     server = WebUIServer(app=self, agent=self.agent, host=actual_host, port=actual_port)
     logger.info("Starting mutagent WebUI server at %s", url)
 
