@@ -569,7 +569,7 @@ def _render_registry(registry: "NamespaceRegistry") -> str:
         if label:
             suffix_parts.append(label)
         if desc:
-            suffix_parts.append(f"— {desc}")
+            suffix_parts.append(desc)
         suffix_parts.append(count_text)
         lines.append(f"  {padded} " + " ".join(suffix_parts))
     lines.append("")

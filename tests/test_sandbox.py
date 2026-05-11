@@ -350,12 +350,12 @@ class TestHelpLayer1:
         assert "(2 functions)" in output
         assert "fs" in output
         assert "(1 functions)" in output
-        # 空 description 不应出现 em-dash
+        # 描述前不再出现 — 连字符（统一改成空格分隔）
         fs_line = [l for l in output.splitlines() if l.lstrip().startswith("fs ")][0]
         assert "—" not in fs_line
-        # 有 description 应包含 em-dash
         web_line = [l for l in output.splitlines() if l.lstrip().startswith("web")][0]
-        assert "—" in web_line
+        assert "—" not in web_line
+        assert "网页抽取工具" in web_line
 
     def test_alphabetical_order(self):
         registry = NamespaceRegistry()
