@@ -339,7 +339,7 @@ class MergedNamespaceView:
 
 
 # 给 type hint / isinstance 用的统一类型别名
-NamespaceLike = "Namespace | MergedNamespaceView"
+NamespaceLike = Namespace | MergedNamespaceView
 
 
 # ---------------------------------------------------------------------------
