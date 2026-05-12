@@ -1,14 +1,15 @@
-"""Default ChatInput implementation."""
+"""Default ChatInput implementation + chat-input-domain Actions."""
 
 from __future__ import annotations
 
+import inspect
 import logging
 from functools import partial
-from typing import Callable
+from typing import Any, Callable
 
 import mutagent
 from mutagent.webui.chat_input import ChatInput
-from mutgui import ActionContext, ActionToolbar, Bind, Callback, ViewBlock
+from mutgui import Action, ActionContext, ActionRef, ActionToolbar, Bind, Callback, ViewBlock
 
 logger = logging.getLogger(__name__)
 
@@ -98,3 +99,81 @@ def render(self: ChatInput) -> ViewBlock:
             "onSubmit": Callback(_submit, view="@view"),
         }
     ])
+
+
+# ── 私有辅助 ─────────────────────────────────────────
+def _chat_input(context: ActionContext) -> Any | None:
+    return context.get("chat_input")
+
+
+async def _call_action(handler: Any, *args: Any) -> None:
+    if handler is None:
+        return
+    result = handler(*args)
+    if inspect.isawaitable(result):
+        await result
+
+
+# ── ChatInput 域 Actions ────────────────────────────
+
+
+class SendMessageAction(Action):
+    action_id = "mutagent.chat_input.send"
+    categories = ("mutagent.chat_input.toolbar",)
+    label = "Send"
+    position = "end"
+    placement = "submit:10/10"
+    variant = "split"
+    menu_placement = "top-start"
+
+    def check_enabled(self, context: ActionContext) -> bool:
+        chat_input = _chat_input(context)
+        if chat_input is None or getattr(chat_input, "disabled", False):
+            return False
+        return bool(str(getattr(chat_input, "text", "")).strip())
+
+    async def execute(self, context: ActionContext) -> None:
+        chat_input = _chat_input(context)
+        await _call_action(getattr(chat_input, "_submit_action", None))
+
+    def menu_actions(self, context: ActionContext) -> list[ActionRef]:
+        return [
+            ActionRef(action=SetSendModeChoiceAction("enter", "Send with Enter")),
+            ActionRef(action=SetSendModeChoiceAction("ctrl-enter", "Send with Ctrl+Enter")),
+        ]
+
+
+class CancelMessageAction(Action):
+    action_id = "mutagent.chat_input.cancel"
+    categories = ("mutagent.chat_input.toolbar",)
+    label = "Stop"
+    position = "end"
+    placement = "submit:10/20"
+
+    def check_visible(self, context: ActionContext) -> bool:
+        chat_input = _chat_input(context)
+        return bool(getattr(chat_input, "is_busy", False))
+
+    async def execute(self, context: ActionContext) -> None:
+        chat_input = _chat_input(context)
+        await _call_action(getattr(chat_input, "_cancel_action", None))
+
+
+class SetSendModeChoiceAction(Action):
+    variant = "button"
+
+    def __init__(self, mode: str, label: str) -> None:
+        super().__init__()
+        self.mode = mode
+        self.label = label
+
+    def resolved_action_id(self) -> str:
+        return f"mutagent.chat_input.send_mode.{self.mode}"
+
+    def check_checked(self, context: ActionContext) -> bool:
+        chat_input = _chat_input(context)
+        return getattr(chat_input, "send_mode", "enter") == self.mode
+
+    async def execute(self, context: ActionContext) -> None:
+        chat_input = _chat_input(context)
+        await _call_action(getattr(chat_input, "_set_send_mode_action", None), self.mode)

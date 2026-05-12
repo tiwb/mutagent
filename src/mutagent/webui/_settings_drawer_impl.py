@@ -1,4 +1,4 @@
-"""Default SettingsDrawer implementation."""
+"""Default SettingsDrawer implementation + settings-domain Actions."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import mutagent
 import mutobj
 from mutobj.core import AttributeDescriptor
 from mutagent.webui.settings import SettingsDrawer, SettingsPanel
-from mutgui import Callback, ViewBlock
+from mutgui import Action, ActionContext, Callback, ViewBlock
 
 
 def _resolve_panel_attr(cls, attr_name: str, default: str = "") -> str:
@@ -154,3 +154,47 @@ async def notify_models_changed(self: SettingsDrawer, preferred_model: str = "")
 
 async def _close_handler(view: SettingsDrawer) -> None:
     await view.close()
+
+
+# ── 私有辅助 ─────────────────────────────────────────
+def _conversation(context: ActionContext) -> Any | None:
+    return context.get("conversation")
+
+
+async def _call_action(handler: Any, *args: Any) -> None:
+    if handler is None:
+        return
+    result = handler(*args)
+    if inspect.isawaitable(result):
+        await result
+
+
+# ── Settings 域 Actions ────────────────────────────
+
+
+class OpenSettingsAction(Action):
+    """通用设置面板入口 — 一个类支撑所有 SettingsPanel 子类。"""
+
+    def __init__(self, panel_id: str, label: str, placement: str) -> None:
+        super().__init__()
+        self._panel_id = panel_id
+        self.label = label
+        self.placement = placement
+
+    def resolved_action_id(self) -> str:
+        return f"mutagent.menu.settings.{self._panel_id}"
+
+    async def execute(self, context: ActionContext) -> None:
+        drawer = context.get("settings_drawer")
+        if drawer is not None:
+            await drawer.open(self._panel_id)
+
+
+class RefreshModelsAction(Action):
+    action_id = "mutagent.menu.refresh_models"
+    label = "Refresh Models"
+    placement = "settings:10/20"
+
+    async def execute(self, context: ActionContext) -> None:
+        conv = _conversation(context)
+        await _call_action(getattr(conv, "refresh_models", None))

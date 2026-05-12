@@ -1,12 +1,26 @@
-"""Default toolbar widget implementations."""
+"""Default toolbar widget implementations + toolbar-domain Actions."""
 
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 import mutagent
 from mutagent.webui.toolbar import AgentStatusBar
-from mutgui import Callback, ViewBlock
+from mutgui import Action, ActionContext, ActionRef, Callback, ViewBlock
+
+
+# ── 私有辅助：从 ActionContext 提取 Conversation；通用 async 调用包装 ─────
+def _conversation(context: ActionContext) -> Any | None:
+    return context.get("conversation")
+
+
+async def _call_action(handler: Any, *args: Any) -> None:
+    if handler is None:
+        return
+    result = handler(*args)
+    if inspect.isawaitable(result):
+        await result
 
 
 @mutagent.impl(AgentStatusBar.__init__)
@@ -197,3 +211,99 @@ def status_bar_render(self: AgentStatusBar) -> ViewBlock:
         "content": detail_panel,
         "$children": [compact_row],
     }])
+
+
+# ── Toolbar 域 Actions ──────────────────────────────────────────────
+
+
+class ModelSelectorAction(Action):
+    action_id = "mutagent.toolbar.model_selector"
+    categories = ("mutagent.conversation.toolbar",)
+    label = "Model"
+    position = "start"
+    placement = "primary:10/10"
+    variant = "dropdown"
+    menu_placement = "bottom-start"
+
+    def resolved_label(self, context: ActionContext | None = None) -> str:
+        if context:
+            conv = context.get("conversation")
+            if conv and getattr(conv, "current_model", ""):
+                return conv.current_model
+        return self.label or "Model"
+
+    def check_enabled(self, context: ActionContext) -> bool:
+        conv = _conversation(context)
+        return not getattr(conv, "is_busy", False)
+
+    def menu_actions(self, context: ActionContext) -> list[ActionRef]:
+        conv = _conversation(context)
+        models = getattr(conv, "models", [])
+        return [
+            ActionRef(action=SelectModelAction(str(m.get("name", ""))))
+            for m in models
+            if m.get("name")
+        ]
+
+
+class SelectModelAction(Action):
+    """菜单内单个模型选项 — 动态 label + checked 态。"""
+    variant = "button"
+
+    def __init__(self, model_name: str) -> None:
+        super().__init__()
+        self._model_name = model_name
+        self.label = model_name
+
+    def resolved_action_id(self) -> str:
+        return f"mutagent.model.select.{self._model_name}"
+
+    def check_checked(self, context: ActionContext) -> bool:
+        conv = _conversation(context)
+        return getattr(conv, "current_model", "") == self._model_name
+
+    async def execute(self, context: ActionContext) -> None:
+        conv = _conversation(context)
+        await _call_action(getattr(conv, "_handle_model_change", None), self._model_name)
+
+
+class AgentStatusAction(Action):
+    action_id = "mutagent.toolbar.status"
+    categories = ("mutagent.conversation.toolbar",)
+    label = "Status"
+    position = "start"
+    placement = "primary:10/20"
+    variant = "widget"
+
+    def toolbar_view(self, context: ActionContext) -> Any:
+        conversation = _conversation(context)
+        return getattr(conversation, "status_bar", None)
+
+
+class MainMenuAction(Action):
+    action_id = "mutagent.toolbar.main_menu"
+    categories = ("mutagent.conversation.toolbar",)
+    label = "☰"
+    tooltip = "Settings"
+    position = "end"
+    placement = "menu:20/10"
+    variant = "dropdown"
+
+    def menu_actions(self, context: ActionContext) -> list[ActionRef]:
+        # 延迟 import 规避 _toolbar_impl ↔ _settings_drawer_impl 启动期循环
+        from mutagent.webui._settings_drawer_impl import (
+            OpenSettingsAction,
+            RefreshModelsAction,
+        )
+
+        drawer = context.get("settings_drawer")
+        items: list[ActionRef] = []
+        if drawer is not None:
+            for panel in drawer.list_panels():
+                items.append(ActionRef(action=OpenSettingsAction(
+                    panel_id=panel.panel_id,
+                    label=panel.panel_title,
+                    placement=getattr(panel, "panel_placement", ""),
+                )))
+        items.append(ActionRef(action=RefreshModelsAction))
+        return items
