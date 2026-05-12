@@ -7,8 +7,7 @@ import asyncio
 from mutagent.webui.messages import MessageList
 from mutagent.config import Disposable
 from mutagent.webui import Conversation
-from mutagent.webui.settings import LLMSettingsPanel
-from mutagent.webui._settings_impl import _ANTHROPIC_PROVIDER, _discover_remote_models
+from mutagent.webui._settings_llm import LLMSettingsPanel, _ANTHROPIC_PROVIDER, _discover_remote_models
 from mutagent.webui.chat_input import ChatInput
 from mutagent.webui.messages import AssistantMessage, AssistantTextItem
 from mutagent.webui._server_impl import _render_root_html
@@ -40,7 +39,7 @@ def test_conversation_child_views_have_stable_ids():
         conversation.message_list.id,
         conversation.chat_input.id,
         conversation.chat_input.toolbar.id,
-        conversation.settings_panel.id,
+        conversation.settings_drawer.id,
     }
 
     assert "" not in child_ids
@@ -118,12 +117,13 @@ def test_chat_input_renders_unified_shell_and_press_enter_handler():
     assert "onSubmit" in shell
 
 
-def test_settings_drawer_close_handler_does_not_inject_view_kwarg():
+def test_settings_drawer_renders_inline_in_conversation():
+    """SettingsDrawer is a View child — rendered as direct child in conversation tree."""
     conversation = Conversation(agent=_DummyAgent())
-
-    drawer = conversation.render().items[0]["$children"][3]
-
-    assert drawer["onClose"].to_wire() == {"$handler": {}}
+    root = conversation.render().items[0]
+    # settings_drawer is the 4th child (after toolbar-shell, messages-shell, chat_input)
+    drawer_child = root["$children"][3]
+    assert drawer_child is conversation.settings_drawer
 
 
 def test_settings_panel_list_page_only_offers_anthropic_and_openai():

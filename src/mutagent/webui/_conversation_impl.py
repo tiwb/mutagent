@@ -20,7 +20,7 @@ from mutagent.webui.messages import (
     UserTextItem,
 )
 from mutagent.webui.toolbar import AgentStatusBar
-from mutagent.webui.settings import LLMSettingsPanel
+from mutagent.webui.settings import SettingsDrawer
 from mutgui import ActionContext, ActionToolbar, Callback, ViewBlock
 
 logger = logging.getLogger(__name__)
@@ -85,20 +85,19 @@ def __init__(self: Conversation, *, agent: Any, app: Any = None) -> None:
     )
     self.chat_input.id = "chat-input"
     self.chat_input.conversation = self
-    self.settings_open = False
-    self.settings_panel = LLMSettingsPanel(
+    self.refresh_models = partial(_refresh_models_from_config, self)
+    self.settings_drawer = SettingsDrawer(
         app=app,
         agent=agent,
-        on_close=partial(_close_settings, self),
-        on_saved=partial(_settings_saved, self),
+        on_models_changed=self.refresh_models,
     )
-    self._open_settings_action = partial(_open_settings, self)
-    self._close_settings_action = partial(_close_settings, self)
-    self._refresh_models_action = partial(_refresh_models_from_config, self)
     self.toolbar = ActionToolbar(
         id="conversation-toolbar",
         categories=["mutagent.conversation.toolbar"],
-        context=ActionContext(owner=self, data={"conversation": self}),
+        context=ActionContext(
+            owner=self,
+            data={"conversation": self, "settings_drawer": self.settings_drawer},
+        ),
         label_mode="auto",
     )
     self._subscription = agent.subscribe(self._handle_agent_event)
@@ -120,7 +119,10 @@ def _refresh_shell(self: Conversation) -> None:
         self.status_bar.cache_write_tokens = ctx.get_cache_write_tokens()
     self.chat_input.disabled = False
     self.chat_input.is_busy = self.is_busy
-    self.toolbar.context = ActionContext(owner=self, data={"conversation": self})
+    self.toolbar.context = ActionContext(
+        owner=self,
+        data={"conversation": self, "settings_drawer": self.settings_drawer},
+    )
     self.status_bar.invalidate()
     self.chat_input.invalidate()
     self.toolbar.invalidate()
@@ -140,20 +142,6 @@ def _find_item(self: Conversation, item_id: str) -> Any | None:
         if getattr(item, "id", "") == item_id:
             return item
     return None
-
-
-async def _open_settings(self: Conversation) -> None:
-    self.settings_open = True
-    reload_panel = getattr(self.settings_panel, "_reload", None)
-    if callable(reload_panel):
-        reload_panel()
-    self.settings_panel.invalidate()
-    self.invalidate()
-
-
-async def _close_settings(self: Conversation) -> None:
-    self.settings_open = False
-    self.invalidate()
 
 
 async def _refresh_models_from_config(self: Conversation, preferred_model: str = "") -> None:
@@ -181,11 +169,6 @@ async def _refresh_models_from_config(self: Conversation, preferred_model: str =
         self.current_model = _resolve_current_model_name(self.agent, self.models)
     _refresh_shell(self)
     self.invalidate()
-
-
-async def _settings_saved(self: Conversation, preferred_model: str) -> None:
-    await _refresh_models_from_config(self, preferred_model)
-    await _close_settings(self)
 
 
 async def _handle_send(self: Conversation, text: str) -> None:
@@ -431,17 +414,7 @@ def render(self: Conversation) -> ViewBlock:
                     "$children": [self.message_list],
                 },
                 self.chat_input,
-                {
-                    "$component": "antd.Drawer",
-                    "$id": "llm-settings-drawer",
-                    "title": "LLM API 设置",
-                    "placement": "right",
-                    "open": self.settings_open,
-                    "width": 560,
-                    "destroyOnHidden": False,
-                    "onClose": Callback(self._close_settings_action),
-                    "$children": [self.settings_panel],
-                },
+                self.settings_drawer,
             ],
         }
     ])

@@ -1,4 +1,8 @@
-"""Default LLM settings panel implementation."""
+"""LLM Settings panel — Declaration + full implementation.
+
+Replaces old settings.py (LLMSettingsPanel Declaration) + _settings_impl.py (916-line impl).
+LLMSettingsPanel now extends SettingsPanel from webui.settings.
+"""
 
 from __future__ import annotations
 
@@ -8,13 +12,13 @@ import re
 from copy import deepcopy
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import httpx
 import mutagent
 import mutobj
 from mutagent.provider import LLMProvider
-from mutagent.webui.settings import LLMSettingsPanel
+from mutagent.webui.settings import SettingsPanel
 from mutgui import Bind, Callback, ViewBlock
 
 _CHAT_MODEL_PREFIXES = ("gpt-", "o1", "o3", "o4", "chatgpt-")
@@ -40,6 +44,43 @@ _PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
         "tag_color": "blue",
     },
 }
+
+
+class LLMSettingsPanel(SettingsPanel):
+    """LLM provider 配置面板。
+
+    独立面板文件，由 SettingsDrawer 通过 discover_subclasses 自动发现。
+    """
+
+    panel_id: ClassVar[str] = "llm"
+    panel_title: ClassVar[str] = "LLM API 设置"
+    panel_placement: ClassVar[str] = "settings:10/10"
+
+    # ── State fields ──────────────────────────────
+    current_step: str
+    editing_key: str
+    editing_is_new: bool
+    provider_name: str
+    provider_type: str
+    provider_type_label: str
+    base_url: str
+    auth_token: str
+    models: list[str]
+    discovered_models: list[str]
+    default_model: str
+    error: str
+    notice: str
+
+    def __init__(self, *, app: Any, agent: Any) -> None: ...
+
+    def render(self) -> ViewBlock: ...
+
+    def on_open(self) -> None: ...
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Utility functions (unchanged from old _settings_impl.py)
+# ═══════════════════════════════════════════════════════════════
 
 
 def _normalize_models(value: Any) -> list[str]:
@@ -316,15 +357,6 @@ def _write_config(self: LLMSettingsPanel, providers: dict[str, dict[str, Any]], 
     path = _config_path(self)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    self._app.config_path = path
-
-
-async def _handle_saved(self: LLMSettingsPanel, default_model: str) -> None:
-    if self._on_saved is None:
-        return
-    result = self._on_saved(default_model)
-    if inspect.isawaitable(result):
-        await result
 
 
 def _set_message(self: LLMSettingsPanel, *, error: str = "", notice: str = "") -> None:
@@ -371,6 +403,11 @@ def _base_url_hint(provider_path: str) -> str:
     if protocol == "openai":
         return "OpenAI-compatible 端点会依次尝试 /models 与 /v1/models。"
     return "会依次尝试 /models 与 /v1/models；如你的 Provider 需要其他发现方式，请手动填写模型列表。"
+
+
+# ═══════════════════════════════════════════════════════════════
+#  User action handlers
+# ═══════════════════════════════════════════════════════════════
 
 
 def _edit_provider(key: str, *, view: LLMSettingsPanel) -> None:
@@ -524,52 +561,20 @@ async def _save_all_settings(*, view: LLMSettingsPanel) -> None:
     default_model = view.default_model if view.default_model in all_models else all_models[0]
     try:
         _write_config(view, providers, default_model)
-        await _handle_saved(view, default_model)
-        await _close_panel(view=view)
+        await view.drawer.notify_models_changed(default_model)
+        await view.drawer.close()
     except Exception as exc:
         _set_message(view, error=str(exc))
         view.invalidate()
 
 
-@mutagent.impl(LLMSettingsPanel.__init__)
-def __init__(
-    self: LLMSettingsPanel,
-    *,
-    app: Any,
-    agent: Any,
-    on_close: Any = None,
-    on_saved: Any = None,
-) -> None:
-    super(LLMSettingsPanel, self).__init__()
-    self.id = "llm-settings-panel"
-    self._app = app
-    self._agent = agent
-    self._on_close = on_close
-    self._on_saved = on_saved
-    self._drafts: dict[str, dict[str, Any]] = {}
-    self.current_step = "list"
-    self.editing_key = ""
-    self.editing_is_new = False
-    self.provider_name = ""
-    self.provider_type = _ANTHROPIC_PROVIDER
-    self.provider_type_label = "Anthropic"
-    self.base_url = ""
-    self.auth_token = ""
-    self.models = []
-    self.discovered_models = []
-    self.default_model = ""
-    self.error = ""
-    self.notice = ""
-    self._reload = lambda: _load_from_config(self)
-    _load_from_config(self)
+async def _cancel_settings(*, view: LLMSettingsPanel) -> None:
+    await view.drawer.close()
 
 
-async def _close_panel(*, view: LLMSettingsPanel) -> None:
-    if view._on_close is None:
-        return
-    result = view._on_close()
-    if inspect.isawaitable(result):
-        await result
+# ═══════════════════════════════════════════════════════════════
+#  Rendering
+# ═══════════════════════════════════════════════════════════════
 
 
 def _render_message(self: LLMSettingsPanel, *, margin_bottom: int = 12) -> list[dict[str, Any]]:
@@ -731,7 +736,7 @@ def _render_list(self: LLMSettingsPanel) -> list[dict[str, Any]]:
                     "$component": "antd.Button",
                     "$id": "cancel",
                     "children": "Cancel",
-                    "onClick": Callback(_close_panel, view="@view"),
+                    "onClick": Callback(_cancel_settings, view="@view"),
                 },
                 {
                     "$component": "antd.Button",
@@ -899,6 +904,44 @@ def _render_edit(self: LLMSettingsPanel) -> list[dict[str, Any]]:
         },
     ])
     return items
+
+
+# ═══════════════════════════════════════════════════════════════
+#  @impl hooks
+# ═══════════════════════════════════════════════════════════════
+
+
+@mutagent.impl(LLMSettingsPanel.__init__)
+def __init__(
+    self: LLMSettingsPanel,
+    *,
+    app: Any,
+    agent: Any,
+) -> None:
+    super(LLMSettingsPanel, self).__init__()
+    self.id = "llm-settings-panel"
+    self._app = app
+    self._agent = agent
+    self._drafts: dict[str, dict[str, Any]] = {}
+    self.current_step = "list"
+    self.editing_key = ""
+    self.editing_is_new = False
+    self.provider_name = ""
+    self.provider_type = _ANTHROPIC_PROVIDER
+    self.provider_type_label = "Anthropic"
+    self.base_url = ""
+    self.auth_token = ""
+    self.models = []
+    self.discovered_models = []
+    self.default_model = ""
+    self.error = ""
+    self.notice = ""
+    _load_from_config(self)
+
+
+@mutagent.impl(LLMSettingsPanel.on_open)
+def _on_open(self: LLMSettingsPanel) -> None:
+    _load_from_config(self)
 
 
 @mutagent.impl(LLMSettingsPanel.render)

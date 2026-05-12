@@ -88,14 +88,22 @@ class AgentStatusAction(Action):
         return getattr(conversation, "status_bar", None)
 
 
-class OpenLLMSettingsAction(Action):
-    action_id = "mutagent.menu.llm_settings"
-    label = "LLM API Settings"
-    placement = "settings:10/10"
+class OpenSettingsAction(Action):
+    """通用设置面板入口 — 一个类支撑所有 SettingsPanel 子类。"""
+
+    def __init__(self, panel_id: str, label: str, placement: str) -> None:
+        super().__init__()
+        self._panel_id = panel_id
+        self.label = label
+        self.placement = placement
+
+    def resolved_action_id(self) -> str:
+        return f"mutagent.menu.settings.{self._panel_id}"
 
     async def execute(self, context: ActionContext) -> None:
-        conversation = _conversation(context)
-        await _call_action(getattr(conversation, "_open_settings_action", None))
+        drawer = context.get("settings_drawer")
+        if drawer is not None:
+            await drawer.open(self._panel_id)
 
 
 class RefreshModelsAction(Action):
@@ -104,8 +112,8 @@ class RefreshModelsAction(Action):
     placement = "settings:10/20"
 
     async def execute(self, context: ActionContext) -> None:
-        conversation = _conversation(context)
-        await _call_action(getattr(conversation, "_refresh_models_action", None))
+        conv = _conversation(context)
+        await _call_action(getattr(conv, "refresh_models", None))
 
 
 class MainMenuAction(Action):
@@ -118,10 +126,17 @@ class MainMenuAction(Action):
     variant = "dropdown"
 
     def menu_actions(self, context: ActionContext) -> list[ActionRef]:
-        return [
-            ActionRef(action=OpenLLMSettingsAction),
-            ActionRef(action=RefreshModelsAction),
-        ]
+        drawer = context.get("settings_drawer")
+        items: list[ActionRef] = []
+        if drawer is not None:
+            for panel in drawer.list_panels():
+                items.append(ActionRef(action=OpenSettingsAction(
+                    panel_id=panel.panel_id,
+                    label=panel.panel_title,
+                    placement=getattr(panel, "panel_placement", ""),
+                )))
+        items.append(ActionRef(action=RefreshModelsAction))
+        return items
 
 
 class SendMessageAction(Action):
