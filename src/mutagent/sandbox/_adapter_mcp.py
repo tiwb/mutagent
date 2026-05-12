@@ -14,6 +14,7 @@
 import asyncio
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -121,15 +122,24 @@ class StdioMCPClient:
     """Stdio MCP client — 通过 subprocess 连接 MCP server。"""
 
     def __init__(self, command: str, args: list[str] | None = None,
-                 shell: bool = False):
+                 shell: bool = False, env: dict[str, str] | None = None):
         self._command = command
         self._args = args or []
         self._shell = shell
+        # env 语义：None / {} → 直接继承父进程（Popen env=None）；
+        # 非空 → 用 ``os.environ | env`` 合并下发，避免完全覆盖丢 PATH 等系统变量
+        self._env = dict(env) if env else None
         self._process: subprocess.Popen | None = None
         self._request_id = 0
 
+    def _merged_env(self) -> dict[str, str] | None:
+        if not self._env:
+            return None
+        return {**os.environ, **self._env}
+
     async def connect(self) -> dict[str, Any]:
         """启动 MCP server 子进程并完成 initialize 握手。"""
+        merged_env = self._merged_env()
         try:
             if self._shell:
                 cmd = self._command + ' ' + ' '.join(self._args)
@@ -141,6 +151,7 @@ class StdioMCPClient:
                     text=True,
                     bufsize=1,
                     shell=True,
+                    env=merged_env,
                     **_POPEN_KWARGS,
                 )
             else:
@@ -151,6 +162,7 @@ class StdioMCPClient:
                     stderr=subprocess.PIPE,
                     text=True,
                     bufsize=1,
+                    env=merged_env,
                     **_POPEN_KWARGS,
                 )
         except (OSError, FileNotFoundError) as exc:
@@ -359,6 +371,7 @@ def make_client(ns_name: str, server_config: dict[str, Any]) -> AnyMCPClient:
             command,
             server_config.get("args", []),
             shell=server_config.get("shell", False),
+            env=server_config.get("env"),
         )
     if transport == "http":
         url = server_config.get("url", "")
@@ -643,6 +656,41 @@ class MCPConnection:
                     logger.debug("MCP '%s' close failed: %s",
                                  self.ns_name, exc)
 
+    # -- 外部查询 ----------------------------------------------------
+
+    def list_tools_metadata(self) -> list[dict[str, Any]]:
+        """返回当前 conn 可见的所有 tool 元数据。
+
+        覆盖本 conn 的主 namespace 与所有 peer namespaces。未连接 / 连失败
+        时返回空列表（不报错，panel 以状态 tag 交代）。
+
+        返回元素形式::
+
+            {
+                "name":             str,    # tool 名
+                "description":      str,
+                "input_schema":     dict,   # 原始 JSON Schema（properties / required 等）
+                "source_namespace": str,    # 隔属哪个 namespace（主 ns 或 peer ns 名）
+            }
+        """
+        result: list[dict[str, Any]] = []
+        seen: list[Namespace] = [self.namespace, *self.peer_namespaces]
+        for ns in seen:
+            for fn_name, fn in ns._functions.items():
+                schema = getattr(fn, '_mcp_input_schema', None) or {}
+                desc = (
+                    getattr(fn, '_mcp_description', None)
+                    or ns._descriptions.get(fn_name, '')
+                    or ''
+                )
+                result.append({
+                    "name": fn_name,
+                    "description": desc,
+                    "input_schema": schema,
+                    "source_namespace": ns.name,
+                })
+        return result
+
     # -- 内部 helper -----------------------------------------------------
 
     def _sync_peer_providers(
@@ -802,6 +850,9 @@ def _make_tool_func(conn: MCPConnection, tool_name: str,
     tool_func.__name__ = tool_name
     tool_func.__doc__ = doc
     tool_func._async_original = _tool_async  # type: ignore[attr-defined]
+    # 保留 input_schema 供 panel / list_tools_metadata 展示使用
+    tool_func._mcp_input_schema = input_schema  # type: ignore[attr-defined]
+    tool_func._mcp_description = description  # type: ignore[attr-defined]
     return tool_func
 
 

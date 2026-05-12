@@ -116,6 +116,34 @@ class SandboxApp(mutagent.Declaration):
         """
         ...
 
+    def register_mcp_connection(self, name: str, conn: Any) -> None:
+        """登记一个 MCPConnection 供 panel 反查。
+
+        Args:
+            name: 原始 source 名（config dict key，未 sanitize）
+            conn: ``MCPConnection`` 实例
+
+        启动期 ``connect_sources`` 创建每个 conn 后调用一次。同名重复调用
+        会覆盖（rename 场景）。panel 通过 ``mcp_connections()`` 读取。
+
+        独立于 ``add_namespace`` 是为了覆盖 ``autostart=false``、namespace 暂不
+        入 registry 但仍需 panel 能看到的场景（设计决策 D3）。
+        """
+        ...
+
+    def unregister_mcp_connection(self, name: str) -> None:
+        """从 conn 登记表中移除（panel 删除 / rename 后调用）。幂等。"""
+        ...
+
+    def mcp_connections(self) -> dict[str, Any]:
+        """返回当前已登记的所有 MCPConnection。
+
+        Returns:
+            ``{name: MCPConnection}`` 的浅拷贝。key 是原始 source 名。
+            从未调用 ``register_mcp_connection`` 时返回空 dict。
+        """
+        ...
+
 
 from mutagent.sandbox import _app_impl  # noqa: E402
 mutagent.register_module_impls(_app_impl)

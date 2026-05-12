@@ -280,7 +280,7 @@ class TestBridgeDispatch:
     async def test_stdio_fills_description_from_instructions(self, monkeypatch):
         """Stdio 分支：connect() 返回的 instructions 传给 Namespace。"""
         class _FakeStdio:
-            def __init__(self, command, args=None, shell=False):
+            def __init__(self, command, args=None, shell=False, env=None):
                 pass
 
             async def connect(self):
@@ -307,10 +307,11 @@ class TestBridgeDispatch:
         created: dict = {}
 
         class _FakeStdio:
-            def __init__(self, command, args=None, shell=False):
+            def __init__(self, command, args=None, shell=False, env=None):
                 created["command"] = command
                 created["args"] = args
                 created["shell"] = shell
+                created["env"] = env
 
             async def connect(self):
                 return {}
@@ -331,7 +332,7 @@ class TestBridgeDispatch:
         })
 
         assert isinstance(client, _FakeStdio)
-        assert created == {"command": "npx", "args": ["-y", "@playwright/mcp"], "shell": True}
+        assert created == {"command": "npx", "args": ["-y", "@playwright/mcp"], "shell": True, "env": None}
         assert ns._name == "play"
 
 
@@ -896,3 +897,209 @@ class TestNamespaceRender:
         text = _render_registry(self._make_registry([ns]))
         assert "[" not in text.split("Use help")[0]  # 状态标签不出现
         assert "(1 functions)" in text
+
+
+# ============================================================
+# env 透传 & list_tools_metadata（feature-mcp-source-config）
+# ============================================================
+
+class TestStdioEnvPassthrough:
+    """`StdioMCPClient` 与 `make_client` 的 env 透传。"""
+
+    @pytest.mark.asyncio
+    async def test_make_client_forwards_env_to_stdio(self, monkeypatch):
+        """make_client 把 server_config['env'] 传给 StdioMCPClient.__init__。"""
+        from mutagent.sandbox._adapter_mcp import make_client
+
+        captured: dict = {}
+
+        class _FakeStdio:
+            def __init__(self, command, args=None, shell=False, env=None):
+                captured["env"] = env
+
+        monkeypatch.setattr(
+            "mutagent.sandbox._adapter_mcp.StdioMCPClient", _FakeStdio)
+
+        make_client("x", {
+            "transport": "stdio",
+            "command": "echo",
+            "env": {"MY_KEY": "v1", "OTHER": "v2"},
+        })
+        assert captured["env"] == {"MY_KEY": "v1", "OTHER": "v2"}
+
+    @pytest.mark.asyncio
+    async def test_make_client_omits_env_when_missing(self, monkeypatch):
+        """无 env 字段时传 None，保持子进程继承父 env。"""
+        from mutagent.sandbox._adapter_mcp import make_client
+
+        captured: dict = {}
+
+        class _FakeStdio:
+            def __init__(self, command, args=None, shell=False, env=None):
+                captured["env"] = env
+
+        monkeypatch.setattr(
+            "mutagent.sandbox._adapter_mcp.StdioMCPClient", _FakeStdio)
+
+        make_client("x", {"transport": "stdio", "command": "echo"})
+        assert captured["env"] is None
+
+    @pytest.mark.asyncio
+    async def test_stdio_popen_receives_merged_env(self, monkeypatch):
+        """StdioMCPClient.connect 把 os.environ | env 合并后传 Popen.env。"""
+        import os
+        from mutagent.sandbox import _adapter_mcp as adapter
+
+        captured: dict = {}
+
+        class _FakeProc:
+            def __init__(self, *args, **kwargs):
+                captured["args"] = args
+                captured["kwargs"] = kwargs
+                self.stdin = None
+                self.stdout = None
+                self.stderr = None
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+        # 直接在 connect 调 Popen 之前拦截，让握手快速失败避免实际 IO
+        async def _fake_request(self, method, params):
+            return {}
+
+        def _fake_send_notification(self, method, params):
+            return None
+
+        monkeypatch.setattr(adapter.subprocess, "Popen", _FakeProc)
+        monkeypatch.setattr(adapter.StdioMCPClient, "_request", _fake_request)
+        monkeypatch.setattr(adapter.StdioMCPClient, "_send_notification",
+                            _fake_send_notification)
+
+        os.environ["__MCP_TEST_BASE__"] = "base"
+        try:
+            client = adapter.StdioMCPClient(
+                "echo", env={"X": "1", "Y": "2"})
+            await client.connect()
+        finally:
+            os.environ.pop("__MCP_TEST_BASE__", None)
+
+        env = captured["kwargs"]["env"]
+        assert env is not None
+        # 合并后既有用户 env，也保留父进程 env
+        assert env["X"] == "1"
+        assert env["Y"] == "2"
+        assert env.get("__MCP_TEST_BASE__") == "base"
+
+    @pytest.mark.asyncio
+    async def test_stdio_popen_env_none_when_no_env_config(self, monkeypatch):
+        """env 配置缺省 → Popen 收到 env=None（继承父进程）。"""
+        from mutagent.sandbox import _adapter_mcp as adapter
+
+        captured: dict = {}
+
+        class _FakeProc:
+            def __init__(self, *args, **kwargs):
+                captured["kwargs"] = kwargs
+                self.stdin = None
+                self.stdout = None
+                self.stderr = None
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+        async def _fake_request(self, method, params):
+            return {}
+
+        def _fake_send_notification(self, method, params):
+            return None
+
+        monkeypatch.setattr(adapter.subprocess, "Popen", _FakeProc)
+        monkeypatch.setattr(adapter.StdioMCPClient, "_request", _fake_request)
+        monkeypatch.setattr(adapter.StdioMCPClient, "_send_notification",
+                            _fake_send_notification)
+
+        client = adapter.StdioMCPClient("echo")
+        await client.connect()
+        assert captured["kwargs"]["env"] is None
+
+
+class TestListToolsMetadata:
+    """`MCPConnection.list_tools_metadata` 公开接口。"""
+
+    @pytest.mark.asyncio
+    async def test_list_tools_metadata_returns_schema(self, monkeypatch):
+        """list_tools_metadata 应返回 name/description/input_schema/source_namespace。"""
+        from mutagent.sandbox._adapter_mcp import MCPConnection
+
+        # mock 一个 client，返回带 inputSchema 的 tools
+        class _FakeClient:
+            async def connect(self):
+                return {"serverInfo": {"name": "x"}, "instructions": ""}
+
+            async def list_tools(self):
+                return [
+                    {
+                        "name": "read_file",
+                        "description": "Read a file",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string", "description": "file path"},
+                            },
+                            "required": ["path"],
+                        },
+                    },
+                    {
+                        "name": "write_file",
+                        "description": "",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string"},
+                                "content": {"type": "string"},
+                            },
+                        },
+                    },
+                ]
+
+            async def call_tool(self, name, arguments):
+                return {}
+
+            async def close(self):
+                pass
+
+        monkeypatch.setattr(
+            "mutagent.sandbox._adapter_mcp.make_client",
+            lambda ns, cfg: _FakeClient())
+
+        loop = asyncio.get_running_loop()
+        conn = MCPConnection("fs", {"transport": "stdio", "command": "x"}, loop)
+        await conn.reconnect()
+
+        meta = conn.list_tools_metadata()
+        names = [m["name"] for m in meta]
+        assert "read_file" in names
+        assert "write_file" in names
+
+        rf = next(m for m in meta if m["name"] == "read_file")
+        assert rf["description"] == "Read a file"
+        assert rf["input_schema"]["properties"]["path"]["type"] == "string"
+        assert rf["input_schema"]["required"] == ["path"]
+        assert rf["source_namespace"] == "fs"
+
+        await conn.close()
+
+    @pytest.mark.asyncio
+    async def test_list_tools_metadata_empty_when_disconnected(self):
+        """未连接时返回空列表。"""
+        from mutagent.sandbox._adapter_mcp import MCPConnection
+        loop = asyncio.get_running_loop()
+        conn = MCPConnection("fs", {"transport": "stdio", "command": "x"}, loop)
+        # 还未 reconnect
+        assert conn.list_tools_metadata() == []

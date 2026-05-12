@@ -58,3 +58,5 @@ class SettingsPanel(View):
 
 
 from . import _settings_drawer_impl  # noqa: E402,F401
+from . import _settings_llm  # noqa: E402,F401
+from . import _settings_mcp  # noqa: E402,F401

@@ -50,6 +50,14 @@ def _get_cleanups(self: SandboxApp) -> dict[int, tuple[Namespace, CleanupCallbac
     return cleanups
 
 
+def _get_mcp_conns(self: SandboxApp) -> dict[str, Any]:
+    conns = getattr(self, '_mcp_conns', None)
+    if conns is None:
+        conns = {}
+        object.__setattr__(self, '_mcp_conns', conns)
+    return conns
+
+
 def _get_start_time(self: SandboxApp) -> float:
     t = getattr(self, '_start_time', None)
     if t is None:
@@ -355,6 +363,21 @@ def _remove_namespace_provider(self: SandboxApp, ns: Namespace) -> bool:
 SandboxApp.remove_provider = _remove_namespace_provider  # type: ignore[attr-defined]
 
 
+@mutagent.impl(SandboxApp.register_mcp_connection)
+def _register_mcp_connection(self: SandboxApp, name: str, conn: Any) -> None:
+    _get_mcp_conns(self)[name] = conn
+
+
+@mutagent.impl(SandboxApp.unregister_mcp_connection)
+def _unregister_mcp_connection(self: SandboxApp, name: str) -> None:
+    _get_mcp_conns(self).pop(name, None)
+
+
+@mutagent.impl(SandboxApp.mcp_connections)
+def _mcp_connections(self: SandboxApp) -> dict[str, Any]:
+    return dict(_get_mcp_conns(self))
+
+
 @mutagent.impl(SandboxApp.exec_code)
 def _exec_code(self: SandboxApp, code: str,
                state: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -366,12 +389,14 @@ def _exec_code(self: SandboxApp, code: str,
 async def _close(self: SandboxApp) -> None:
     cleanups = _get_cleanups(self)
     registry = _get_registry(self)
+    mcp_conns = _get_mcp_conns(self)
 
     # 拷贝并清空，避免重入
     items = list(cleanups.values())
     cleanups.clear()
     for name in list(registry._namespaces):
         registry.remove(name)
+    mcp_conns.clear()
 
     for ns, cb in items:
         await _invoke_cleanup(ns.name, cb)

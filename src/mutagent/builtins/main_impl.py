@@ -318,14 +318,17 @@ async def connect_sources(self) -> None:
             logger.warning("MCP source '%s' init failed: %s", ns_name, e)
             continue
 
-        # namespace 全程注册，cleanup 绑 connection.close（而非单个 client，
-        # 避免重连后 cleanup 调到旧 client）
-        sandbox.add_namespace(conn.namespace, on_remove=conn.close)
+        # 登记到 sandbox’s conn dict — panel 反查入口（D3）
+        # autostart=true / false 都要登记，保证 panel 能看到 lazy source
+        sandbox.register_mcp_connection(ns_name, conn)
         # 回引 sandbox，供 _do_rebuild 同步注册 peer namespaces。
         # 详见 feature-namespace-multi-provider.md。
         conn._sandbox = sandbox
 
         if autostart:
+            # namespace 全程注册，cleanup 绑 connection.close（而非单个 client，
+            # 避免重连后 cleanup 调到旧 client）
+            sandbox.add_namespace(conn.namespace, on_remove=conn.close)
             # 后台连，不阻塞 setup；失败只 log，不影响其他 namespace
             async def _bg_connect(c: MCPConnection = conn,
                                   n: str = ns_name) -> None:
@@ -338,6 +341,9 @@ async def connect_sources(self) -> None:
                         "MCP source '%s' autostart failed: %s", n, exc)
             asyncio.create_task(_bg_connect())
         else:
+            # autostart=false：完全 lazy。不 add_namespace、不发起连接。
+            # panel 可通过 sandbox.mcp_connections() 拿到 conn，点 Connect
+            # 时才 add_namespace + reconnect（详 feature-mcp-source-config.md）。
             logger.info(
                 "MCP source '%s' registered (lazy, autostart=false)", ns_name)
 

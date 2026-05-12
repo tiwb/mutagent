@@ -26,6 +26,11 @@ async def _on_startup(self: WebUIServer) -> None:
     """
     try:
         await self.app.connect_sources()
+        # bind_main_loop 注入 _async_loop，供 MCPSettingsPanel 的
+        # _submit_async 跨线程投递协程使用（Connect/Disconnect/Reconnect 等按钮）
+        sandbox = getattr(self.app, "sandbox", None)
+        if sandbox is not None:
+            sandbox.bind_main_loop()
     except Exception:
         logger.exception("connect_sources failed during WebUI startup")
 
