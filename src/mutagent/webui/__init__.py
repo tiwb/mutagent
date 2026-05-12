@@ -6,13 +6,18 @@ from .toolbar import AgentStatusBar
 from .messages import (
     MessageList,
     ChatItem,
+    ChatItemView,
     UserTextItem,
     AssistantTextItem,
     AssistantErrorItem,
     TurnSeparatorItem,
     ToolCallItem,
+    UserMessage,
+    AssistantMessage,
+    AssistantError,
+    TurnSeparator,
+    ToolCallCard,
 )
-from .tool_call import ToolCallCard
 from .blocks import BlockRenderer, ThinkingBlock
 from .chat_input import ChatInput
 from .server import WebUIServer
@@ -24,11 +29,16 @@ __all__ = [
     "AgentStatusBar",
     "MessageList",
     "ChatItem",
+    "ChatItemView",
     "UserTextItem",
     "AssistantTextItem",
     "AssistantErrorItem",
     "TurnSeparatorItem",
     "ToolCallItem",
+    "UserMessage",
+    "AssistantMessage",
+    "AssistantError",
+    "TurnSeparator",
     "ToolCallCard",
     "BlockRenderer",
     "ThinkingBlock",

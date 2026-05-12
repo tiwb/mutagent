@@ -1,7 +1,8 @@
-"""Default MessageList implementation."""
+"""Default MessageList / ChatItemView implementations."""
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any
 
@@ -13,15 +14,17 @@ from mutagent.webui.messages import (
     AssistantErrorItem,
     AssistantMessage,
     AssistantTextItem,
+    ChatItem,
+    ChatItemView,
     MessageList,
+    ToolCallCard,
     ToolCallItem,
     TurnSeparator,
     TurnSeparatorItem,
     UserMessage,
     UserTextItem,
 )
-from mutagent.webui.tool_call import ToolCallCard
-from mutgui import View, ViewBlock, VirtualList, VirtualListItemAdapter
+from mutgui import Callback, View, ViewBlock, VirtualList, VirtualListItemAdapter
 
 
 def _format_clock(timestamp: float) -> str:
@@ -40,8 +43,60 @@ def _role_meta(role: str, model: str = "", timestamp: float = 0.0) -> str:
     return " · ".join(parts)
 
 
+# ---------------------------------------------------------------------------
+# ChatItemView 基类实现
+# ---------------------------------------------------------------------------
+
+# 类型驱动的 ChatItem -> ChatItemView 映射缓存。
+# 按 mutobj 注册表 generation 失效，首次/变更时重建一次，其余 O(1)。
+_view_map_cache: dict[type[ChatItem], type[ChatItemView]] = {}
+_view_map_generation: int = -1
+
+
+def _resolve_view_class(item_type: type[ChatItem]) -> type[ChatItemView]:
+    """按 ChatItem 类型查 ChatItemView 子类。"""
+    global _view_map_generation
+    gen = mutobj.get_registry_generation()
+    if gen != _view_map_generation:
+        _view_map_cache.clear()
+        for view_cls in mutobj.discover_subclasses(ChatItemView):
+            registered = view_cls.item_type
+            if registered is ChatItem:
+                continue  # 未覆盖默认值的子类跳过
+            if registered in _view_map_cache:
+                raise RuntimeError(
+                    f"Duplicate ChatItemView for {registered.__name__}: "
+                    f"{_view_map_cache[registered].__name__} vs {view_cls.__name__}"
+                )
+            _view_map_cache[registered] = view_cls
+        _view_map_generation = gen
+    try:
+        return _view_map_cache[item_type]
+    except KeyError:
+        raise TypeError(
+            f"No ChatItemView registered for {item_type.__name__}"
+        ) from None
+
+
+@mutagent.impl(ChatItemView.__init__)
+def chat_item_view_init(self: ChatItemView, *, item: ChatItem) -> None:
+    super(ChatItemView, self).__init__()
+    self.item = item
+
+
+@mutagent.impl(ChatItemView.for_item)
+def chat_item_view_for_item(cls: type[ChatItemView], item: ChatItem) -> ChatItemView:
+    view_cls = _resolve_view_class(type(item))
+    return view_cls(item=item)
+
+
+# ---------------------------------------------------------------------------
+# MessageList
+# ---------------------------------------------------------------------------
+
+
 class _MessageListAdapter(VirtualListItemAdapter):
-    items: list[Any] = mutobj.field(default_factory=list)
+    items: list[ChatItem] = mutobj.field(default_factory=list)
 
     @property
     def item_count(self) -> int:
@@ -51,18 +106,7 @@ class _MessageListAdapter(VirtualListItemAdapter):
         return self.items[index].id
 
     def create_item_view(self, index: int) -> View:
-        item = self.items[index]
-        if isinstance(item, UserTextItem):
-            return UserMessage(item=item)
-        if isinstance(item, AssistantTextItem):
-            return AssistantMessage(item=item)
-        if isinstance(item, AssistantErrorItem):
-            return AssistantError(item=item)
-        if isinstance(item, TurnSeparatorItem):
-            return TurnSeparator(item=item)
-        if isinstance(item, ToolCallItem):
-            return ToolCallCard(item=item)
-        raise TypeError(f"Unsupported chat item: {type(item)!r}")
+        return ChatItemView.for_item(self.items[index])
 
     def invalidate_existing_item(self, item_id: str) -> None:
         for virtual_list in self.virtual_lists:
@@ -119,6 +163,11 @@ def message_list_render(self: MessageList) -> ViewBlock:
     ])
 
 
+# ---------------------------------------------------------------------------
+# 气泡通用样式
+# ---------------------------------------------------------------------------
+
+
 def _bubble_shell(is_user: bool) -> dict[str, Any]:
     return {
         "display": "flex",
@@ -147,10 +196,14 @@ def _meta_style() -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# UserMessage
+# ---------------------------------------------------------------------------
+
+
 @mutagent.impl(UserMessage.__init__)
 def user_message_init(self: UserMessage, *, item: UserTextItem) -> None:
-    super(UserMessage, self).__init__()
-    self.item = item
+    super(UserMessage, self).__init__(item=item)
 
 
 @mutagent.impl(UserMessage.render)
@@ -190,12 +243,16 @@ def user_message_render(self: UserMessage) -> ViewBlock:
     ])
 
 
+# ---------------------------------------------------------------------------
+# AssistantMessage
+# ---------------------------------------------------------------------------
+
+
 @mutagent.impl(AssistantMessage.__init__)
 def assistant_message_init(
     self: AssistantMessage, *, item: AssistantTextItem
 ) -> None:
-    super(AssistantMessage, self).__init__()
-    self.item = item
+    super(AssistantMessage, self).__init__(item=item)
     self._renderer = BlockRenderer(text=item.text)
     self._renderer.id = f"block-renderer-{item.id}"
 
@@ -234,12 +291,16 @@ def assistant_message_render(self: AssistantMessage) -> ViewBlock:
     ])
 
 
+# ---------------------------------------------------------------------------
+# AssistantError
+# ---------------------------------------------------------------------------
+
+
 @mutagent.impl(AssistantError.__init__)
 def assistant_error_init(
     self: AssistantError, *, item: AssistantErrorItem
 ) -> None:
-    super(AssistantError, self).__init__()
-    self.item = item
+    super(AssistantError, self).__init__(item=item)
 
 
 @mutagent.impl(AssistantError.render)
@@ -284,12 +345,16 @@ def assistant_error_render(self: AssistantError) -> ViewBlock:
     ])
 
 
+# ---------------------------------------------------------------------------
+# TurnSeparator
+# ---------------------------------------------------------------------------
+
+
 @mutagent.impl(TurnSeparator.__init__)
 def turn_separator_init(
     self: TurnSeparator, *, item: TurnSeparatorItem
 ) -> None:
-    super(TurnSeparator, self).__init__()
-    self.item = item
+    super(TurnSeparator, self).__init__(item=item)
 
 
 @mutagent.impl(TurnSeparator.render)
@@ -338,5 +403,172 @@ def turn_separator_render(self: TurnSeparator) -> ViewBlock:
                     },
                 },
             ],
+        }
+    ])
+
+
+# ---------------------------------------------------------------------------
+# ToolCallCard
+# ---------------------------------------------------------------------------
+
+
+def _toggle_tool_card(*, view: ToolCallCard) -> None:
+    view.item.expanded = not view.item.expanded
+    view.invalidate()
+
+
+def _pretty_json(text: str) -> str:
+    if not text:
+        return ""
+    try:
+        return json.dumps(json.loads(text), ensure_ascii=False, indent=2)
+    except Exception:
+        return text
+
+
+@mutagent.impl(ToolCallCard.__init__)
+def tool_call_card_init(self: ToolCallCard, *, item: ToolCallItem) -> None:
+    super(ToolCallCard, self).__init__(item=item)
+
+
+@mutagent.impl(ToolCallCard.render)
+def tool_call_card_render(self: ToolCallCard) -> ViewBlock:
+    status = self.item.status
+    status_text = {
+        "pending": "pending",
+        "success": "success",
+        "error": "error",
+        "cancelled": "cancelled",
+    }.get(status, status)
+    status_color = {
+        "pending": "#d4a72c",
+        "success": "#2fb171",
+        "error": "#e5534b",
+        "cancelled": "#8b949e",
+    }.get(status, "#8b949e")
+    input_text = _pretty_json(self.item.input_text)
+    result_text = _pretty_json(self.item.result_text)
+    children: list[Any] = [
+        {
+            "$component": "div",
+            "$id": "header",
+            "style": {
+                "display": "flex",
+                "alignItems": "center",
+                "justifyContent": "space-between",
+                "gap": "12px",
+            },
+            "$children": [
+                {
+                    "$component": "div",
+                    "$id": "tool-title",
+                    "style": {"fontWeight": 600},
+                    "children": self.item.name,
+                },
+                {
+                    "$component": "div",
+                    "$id": "status",
+                    "style": {
+                        "fontSize": "var(--mutagent-font-size-meta)",
+                        "color": status_color,
+                    },
+                    "children": status_text,
+                },
+            ],
+        },
+        {
+            "$component": "antd.Button",
+            "$id": "toggle",
+            "size": "small",
+            "children": "展开" if not self.item.expanded else "收起",
+            "onClick": Callback(_toggle_tool_card, view="@view"),
+        },
+    ]
+    if self.item.expanded:
+        if input_text:
+            children.append(
+                {
+                    "$component": "div",
+                    "$id": "input",
+                    "style": {"marginTop": "10px"},
+                    "$children": [
+                        {
+                            "$component": "div",
+                            "$id": "input-label",
+                            "style": {
+                                "fontSize": "var(--mutagent-font-size-meta)",
+                                "color": "var(--mutgui-text-dim)",
+                                "marginBottom": "6px",
+                            },
+                            "children": "Input",
+                        },
+                        {
+                            "$component": "pre",
+                            "$id": "input-pre",
+                            "style": {
+                                "margin": 0,
+                                "padding": "10px 12px",
+                                "borderRadius": 12,
+                                "overflowX": "auto",
+                                "whiteSpace": "pre-wrap",
+                                "background": "rgba(255,255,255,0.04)",
+                                "fontSize": "var(--mutagent-font-size-base)",
+                                "fontFamily": "var(--mutgui-font-mono, monospace)",
+                            },
+                            "children": input_text,
+                        },
+                    ],
+                }
+            )
+        if result_text:
+            children.append(
+                {
+                    "$component": "div",
+                    "$id": "result",
+                    "style": {"marginTop": "10px"},
+                    "$children": [
+                        {
+                            "$component": "div",
+                            "$id": "result-label",
+                            "style": {
+                                "fontSize": "var(--mutagent-font-size-meta)",
+                                "color": "var(--mutgui-text-dim)",
+                                "marginBottom": "6px",
+                            },
+                            "children": "Result",
+                        },
+                        {
+                            "$component": "pre",
+                            "$id": "result-pre",
+                            "style": {
+                                "margin": 0,
+                                "padding": "10px 12px",
+                                "borderRadius": 12,
+                                "overflowX": "auto",
+                                "whiteSpace": "pre-wrap",
+                                "background": "rgba(255,255,255,0.04)",
+                                "fontSize": "var(--mutagent-font-size-base)",
+                                "fontFamily": "var(--mutgui-font-mono, monospace)",
+                            },
+                            "children": result_text,
+                        },
+                    ],
+                }
+            )
+    return ViewBlock([
+        {
+            "$component": "div",
+            "$id": "tool-card",
+            "style": {
+                "margin": "6px 0 10px 0",
+                "padding": "12px 14px",
+                "borderRadius": 14,
+                "border": f"1px solid {status_color}",
+                "background": "rgba(255,255,255,0.02)",
+                "display": "flex",
+                "flexDirection": "column",
+                "gap": "8px",
+            },
+            "$children": children,
         }
     ])
