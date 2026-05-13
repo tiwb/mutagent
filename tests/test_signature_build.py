@@ -14,6 +14,8 @@ import pytest
 from mutagent.sandbox._signature import (
     _MISSING,
     build_signature,
+    format_callable_signature,
+    format_signature,
     json_type_to_annotation,
     mcp_schema_to_specs,
     try_build_signature,
@@ -260,6 +262,78 @@ class TestTryBuildSignature:
         sig = try_build_signature([{"default": 1}], context="test_fn")
         assert sig is None
         assert "build_signature failed" in caplog.text
+
+
+class TestDisplayFormatting:
+
+    def test_format_signature_unquotes_string_annotations(self) -> None:
+        sig = inspect.Signature(
+            [
+                inspect.Parameter(
+                    "level",
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    default="INFO",
+                    annotation="str",
+                ),
+                inspect.Parameter(
+                    "args",
+                    inspect.Parameter.VAR_POSITIONAL,
+                    annotation="list[str]",
+                ),
+                inspect.Parameter(
+                    "verbose",
+                    inspect.Parameter.KEYWORD_ONLY,
+                    default=False,
+                    annotation=bool,
+                ),
+                inspect.Parameter(
+                    "kwargs",
+                    inspect.Parameter.VAR_KEYWORD,
+                    annotation="Any",
+                ),
+            ],
+            return_annotation="int | None",
+        )
+
+        assert format_signature(sig) == (
+            "(level: str = 'INFO', *args: list[str], "
+            "verbose: bool = False, **kwargs: Any) -> int | None"
+        )
+
+    def test_format_signature_keeps_non_string_annotations(self) -> None:
+        sig = inspect.Signature(
+            [
+                inspect.Parameter(
+                    "value",
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    annotation=int,
+                ),
+            ],
+            return_annotation=inspect.Signature.empty,
+        )
+
+        assert format_signature(sig) == "(value: int, /)"
+
+    def test_format_callable_signature_uses_pysandbox_fallback(self) -> None:
+        def fn(**kwargs):
+            return kwargs
+
+        fn._pysandbox_signature_str = "(level: str = 'INFO')"  # type: ignore[attr-defined]
+        assert format_callable_signature(fn) == "(level: str = 'INFO')"
+
+    def test_format_callable_signature_uses_mcp_schema_fallback(self) -> None:
+        def fn(**kwargs):
+            return kwargs
+
+        fn._mcp_input_schema = {  # type: ignore[attr-defined]
+            "properties": {
+                "level": {"type": "string"},
+                "limit": {"type": "integer"},
+            },
+            "required": ["level"],
+        }
+
+        assert format_callable_signature(fn) == "(level: string, limit: integer = ...)"
 
 
 # ---------------------------------------------------------------------------

@@ -20,6 +20,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
+from mutagent.sandbox._signature import format_signature
 from mutio.mcp.protocol import (
     INTERNAL_ERROR,
     INVALID_PARAMS,
@@ -148,7 +149,7 @@ def _describe_function(fn: Any) -> dict[str, Any]:
     except (TypeError, ValueError):
         sig_str = "(...)"
     else:
-        sig_str = str(sig)
+        sig_str = format_signature(sig)
         params_list = []
         for p in sig.parameters.values():
             # VAR_POSITIONAL / VAR_KEYWORD 无法通过 RPC 承载，跳过

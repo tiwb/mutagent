@@ -447,6 +447,7 @@ class TestDescribeFunctionParams:
             return []
 
         entry = _describe_function(logs)
+        assert entry["signature"] == "(level: str = 'INFO', last_n: int = 10) -> list[str]"
         assert "params" in entry
         params = entry["params"]
         assert [p["name"] for p in params] == ["level", "last_n"]
@@ -834,3 +835,5 @@ class TestWrapAsyncSignature:
         assert not doc.lstrip().startswith("logs("), (
             f"__doc__ should not start with signature line, got: {doc!r}"
         )
+        assert "test.logs(level: str = 'INFO', last_n: int = 50) -> str" in output
+        assert "'str'" not in output

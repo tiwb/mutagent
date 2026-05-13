@@ -48,6 +48,18 @@ class _MissingSentinel:
 _MISSING = _MissingSentinel()
 
 
+class _RawAnnotation:
+    """仅用于展示层：让字符串 annotation 经 repr 输出时不带引号。"""
+
+    __slots__ = ("_text",)
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def __repr__(self) -> str:
+        return self._text
+
+
 # JSON Schema type → Python 展示字符串
 _JSON_TYPE_MAP = {
     "integer": "int",
@@ -188,6 +200,63 @@ def build_signature(specs: Iterable[Mapping[str, Any]]) -> inspect.Signature:
             name, kind, default=default, annotation=annotation))
 
     return inspect.Signature(params)
+
+
+def format_signature(sig: inspect.Signature) -> str:
+    """格式化签名字符串，仅去掉字符串 annotation 的引号。"""
+    params = [
+        p.replace(annotation=_RawAnnotation(p.annotation))
+        if isinstance(p.annotation, str) else p
+        for p in sig.parameters.values()
+    ]
+    ret = sig.return_annotation
+    if isinstance(ret, str):
+        ret = _RawAnnotation(ret)
+    return str(sig.replace(parameters=params, return_annotation=ret))
+
+
+def _is_kwargs_only_fallback(sig: inspect.Signature) -> bool:
+    """识别 wrapper 构造失败后的 ``(**kwargs)`` 降级签名。"""
+    params = list(sig.parameters.values())
+    return len(params) == 1 and params[0].kind is inspect.Parameter.VAR_KEYWORD
+
+
+def _format_schema_signature(input_schema: Mapping[str, Any]) -> str:
+    """按现有 MCP settings fallback 规则合成签名字符串。"""
+    props = input_schema.get("properties") or {}
+    if not isinstance(props, Mapping):
+        return "()"
+    required = set(input_schema.get("required") or [])
+    params: list[str] = []
+    for pname, pinfo in props.items():
+        ptype = pinfo.get("type", "Any") if isinstance(pinfo, Mapping) else "Any"
+        if pname in required:
+            params.append(f"{pname}: {ptype}")
+        else:
+            params.append(f"{pname}: {ptype} = ...")
+    return f"({', '.join(params)})"
+
+
+def format_callable_signature(func: Any) -> str | None:
+    """统一格式化 callable 的展示签名，必要时走各类 fallback。"""
+    try:
+        sig = inspect.signature(func)
+    except (ValueError, TypeError):
+        sig = None
+    if sig is not None and not _is_kwargs_only_fallback(sig):
+        return format_signature(sig)
+
+    fallback = getattr(func, "_pysandbox_signature_str", None)
+    if isinstance(fallback, str) and fallback:
+        return fallback
+
+    schema = getattr(func, "_mcp_input_schema", None)
+    if isinstance(schema, Mapping):
+        return _format_schema_signature(schema)
+
+    if sig is not None:
+        return format_signature(sig)
+    return None
 
 
 def try_build_signature(

@@ -20,6 +20,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal, TYPE_CHECKING
 
+from mutagent.sandbox._signature import format_callable_signature
+
 if TYPE_CHECKING:
     from mutagent.sandbox._adapter_mcp import MCPConnection
 
@@ -689,8 +691,7 @@ def _render_function(func: Callable, ns_name: str = "",
     qualified = f"{prefix}.{name}" if prefix else name
 
     doc = getattr(func, '__doc__', None) or '(no documentation)'
-    try:
-        sig = inspect.signature(func)
-        return f"{qualified}{sig}\n\n{doc}"
-    except (ValueError, TypeError):
-        return f"{qualified}\n\n{doc}"
+    sig_str = format_callable_signature(func)
+    if sig_str is not None:
+        return f"{qualified}{sig_str}\n\n{doc}"
+    return f"{qualified}\n\n{doc}"

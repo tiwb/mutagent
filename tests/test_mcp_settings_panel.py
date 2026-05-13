@@ -614,6 +614,12 @@ class TestRenderSmoke:
 
 class TestFunctionDetailRendering:
 
+    def test_fn_signature_unquotes_string_annotations(self):
+        def tool(level: str = "info") -> str:
+            return level
+
+        assert _fn_detail(tool, "tool").startswith("tool(level: str = 'info') -> str")
+
     def test_fn_detail_suppresses_required_when_schema_has_default(self):
         def tool() -> None:
             return None
@@ -639,6 +645,14 @@ class TestFunctionDetailRendering:
         assert "level: string (required)" not in detail
         assert "  level: string" in detail
         assert "  target: string (required)" in detail
+
+    def test_fn_detail_uses_pysandbox_signature_fallback(self):
+        def tool(**kwargs) -> None:
+            return None
+
+        tool._pysandbox_signature_str = "(level: str = 'INFO') -> str"  # type: ignore[attr-defined]
+        detail = _fn_detail(tool, "peer.logs")
+        assert detail.startswith("peer.logs(level: str = 'INFO') -> str")
 
     def test_render_edit_stdio_has_command_args_env(self):
         panel, _ = _make_panel(mcp_sources={
