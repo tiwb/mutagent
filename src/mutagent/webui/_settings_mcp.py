@@ -913,7 +913,21 @@ def _toggle_fn(full_name: str, *, view: MCPSettingsPanel) -> None:
 
 
 def _fn_signature(func: Any) -> str:
-    """从 MCP input_schema 或 inspect.signature 构建函数签名。"""
+    """构建函数签名字符串。
+
+    优先走 `inspect.signature`：MCP tool / pysandbox namespace wrapper 已经
+    把真签名挂在 `__signature__` 上（见
+    `refactor-wrapper-faithful-signature.md`）。只在 wrapper 构造失败降级为
+    `(**kwargs)` 形态时，才回落到 `_mcp_input_schema` 合成路径。
+    """
+    try:
+        sig = inspect.signature(func)
+    except (ValueError, TypeError):
+        sig = None
+    # 真签名存在且不是「空壳 (**kwargs)」形态 → 直接用
+    if sig is not None and not _is_kwargs_only_fallback(sig):
+        return str(sig)
+    # Fallback：用 MCP schema 合成一份签名（保证 wrapper 构造失败时仍有输出）
     schema = getattr(func, '_mcp_input_schema', None)
     if schema and isinstance(schema, dict):
         params: list[str] = []
@@ -926,10 +940,20 @@ def _fn_signature(func: Any) -> str:
             else:
                 params.append(f"{pname}: {ptype} = ...")
         return f"({', '.join(params)})"
-    try:
-        return str(inspect.signature(func))
-    except (ValueError, TypeError):
-        return "()"
+    return str(sig) if sig is not None else "()"
+
+
+def _is_kwargs_only_fallback(sig: inspect.Signature) -> bool:
+    """识别 wrapper 构造失败后的「空壳 `(**kwargs)`」签名。
+
+    构造失败降级的 wrapper 是 `def f(**kwargs: Any)`，有唯一一个
+    `VAR_KEYWORD` 参数。这种签名对用户无意义，让 caller 回落到 schema 合成。
+    真实的无参函数 `def f()` 不会命中此判断。
+    """
+    params = list(sig.parameters.values())
+    if len(params) != 1:
+        return False
+    return params[0].kind is inspect.Parameter.VAR_KEYWORD
 
 
 def _fn_detail(func: Any, fn_name: str) -> str:

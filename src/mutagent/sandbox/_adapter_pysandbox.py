@@ -72,6 +72,7 @@ def _make_namespace_func(
     fn_name: str,
     signature_str: str,
     doc: str,
+    params: list[dict[str, Any]] | None = None,
 ) -> Any:
     """为远端 namespace 函数生成本地 Python 函数。
 
@@ -81,9 +82,16 @@ def _make_namespace_func(
     - 通过 ``run_coroutine_threadsafe`` 切回 main_loop（httpx 资源约束）
 
     与 tool wrapper 的差别仅在最终调用：``call_namespace`` 而非 ``call_tool``。
+
+    签名层：
+    - 新 server 返回的 ``params`` 存在时，用 ``_signature.build_signature`` 构造
+      真签名挂在 ``__signature__`` 上；wrapper 内用 ``sig.bind`` 规范化参数
+    - ``params`` 缺失（老 server）或构造失败，回落为旧版 ``(**kwargs)`` wrapper
+    - ``__doc__`` 不再拼接签名首行（去重复展示 bug）
     """
     # 延迟 import 避免循环
     from mutagent.sandbox._adapter_mcp import HTTPMCPClient, _is_transport_error
+    from mutagent.sandbox._signature import try_build_signature
 
     async def call_with_retry(kwargs: dict[str, Any]) -> Any:
         await conn.ensure_connected()
@@ -107,20 +115,35 @@ def _make_namespace_func(
     async def _ns_async(**kwargs: Any) -> Any:
         return await call_with_retry(kwargs)
 
-    def ns_func(**kwargs: Any) -> Any:
-        future = asyncio.run_coroutine_threadsafe(
-            call_with_retry(kwargs), conn.main_loop)
-        return future.result(timeout=120)
+    # 构真签名：仅在 server 提供结构化 params 时尝试
+    # 注意：空列表亦是合法入参（无参函数），用 is not None 而非真值测试
+    sig = None
+    if params is not None:
+        sig = try_build_signature(
+            params, context=f"pysandbox {ns_name}.{fn_name}")
+
+    if sig is not None:
+        _bind_sig = sig
+
+        def ns_func(*args: Any, **kwargs: Any) -> Any:
+            bound = _bind_sig.bind(*args, **kwargs)
+            bound.apply_defaults()
+            future = asyncio.run_coroutine_threadsafe(
+                call_with_retry(dict(bound.arguments)), conn.main_loop)
+            return future.result(timeout=120)
+
+        ns_func.__signature__ = sig  # type: ignore[attr-defined]
+    else:
+        def ns_func(**kwargs: Any) -> Any:  # type: ignore[misc]
+            future = asyncio.run_coroutine_threadsafe(
+                call_with_retry(kwargs), conn.main_loop)
+            return future.result(timeout=120)
 
     ns_func.__name__ = fn_name
+    ns_func.__doc__ = doc  # 停止向 doc 拼接签名首行
     ns_func._async_original = _ns_async  # type: ignore[attr-defined]
-    # signature_str 已经是 ``(arg1, *, kwarg=...)`` 风格的字符串，直接拼到 doc
-    # 顶部，help() 渲染时 inspect.signature 取本地空 wrapper 的 sig，但用户能
-    # 在 doc 顶看到远端真实签名。
-    if signature_str:
-        ns_func.__doc__ = f"{fn_name}{signature_str}\n\n{doc}".rstrip()
-    else:
-        ns_func.__doc__ = doc
+    # 保留老字段供老 server + 展示层 fallback 使用
+    ns_func._pysandbox_signature_str = signature_str  # type: ignore[attr-defined]
     return ns_func
 
 
@@ -189,7 +212,12 @@ async def build_peer_namespaces(
                 continue
             sig_str = info.get("signature") or ""
             doc = info.get("doc") or ""
-            fn = _make_namespace_func(conn, name, fn_name, sig_str, doc)
+            # params 是新 server 的 additive 可选字段，缺失不影响老 server 兼容
+            params = info.get("params")
+            if not isinstance(params, list):
+                params = None
+            fn = _make_namespace_func(
+                conn, name, fn_name, sig_str, doc, params)
             # description 取 doc 首段（与 tool 路径一致：register 时存全文）
             ns.register(fn_name, fn, doc)
 

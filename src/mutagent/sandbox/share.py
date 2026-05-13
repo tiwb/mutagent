@@ -102,23 +102,84 @@ def _json_safe(value: Any) -> Any:
         return repr(value)
 
 
+def _annotation_to_str(ann: Any) -> str:
+    """将 `Parameter.annotation` 转为展示字符串。
+
+    - 类型对象 → ``cls.__name__``（`int`, `str` 等）
+    - 字符串注解（PEP 563）直接返回
+    - 其他走 `repr`（`Union[int, None]`、`list[str]` 等通过 repr 展开）
+    """
+    if isinstance(ann, str):
+        return ann
+    if isinstance(ann, type):
+        return ann.__name__
+    # typing 构造物（`list[str]`、`int | None` 等）、其他注解走 repr
+    return repr(ann)
+
+
+def _default_is_json_safe(value: Any) -> bool:
+    """检查默认值是否 JSON 原生可序列化。
+
+    通过 JSON 的值有 3 种来源：字面量、容器组合、简单拟器。它们在
+    ``json.dumps`` 后还能 ``json.loads`` 回原始语义，可以安全回传给服务端。
+    ``datetime.now()`` 这种有一部分运行期状态的对象 repr 后丢身份，不能
+    回传。
+    """
+    try:
+        json.dumps(value)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
 def _describe_function(fn: Any) -> dict[str, Any]:
     """对单个 namespace 函数生成 describe 条目。
 
-    - signature: ``inspect.signature(fn).__str__()`` 字符串，help() 直接渲染
-    - doc: 完整 docstring（None 时空串）
-    - kwargs_schema: v1 阶段统一返回空 dict（type-hint 推断列入 v1.1）
+    - ``signature``: ``inspect.signature(fn).__str__()`` 字符串，help() 直接渲染（老字段保留）
+    - ``doc``: 完整 docstring（None 时空串）
+    - ``params``: 结构化参数列表（新增，additive optional），用于客户端构造
+      ``inspect.Signature``（`refactor-wrapper-faithful-signature.md`）。签名无法
+      解析时省略本字段 → 客户端回落为 ``(**kwargs)`` wrapper。
+    - ``kwargs_schema``: v1 阶段统一返回空 dict（type-hint 推断列入 v1.1）
     """
+    params_list: list[dict[str, Any]] | None = None
     try:
-        sig_str = str(inspect.signature(fn))
+        sig = inspect.signature(fn)
     except (TypeError, ValueError):
         sig_str = "(...)"
+    else:
+        sig_str = str(sig)
+        params_list = []
+        for p in sig.parameters.values():
+            # VAR_POSITIONAL / VAR_KEYWORD 无法通过 RPC 承载，跳过
+            if p.kind in (
+                inspect.Parameter.VAR_POSITIONAL,
+                inspect.Parameter.VAR_KEYWORD,
+            ):
+                continue
+            entry: dict[str, Any] = {
+                "name": p.name,
+                "kind": p.kind.name,
+            }
+            if p.annotation is not inspect.Parameter.empty:
+                entry["annotation"] = _annotation_to_str(p.annotation)
+            if p.default is not inspect.Parameter.empty:
+                if _default_is_json_safe(p.default):
+                    entry["default"] = p.default
+                else:
+                    # 非 JSON 原生默认值：只留 repr 供展示，不允许回传
+                    # （客户端将该参数视为必填，退化安全）
+                    entry["default_repr"] = repr(p.default)
+            params_list.append(entry)
     doc = inspect.getdoc(fn) or ""
-    return {
+    result: dict[str, Any] = {
         "signature": sig_str,
         "doc": doc,
         "kwargs_schema": {},
     }
+    if params_list is not None:
+        result["params"] = params_list
+    return result
 
 
 # ---------------------------------------------------------------------------

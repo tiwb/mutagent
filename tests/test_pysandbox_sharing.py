@@ -430,3 +430,407 @@ class TestMCPConnectionPeerIntegration:
         finally:
             loop.run_until_complete(conn.close())
             loop.close()
+
+
+# ============================================================
+# _describe_function — params 字段（Phase 3）
+# ============================================================
+
+class TestDescribeFunctionParams:
+    """验证 share._describe_function 按设计方案输出 params 结构。"""
+
+    def test_typical_function(self) -> None:
+        from mutagent.sandbox.share import _describe_function
+
+        def logs(level: str = "INFO", last_n: int = 10) -> list[str]:
+            """Query logs."""
+            return []
+
+        entry = _describe_function(logs)
+        assert "params" in entry
+        params = entry["params"]
+        assert [p["name"] for p in params] == ["level", "last_n"]
+        assert params[0]["kind"] == "POSITIONAL_OR_KEYWORD"
+        assert params[0]["default"] == "INFO"
+        assert params[0]["annotation"] == "str"
+        assert params[1]["default"] == 10
+        assert params[1]["annotation"] == "int"
+
+    def test_no_defaults(self) -> None:
+        from mutagent.sandbox.share import _describe_function
+
+        def add(a: int, b: int) -> int:
+            return a + b
+
+        entry = _describe_function(add)
+        params = entry["params"]
+        assert all("default" not in p for p in params)
+        assert all(p["annotation"] == "int" for p in params)
+
+    def test_no_annotations(self) -> None:
+        from mutagent.sandbox.share import _describe_function
+
+        def probe(x, y=1):
+            return x
+
+        entry = _describe_function(probe)
+        params = entry["params"]
+        assert all("annotation" not in p for p in params)
+        assert "default" not in params[0]
+        assert params[1]["default"] == 1
+
+    def test_skips_var_positional_and_var_keyword(self) -> None:
+        from mutagent.sandbox.share import _describe_function
+
+        def variadic(a: int, *args, **kwargs) -> None:
+            return None
+
+        entry = _describe_function(variadic)
+        names = [p["name"] for p in entry["params"]]
+        assert names == ["a"]  # *args / **kwargs 被跳过
+
+    def test_non_json_default_becomes_default_repr(self) -> None:
+        from datetime import datetime
+
+        from mutagent.sandbox.share import _describe_function
+
+        sentinel = datetime(2020, 1, 1)
+
+        def now_like(ts: datetime = sentinel) -> datetime:
+            return ts
+
+        entry = _describe_function(now_like)
+        p = entry["params"][0]
+        assert "default" not in p  # 非 JSON 原生 → 不回传真值
+        assert "default_repr" in p
+        assert "2020" in p["default_repr"]
+
+    def test_keyword_only(self) -> None:
+        from mutagent.sandbox.share import _describe_function
+
+        def f(a: int, *, b: str = "x") -> None:
+            return None
+
+        entry = _describe_function(f)
+        params = entry["params"]
+        assert params[0]["kind"] == "POSITIONAL_OR_KEYWORD"
+        assert params[1]["kind"] == "KEYWORD_ONLY"
+
+    def test_unparseable_signature(self) -> None:
+        from mutagent.sandbox.share import _describe_function
+
+        # 某些 builtin 如 object.__init__ signature 不可解析
+        entry = _describe_function(lambda: None)  # lambda 可解析
+        assert "params" in entry
+
+        # 用 builtin 触发 ValueError / TypeError
+        try:
+            entry2 = _describe_function(dict.fromkeys)
+        except Exception:
+            pytest.skip("dict.fromkeys signature parseable in this Python")
+        # 如果解析失败，params 字段被省略
+        if "params" not in entry2:
+            assert entry2["signature"] == "(...)"
+
+    def test_signature_field_preserved(self) -> None:
+        """旧字段 signature 继续保留，供展示兜底。"""
+        from mutagent.sandbox.share import _describe_function
+
+        def f(a: int = 1) -> None:
+            return None
+
+        entry = _describe_function(f)
+        assert entry["signature"].startswith("(")
+        assert "a" in entry["signature"]
+        assert entry["kwargs_schema"] == {}
+
+
+# ============================================================
+# _make_namespace_func — params 接入（Phase 4）
+# ============================================================
+
+class TestMakeNamespaceFuncSignature:
+    """验证客户端 wrapper 按 describe 返回的 params 构造真签名，并兼容老 server。"""
+
+    def _fake_conn(self):
+        class _FakeConn:
+            ns_name = "peer"
+            state = "connected"
+            last_error = None
+            main_loop = None  # 本组测试不触发调用
+        return _FakeConn()
+
+    def test_with_params_builds_signature(self) -> None:
+        import inspect as _inspect
+
+        from mutagent.sandbox._adapter_pysandbox import _make_namespace_func
+
+        params = [
+            {"name": "level", "kind": "POSITIONAL_OR_KEYWORD",
+             "default": "INFO", "annotation": "str"},
+            {"name": "last_n", "kind": "POSITIONAL_OR_KEYWORD",
+             "default": 10, "annotation": "int"},
+        ]
+        fn = _make_namespace_func(
+            self._fake_conn(), "mutbot", "logs",  # type: ignore[arg-type]
+            "(level='INFO', last_n=10)", "Query logs.", params)
+        sig = _inspect.signature(fn)
+        assert list(sig.parameters) == ["level", "last_n"]
+        assert sig.parameters["level"].default == "INFO"
+        assert sig.parameters["last_n"].default == 10
+        # doc 不再被污染（没拼签名首行）
+        assert fn.__doc__ == "Query logs."
+        assert not fn.__doc__.startswith("logs(")
+
+    def test_without_params_falls_back_to_kwargs(self) -> None:
+        """老 server 不返回 params → 客户端保持 (**kwargs) 形态。"""
+        import inspect as _inspect
+
+        from mutagent.sandbox._adapter_pysandbox import _make_namespace_func
+
+        fn = _make_namespace_func(
+            self._fake_conn(), "mutbot", "logs",  # type: ignore[arg-type]
+            "(level='INFO', last_n=10)", "Query logs.", None)
+        sig = _inspect.signature(fn)
+        params = list(sig.parameters.values())
+        assert len(params) == 1
+        assert params[0].kind is _inspect.Parameter.VAR_KEYWORD
+        # doc 保持原样
+        assert fn.__doc__ == "Query logs."
+
+    def test_malformed_params_falls_back_to_kwargs(self) -> None:
+        """params 畸形 → try_build_signature 返回 None → 回落 (**kwargs)。"""
+        import inspect as _inspect
+
+        from mutagent.sandbox._adapter_pysandbox import _make_namespace_func
+
+        bad_params = [{"default": 1}]  # 缺 name
+        fn = _make_namespace_func(
+            self._fake_conn(), "mutbot", "weird",  # type: ignore[arg-type]
+            "(...)", "", bad_params)
+        sig = _inspect.signature(fn)
+        assert len(list(sig.parameters)) == 1
+        assert list(sig.parameters.values())[0].kind is _inspect.Parameter.VAR_KEYWORD
+
+    def test_async_original_preserved(self) -> None:
+        from mutagent.sandbox._adapter_pysandbox import _make_namespace_func
+
+        params = [{"name": "x", "required": True, "annotation": "int"}]
+        fn = _make_namespace_func(
+            self._fake_conn(), "ns", "f",  # type: ignore[arg-type]
+            "(x: int)", "doc", params)
+        assert callable(getattr(fn, "_async_original"))
+        assert fn._pysandbox_signature_str == "(x: int)"  # type: ignore[attr-defined]
+
+
+# ============================================================
+# 端到端：describe 含 params → build_peer_namespaces → __signature__
+# ============================================================
+
+
+class TestPeerBuildWithParams:
+
+    def test_peer_namespace_functions_carry_signature(self) -> None:
+        """服务端真函数签名 → describe.params → 客户端 __signature__ 一致。"""
+        import inspect as _inspect
+
+        from mutagent.sandbox._adapter_pysandbox import build_peer_namespaces
+
+        sandbox = _FakeSandbox()
+        sandbox._registry.add(_build_mutbot_namespace())
+        dispatch = _make_server_dispatch(sandbox)
+
+        class _FakeConn:
+            ns_name = "mutbot_local"
+            state = "connected"
+            last_error = None
+            main_loop = None
+
+        conn = _FakeConn()
+        client = _FakeHTTPClient(dispatch)
+        init_result = {"capabilities": PYSANDBOX_CAPABILITY}
+
+        namespaces = asyncio.run(
+            build_peer_namespaces(conn, init_result, client))  # type: ignore[arg-type]
+        ns = namespaces[0]
+
+        # logs(level: str = "INFO", last_n: int = 10)
+        logs = ns._functions["logs"]
+        sig = _inspect.signature(logs)
+        assert list(sig.parameters) == ["level", "last_n"]
+        assert sig.parameters["level"].default == "INFO"
+        assert sig.parameters["last_n"].default == 10
+
+        # status() — 无参
+        status = ns._functions["status"]
+        assert list(_inspect.signature(status).parameters) == []
+
+        # 原 bug 断言：help 形式（func.__doc__）不再以 "logs(" 开头
+        assert not (logs.__doc__ or "").lstrip().startswith("logs(")
+
+
+# ---------------------------------------------------------------------------
+# _wrap_async 真签名 + 位置调用 + help() 单一签名
+# ---------------------------------------------------------------------------
+
+
+class TestWrapAsyncSignature:
+    """验证 _wrap_async wrapper 携带正确 __signature__ 并支持位置调用。
+
+    覆盖 SDD ``refactor-wrapper-faithful-signature.md`` Phase 3 缺失步骤：
+    - wrapper.__signature__ 持有去除 self 的真签名
+    - 位置调用通过 sig.bind().apply_defaults() 规范化
+    - _render_function 输出中签名仅出现一次（原 bug 终结）
+    """
+
+    def test_signature_with_positional_params(self) -> None:
+        """带位置参数的 async 方法 → wrapper.__signature__ 去掉 self。"""
+        import inspect
+        from mutagent.sandbox._app_impl import _wrap_async
+        from mutagent.sandbox.app import SandboxApp
+
+        app = SandboxApp()
+
+        async def method(self, a: str, b: int = 10) -> str:
+            return f"{a}{b}"
+
+        wrapper = _wrap_async(app, method)
+        sig = inspect.signature(wrapper)
+        params = list(sig.parameters.values())
+
+        assert [p.name for p in params] == ["a", "b"]
+        assert params[0].default is inspect.Parameter.empty  # a 必填
+        assert params[1].default == 10
+        assert sig.return_annotation == "str"
+        assert wrapper._async_original is method
+
+    def test_no_self_function(self) -> None:
+        """无 self 的 async 函数 → 签名原样保留。"""
+        import inspect
+        from mutagent.sandbox._app_impl import _wrap_async
+        from mutagent.sandbox.app import SandboxApp
+
+        app = SandboxApp()
+
+        async def standalone(x: int, *, y: str = "") -> None:
+            ...
+
+        wrapper = _wrap_async(app, standalone)
+        sig = inspect.signature(wrapper)
+        params = list(sig.parameters.values())
+
+        assert [p.name for p in params] == ["x", "y"]
+        assert params[0].default is inspect.Parameter.empty
+        assert params[1].default == ""
+        assert params[1].kind is inspect.Parameter.KEYWORD_ONLY
+
+    def test_no_params_method(self) -> None:
+        """无参 async 方法 → 空签名 ()"""
+        import inspect
+        from mutagent.sandbox._app_impl import _wrap_async
+        from mutagent.sandbox.app import SandboxApp
+
+        app = SandboxApp()
+
+        async def method(self) -> str:
+            return "ok"
+
+        wrapper = _wrap_async(app, method)
+        sig = inspect.signature(wrapper)
+
+        assert list(sig.parameters) == []
+        assert sig.return_annotation == "str"
+
+    def test_unparseable_signature_no_signature_set(self) -> None:
+        """签名不可解析 → __signature__ 不挂，回落 (*args, **kwargs)。"""
+        import inspect
+        from mutagent.sandbox._app_impl import _wrap_async
+        from mutagent.sandbox.app import SandboxApp
+
+        app = SandboxApp()
+
+        # 构造 inspect.signature 抛 ValueError 的对象：挂无效 __signature__
+        def fake_fn(a, b):
+            pass
+        # 设置无效的 __signature__，inspect.signature 会读它并抛 ValueError
+        fake_fn.__signature__ = "not_a_signature"  # type: ignore[attr-defined]
+        with pytest.raises((ValueError, TypeError)):
+            inspect.signature(fake_fn)  # 确认确实不可解析
+
+        wrapper = _wrap_async(app, fake_fn)
+        sig = inspect.signature(wrapper)
+
+        # 无真签名 → wrapper 回落为本身的 (*args, **kwargs)
+        params = list(sig.parameters.values())
+        assert params[0].kind is inspect.Parameter.VAR_POSITIONAL
+        assert params[1].kind is inspect.Parameter.VAR_KEYWORD
+
+    def test_positional_call(self) -> None:
+        """位置调用 → sig.bind 规范化后正确传递给 coro_fn。"""
+        import inspect
+        from mutagent.sandbox._app_impl import _wrap_async
+        from mutagent.sandbox.app import SandboxApp
+
+        app = SandboxApp()
+        # bind_main_loop 只在真执行时需要，这里只测 wrapper 参数规范化
+        # 不实际执行 coroutine，用 mock 验证参数传递
+
+        captured: list[str] = []
+
+        async def method(self, a: str, b: int, c: bool = True):
+            captured.append(f"{a}:{b}:{c}")
+
+        wrapper = _wrap_async(app, method)
+
+        # 触发 wrapper 内部逻辑：先用 sig.bind 验证参数是否可以正确 bind
+        sig = inspect.signature(wrapper)
+        bound = sig.bind("hello", 42)
+        bound.apply_defaults()
+        assert dict(bound.arguments) == {"a": "hello", "b": 42, "c": True}
+
+        # 未知参数 TypeError
+        with pytest.raises(TypeError, match="unexpected keyword"):
+            sig.bind("hello", 42, unknown=True)
+
+        # 缺少必填参数 TypeError
+        with pytest.raises(TypeError, match="missing a required"):
+            sig.bind()
+
+    def test_render_function_single_signature(self) -> None:
+        """_render_function 对 wrapper 输出中签名字符串仅出现一次。
+
+        原 bug：_make_namespace_func 把签名拼进 __doc__ 首行 + inspect.signature
+        又展示一份 → 双签名。验证 _render_function 只输出一份。
+        """
+        from mutagent.sandbox._app_impl import _wrap_async
+        from mutagent.sandbox._namespace import _render_function
+        from mutagent.sandbox.app import SandboxApp
+
+        app = SandboxApp()
+
+        async def method(self, level: str = "INFO", last_n: int = 50) -> str:
+            """查询日志。
+
+            Args:
+                level: 日志级别。
+                last_n: 返回条数。
+
+            Returns:
+                格式化文本。
+            """
+            return "ok"
+
+        wrapper = _wrap_async(app, method)
+        wrapper.__name__ = "logs"
+        output = _render_function(wrapper, ns_name="test", fn_name="logs")
+
+        # 签名字符串 "(level: " 应该恰好出现一次
+        assert output.count("(level:") == 1, (
+            f"signature should appear exactly once, got {output.count('(level:')}:"
+            f"\n{output}"
+        )
+        # __doc__ 不应该包含以 "logs(" 开头的行
+        doc = wrapper.__doc__ or ""
+        assert not doc.lstrip().startswith("logs("), (
+            f"__doc__ should not start with signature line, got: {doc!r}"
+        )

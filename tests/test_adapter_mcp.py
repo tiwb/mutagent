@@ -1103,3 +1103,107 @@ class TestListToolsMetadata:
         conn = MCPConnection("fs", {"transport": "stdio", "command": "x"}, loop)
         # 还未 reconnect
         assert conn.list_tools_metadata() == []
+
+
+# ============================================================
+# _make_tool_func — 真签名 (__signature__) 接入
+# ============================================================
+
+class TestMakeToolFuncSignature:
+    """验证 _make_tool_func 按 input_schema 构造真签名、支持位置调用与默认值。"""
+
+    def _make_func(self, tool_name: str, schema: dict, *,
+                    call_result: object = "ok"):
+        """构造 tool_func，不真启事件循环（把 call_with_retry 替换成 stub）。"""
+        import inspect as _inspect
+
+        from mutagent.sandbox import _adapter_mcp
+
+        # 伪造 MCPConnection：_make_tool_func 只在调用时用到 conn.main_loop /
+        # conn.client / conn.ensure_connected；本组测试不触发调用分支，所以
+        # 可以直接传最小对象。
+        class _DummyConn:
+            main_loop = None
+            client = None
+
+            async def ensure_connected(self): return None
+            def mark_disconnected(self, *a, **kw): return None
+            async def reconnect(self): return None
+
+        fn = _adapter_mcp._make_tool_func(
+            _DummyConn(), tool_name, "desc", schema)  # type: ignore[arg-type]
+        return fn, _inspect
+
+    def test_required_only_positional_signature(self):
+        schema = {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        }
+        fn, _inspect = self._make_func("read_file", schema)
+        sig = _inspect.signature(fn)
+        assert list(sig.parameters) == ["path"]
+        assert sig.parameters["path"].kind == _inspect.Parameter.POSITIONAL_OR_KEYWORD
+        assert sig.parameters["path"].annotation == "str"
+        # help 看到的是单份真签名（不依赖 doc 拼接）
+        assert "(**kwargs" not in str(sig)
+
+    def test_required_then_optional_with_default(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "offset": {"type": "integer", "default": 0},
+                "limit": {"type": "integer", "default": 100},
+            },
+            "required": ["path"],
+        }
+        fn, _inspect = self._make_func("read", schema)
+        sig = _inspect.signature(fn)
+        assert list(sig.parameters) == ["path", "offset", "limit"]
+        assert sig.parameters["offset"].default == 0
+        assert sig.parameters["limit"].default == 100
+        # 位置调用能 bind
+        bound = sig.bind("a.txt", 10)
+        bound.apply_defaults()
+        assert bound.arguments == {"path": "a.txt", "offset": 10, "limit": 100}
+
+    def test_unknown_kwarg_raises_typeerror(self):
+        schema = {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        }
+        fn, _inspect = self._make_func("read", schema)
+        # sig.bind 层抛 TypeError；wrapper 内部用 bind,所以调用时也会抛。
+        with pytest.raises(TypeError):
+            _inspect.signature(fn).bind(bogus=1)
+
+    def test_malformed_schema_downgrades_to_keyword_only(self):
+        # required 夹在 optional 后 → 降级为 kw-only（保证可构造）
+        schema = {
+            "properties": {
+                "a": {"type": "integer", "default": 0},
+                "b": {"type": "string"},
+            },
+            "required": ["b"],
+        }
+        fn, _inspect = self._make_func("weird", schema)
+        sig = _inspect.signature(fn)
+        assert sig.parameters["b"].kind == _inspect.Parameter.KEYWORD_ONLY
+
+    def test_preserves_mcp_metadata_attributes(self):
+        schema = {
+            "type": "object",
+            "properties": {"x": {"type": "string"}},
+            "required": [],
+        }
+        fn, _ = self._make_func("probe", schema)
+        assert getattr(fn, "_mcp_input_schema") == schema
+        assert getattr(fn, "_mcp_description") == "desc"
+        assert callable(getattr(fn, "_async_original"))
+
+    def test_empty_schema_has_empty_signature(self):
+        fn, _inspect = self._make_func("ping", {"type": "object"})
+        sig = _inspect.signature(fn)
+        assert list(sig.parameters) == []

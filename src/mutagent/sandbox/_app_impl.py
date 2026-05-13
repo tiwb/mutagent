@@ -146,7 +146,7 @@ def _wrap_async(app: SandboxApp, coro_fn: Any) -> Any:
       签名: ``(fn_name: str, future: concurrent.futures.Future) -> Any``
       返回值作为 wrapper 返回值。未设置时超时抛 TimeoutError。
     """
-    def wrapper(**kwargs: Any) -> Any:
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
         loop = getattr(app, '_async_loop', None)
         if loop is None:
             raise RuntimeError(
@@ -162,19 +162,50 @@ def _wrap_async(app: SandboxApp, coro_fn: Any) -> Any:
                 "the target event loop thread; use await or call from worker thread"
             )
 
+        # 参数规范化：有真签名时 bind 位置参数 + 填充默认值
+        if _sig is not None:
+            bound = _sig.bind(*args, **kwargs)
+            bound.apply_defaults()
+            call_kwargs: dict[str, Any] = dict(bound.arguments)
+        else:
+            if args:
+                raise TypeError(
+                    f"{_fn_name}() takes 0 positional arguments "
+                    f"but {len(args)} {'was' if len(args) == 1 else 'were'} given"
+                )
+            call_kwargs = kwargs
+
         timeout = getattr(app, '_wrap_async_timeout', None) or 120
         on_timeout = getattr(app, '_on_wrap_async_timeout', None)
 
-        fn_name = getattr(coro_fn, '__name__', '?')
-        future = asyncio.run_coroutine_threadsafe(coro_fn(**kwargs), loop)
+        future = asyncio.run_coroutine_threadsafe(coro_fn(**call_kwargs), loop)
         try:
             return future.result(timeout=timeout)
         except TimeoutError:
             if future.done():
                 return future.result()
             if on_timeout is not None:
-                return on_timeout(fn_name, future)
+                return on_timeout(_fn_name, future)
             raise
+
+    # ---------- 真签名 + 位置调用支持 ----------
+    # 从 coro_fn 提取 inspect.Signature，去掉 self 后用于:
+    # (a) wrapper.__signature__ → help() 展示真签名
+    # (b) sig.bind().apply_defaults() → 位置参数 → kwargs 规范化
+    # 签名不可解析时 _sig 为 None，wrapper 回落为仅 (**kwargs)。
+    try:
+        orig_sig = inspect.signature(coro_fn)
+        params = list(orig_sig.parameters.values())
+        if params and params[0].name == "self":
+            params = params[1:]
+        _sig: inspect.Signature | None = inspect.Signature(
+            params, return_annotation=orig_sig.return_annotation
+        )
+    except (ValueError, TypeError):
+        _sig = None
+
+    if _sig is not None:
+        wrapper.__signature__ = _sig  # type: ignore[attr-defined]
 
     # 暴露原 coroutine 函数：异步上下文（如 share.py 的 RPC handler）
     # 检测到该属性后可直接 await，跳过 sync wrapper 的 future 调度。

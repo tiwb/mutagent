@@ -808,6 +808,11 @@ def _make_tool_func(conn: MCPConnection, tool_name: str,
 
     所有 IO 走 ``run_coroutine_threadsafe`` 回到 setup 时捕获的 main_loop
     （httpx.AsyncClient 资源绑定约束）。
+
+    签名层：根据 ``input_schema`` 构造真签名并挂到 ``__signature__``（见
+    refactor-wrapper-faithful-signature.md）；wrapper 内用 ``sig.bind`` 把
+    位置调用规范化为 kwargs 后再走 RPC。构造失败时回落为
+    ``(**kwargs)`` wrapper。
     """
     properties = input_schema.get("properties", {})
     required = set(input_schema.get("required", []))
@@ -836,16 +841,37 @@ def _make_tool_func(conn: MCPConnection, tool_name: str,
             assert conn.client is not None
             return await conn.client.call_tool(tool_name, kwargs)
 
+    # 先构真签名（失败回落 → 旧形态 ``(**kwargs)``）
+    from mutagent.sandbox._signature import (
+        mcp_schema_to_specs,
+        try_build_signature,
+    )
+    sig = try_build_signature(
+        mcp_schema_to_specs(input_schema),
+        context=f"MCP tool {tool_name!r}")
+
     # _async_original: 供 share.py:_handle_call 等在事件循环线程上的
     # 调用方直接 await，避免 sync wrapper 的 run_coroutine_threadsafe
     # + future.result() 同线程死锁（与 _wrap_async 的 _async_original 模式一致）。
     async def _tool_async(**kwargs: Any) -> Any:
         return await call_with_retry(kwargs)
 
-    def tool_func(**kwargs: Any) -> Any:
-        future = asyncio.run_coroutine_threadsafe(
-            call_with_retry(kwargs), conn.main_loop)
-        return future.result(timeout=120)
+    if sig is not None:
+        _bind_sig = sig
+
+        def tool_func(*args: Any, **kwargs: Any) -> Any:
+            bound = _bind_sig.bind(*args, **kwargs)
+            bound.apply_defaults()
+            future = asyncio.run_coroutine_threadsafe(
+                call_with_retry(dict(bound.arguments)), conn.main_loop)
+            return future.result(timeout=120)
+
+        tool_func.__signature__ = sig  # type: ignore[attr-defined]
+    else:
+        def tool_func(**kwargs: Any) -> Any:  # type: ignore[misc]
+            future = asyncio.run_coroutine_threadsafe(
+                call_with_retry(kwargs), conn.main_loop)
+            return future.result(timeout=120)
 
     tool_func.__name__ = tool_name
     tool_func.__doc__ = doc
