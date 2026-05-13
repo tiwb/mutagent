@@ -378,6 +378,32 @@ class TestButtonStates:
         assert _state_tag_color("failed") == "red"
         assert _state_tag_color("disconnected") == "default"
 
+    def test_state_tag_text_truncates_long_reason_to_60(self):
+        """R3：failed reason 截断长度从 50 统一为 60。"""
+        from mutagent.webui._settings_mcp import _state_tag_text
+        long_err = "x" * 200
+        conn = _FakeConn("a", state="failed", last_error=long_err)
+        text = _state_tag_text("failed", conn)
+        # 前缀 'failed: ' + 60 字符 reason = 68（reason 末尾有 '...' 响铃）
+        assert text.startswith("failed: ")
+        reason = text[len("failed: "):]
+        assert len(reason) == 60
+        assert reason.endswith("...")
+
+    def test_state_tag_text_matches_format_state_label(self):
+        """R3：同一 failed ns 上，文本端与 UI 端的 reason 截断结果一致。"""
+        from mutagent.sandbox._namespace import _format_state_label
+        from mutagent.webui._settings_mcp import _state_tag_text
+        long_err = ("a" * 80) + "\nsecond line should be ignored"
+        conn = _FakeConn("a", state="failed", last_error=long_err)
+
+        ui_text = _state_tag_text("failed", conn)
+        text_label = _format_state_label("failed", long_err)
+        # UI: 'failed: <reason>'；文本端：'[failed: <reason>]'—— <reason> 一致
+        ui_reason = ui_text[len("failed: "):]
+        text_reason = text_label[len("[failed: "):-1]
+        assert ui_reason == text_reason
+
 
 # ─────────────────────────────────────────────────────────────
 #  Save 横幅 — 配置变更检测
@@ -621,6 +647,10 @@ class TestFunctionDetailRendering:
         assert _fn_detail(tool, "tool").startswith("tool(level: str = 'info') -> str")
 
     def test_fn_detail_suppresses_required_when_schema_has_default(self):
+        """R3 后 _fn_detail 不再手拼 ``Parameters:`` 段——
+        防止旧版本在 schema 已有 default 时付 (required) 的 bug 自然消失。
+        约束行交给计划中的 ``format_param_schema_lines``（iter3）统一输出。
+        """
         def tool() -> None:
             return None
 
@@ -642,9 +672,9 @@ class TestFunctionDetailRendering:
         }
 
         detail = _fn_detail(tool, "browser_console_messages")
-        assert "level: string (required)" not in detail
-        assert "  level: string" in detail
-        assert "  target: string (required)" in detail
+        # R3 后不再有手拼的 Parameters: 表
+        assert "Parameters:" not in detail
+        assert "(required)" not in detail
 
     def test_fn_detail_uses_pysandbox_signature_fallback(self):
         def tool(**kwargs) -> None:

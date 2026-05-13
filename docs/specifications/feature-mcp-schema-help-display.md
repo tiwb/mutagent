@@ -1,6 +1,6 @@
 # MCP Schema 字段在 help() 中完整展示
 
-**状态**：✅ Phase 1-2a 完成（含 iter1 修正），Phase 2b 待 Refactor
+**状态**：✅ Phase 1-2a 完成（含 iter1 修正），Phase 2b 前置已满足（Refactor R3 完成）
 **日期**：2026-05-13
 **类型**：功能设计
 **前置**：`bugfix-mcp-optional-param-binding.md`（已完成 Phase 1-4）
@@ -260,17 +260,21 @@ Args:
 `(required)` 标记。这个信息 signature 已经表达（无 default），与「docstring
 不重复 signature 已表达信息」原则冲突，**最终要移除**。
 
-**但移除时机必须等到 `refactor-namespace-describe-api.md` 完成之后**。原因：
-Settings Panel 的 `_fn_detail` 当前可能直接从 docstring 字符串里识别
-`(required)` 字样做视觉强调。Refactor 把消费者迁移到
-`ParamDescr.required` 字段之前就移除，会静默丢失 UI 信息。
+**但移除时机必须等到 Settings Panel `_fn_detail` 完成消费侧迁移
+（`refactor-namespace-describe-api.md` R3）之后**。原因：
+Settings Panel 的 `_fn_detail` 早期版本从 docstring 字符串里识别
+`(required)` 字样做视觉强调。R3 已删除手拼 `Parameters:` 段，消费者
+直接读 `inspect.signature(fn)` / `fn._mcp_input_schema['required']`，不再依赖
+`(required)` 文案。此前置在本 Refactor R3 完成后已满足，Phase 2b 可启动。
 
 因此拆成两步：
 
 - **Phase 2a**（本 spec 主体，可立即落地）：接入 docstring 约束后缀，**保留
   `(required)` 标记**原样不动。
-- **Phase 2b**（Refactor 完成后做）：所有消费者切到 `ParamDescr.required`
-  字段之后，回头删掉 `(required)` 文案，跟 `default` 的处理逻辑对齐。
+- **Phase 2b**（本 Refactor R3 完成后可做）：消费者已不再依赖 docstring 的
+  `(required)` 文案，直接读
+  `fn._mcp_input_schema['required']` / `inspect.signature(fn)` 即可；回头
+  删掉 `(required)` 文案，跟 `default` 的处理逻辑对齐。
 
 ### 新函数 API
 
@@ -323,9 +327,9 @@ def format_param_description_suffix(
 - [x] iter1 修正：约束后缀独立缩进 8 空格（四分支格式）
 - [x] iter1 修正：`_MISSING` sentinel 跨 sharing 身份保留（`default_missing` 标记位）
 
-**Phase 2b：`(required)` 清理（依赖 Refactor 完成）**
+**Phase 2b：`(required)` 清理（前置已满足，可启动）**
 
-- [ ] 前置确认：Settings Panel `_fn_detail` 已迁移到 `ParamDescr.required`
+- [ ] 前置确认：Settings Panel `_fn_detail` 已完成消费侧迁移（本文未继续，已由 refactor-namespace-describe-api R3 交付）
 - [ ] 移除 `_make_tool_func` 里 `(required)` 标记追加逻辑
 - [ ] 更新 Phase 2a 集成测试断言
 - [ ] 手工 review Settings Panel 和 `help()` 输出
@@ -334,7 +338,7 @@ def format_param_description_suffix(
 
 - Phase 1 无外部依赖，可立即开工。
 - Phase 2a 在 Phase 1 合并后即可开工。
-- Phase 2b 依赖 `refactor-namespace-describe-api.md` 的 Settings Panel 迁移完成。在此之前不要启动。
+- Phase 2b 前置 “Settings Panel `_fn_detail` 已完成消费侧迁移” 已由 `refactor-namespace-describe-api.md` R3 交付，可启动。
 
 **遗留**
 
@@ -359,4 +363,5 @@ Phase 3（嵌套 / 罕见字段展开）暂不实施。playwright 21 tool 中无
 ## 迭代
 
 - **iter1**：`feature-mcp-schema-help-display.iter1.md` — 验收反馈与修正（方案 B 独立缩进行、`_MISSING` sentinel 丢失、上游 default 双写）
-- **iter2**：`feature-mcp-schema-help-display.iter2.md` — Google-style 对齐（去掉破折号、评估 Args 参数头格式与类型词汇）
+- **iter2**：`feature-mcp-schema-help-display.iter2.md` — Google-style 参数头对齐（方案 B `name (type): desc` + Python 类型词汇，依赖 Phase 2b 完成）
+- **iter3**：`feature-mcp-schema-help-display.iter3.md` — 约束行规则化（key 原词 + value Python repr，抽纯函数 `format_param_schema_lines` 供 `help()` 与 Settings Panel 共用，订正本 spec Q2 消费侧约定）

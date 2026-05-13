@@ -47,45 +47,22 @@ PYSANDBOX_CAPABILITY: dict[str, Any] = {"pysandbox": {"version": "1"}}
 def _all_namespaces(sandbox: "SandboxApp") -> dict[str, "Namespace"]:
     """收集 sandbox 当前可见的全部 namespace（拍平成单 provider）。
 
-    包含两类来源：
-    1. 外部注入（``add_namespace``）—— 走 ``_registry._namespaces``
-    2. NamespaceTools Declaration 子类自动发现 —— 走 ``_build_declaration_namespaces``
+    与 ``_build_namespace_dict``（exec_code 路径）共享合并软辑——
+    均走 :func:`mutagent.sandbox._app_impl._collect_namespaces`，保证
+    export 函数集与本地可见函数集严格一致。
 
-    合并策略与 ``_build_namespace_dict``（exec_code 路径）严格一致：
-    用同一个 temp_registry 按 decl 先 + external 后的顺序装入，
-    同名多 provider 时拍平成单 :class:`Namespace`：
-
+    ``MergedNamespaceView`` 拍平成单 :class:`Namespace`：
     - ``description`` / ``provider_kind`` 取 :func:`primary_of`
     - ``functions`` 集 = view 合并后的 active 集，不丢 external 的非冲突函数
-
-    这保证 export 函数集与本地 ``exec_code`` 可见函数集严格一致。
     """
-    # 复用 _app_impl 的 declaration 发现逻辑，避免重复实现
-    from mutagent.sandbox._app_impl import _build_declaration_namespaces
-    from mutagent.sandbox._namespace import (
-        MergedNamespaceView,
-        NamespaceRegistry,
-        flatten_view,
-    )
-
-    decl_namespaces = _build_declaration_namespaces(sandbox)
-    registry = getattr(sandbox, "_registry", None)
-
-    temp_registry = NamespaceRegistry()
-    # decl 先注册 → 本地 NamespaceTools 优先于外部 peer（与 exec_code 同序）
-    for ns in decl_namespaces.values():
-        temp_registry.add(ns)
-    if registry is not None:
-        for providers in registry._namespaces.values():
-            for p in providers:
-                temp_registry.add(p)
+    from mutagent.sandbox._app_impl import _collect_namespaces
+    from mutagent.sandbox._namespace import MergedNamespaceView, flatten_view
 
     result: dict[str, "Namespace"] = {}
-    for name in temp_registry._namespaces:
-        ns = temp_registry.get(name)
+    for name, ns in _collect_namespaces(sandbox).items():
         if isinstance(ns, MergedNamespaceView):
             result[name] = flatten_view(ns)
-        elif ns is not None:
+        else:
             result[name] = ns
     return result
 

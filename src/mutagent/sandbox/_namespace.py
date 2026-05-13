@@ -508,8 +508,72 @@ class NamespaceRegistry:
 # 渲染函数 — 分层显示
 # ---------------------------------------------------------------------------
 
-def _format_state_label(state: str | None, error: str | None) -> str:
-    """渲染连接状态标签。connected / None 不显示标签。"""
+# ---------------------------------------------------------------------------
+# 渲染前的最后一层数据 —— 连接状态归一化
+# ---------------------------------------------------------------------------
+
+# failed 时 reason 的统一截断长度（文本端原为 60、UI 端原为 50，
+# 收敛到 60）——两端在同一 failed ns 上最终展示的 reason 内容等价。
+_REASON_TRUNC = 60
+
+
+def connection_status(
+    ns: "Namespace | MergedNamespaceView",
+) -> tuple[str | None, str | None]:
+    """返回 渲染前的连接状态两元组 ``(state, reason)``。
+
+    - 非 MCP namespace（无 ``_connection``）返回 ``(None, None)``
+    - MCP namespace 返回 ``(ns.connection_state, reason)``
+    - ``reason`` 仅 ``state == "failed"`` 时为非空——取 ``connection_error`` 首行
+      并截断到 60 字符（超长时后缀 ``...``）
+
+    这是文本渲染（:func:`_format_state_label`）与 UI 渲染（Settings
+    Panel 的 state tag）共用的唯一数据源，确保两端在同一 failed
+    namespace 上拿到的 reason 内容严格一致。
+    """
+    # 非 MCP namespace 没有 _connection，也不对外暴露状态
+    if getattr(ns, "_connection", None) is None:
+        return (None, None)
+    state = ns.connection_state
+    if state != "failed":
+        return (state, None)
+    err = ns.connection_error or ""
+    reason = err.strip().splitlines()[0] if err else ""
+    if len(reason) > _REASON_TRUNC:
+        # 固定 "..." 3 字符，使最终长度为 _REASON_TRUNC
+        reason = reason[:_REASON_TRUNC - 3] + "..."
+    return (state, reason or None)
+
+
+def _format_state_label(
+    ns_or_state: "Namespace | MergedNamespaceView | str | None",
+    error: str | None = None,
+    *,
+    _legacy: bool = False,
+) -> str:
+    """渲染连接状态标签（文本端）。connected / None 不显示标签。
+
+    支持两种调用形式：
+
+    - ``_format_state_label(ns)``（推荐）—— 内部走 :func:`connection_status`，
+      与 UI 端共用同一 reason 归一化路径。
+    - ``_format_state_label(state, error)``（旧 API，保留兼容）—— 直接传
+      ``(state, error)`` 两个原始字段；内部自行检查签名形态后走相同
+      的格式化逻辑。
+    """
+    # 传 ns 对象 → 走 connection_status
+    if isinstance(ns_or_state, (Namespace, MergedNamespaceView)):
+        state, reason = connection_status(ns_or_state)
+    else:
+        # 旧 API：第一参是 state 字符串 / None，第二参是 error
+        state = ns_or_state
+        reason = None
+        if state == "failed" and error:
+            r = error.strip().splitlines()[0]
+            if len(r) > _REASON_TRUNC:
+                r = r[:_REASON_TRUNC - 3] + "..."
+            reason = r or None
+
     if state in (None, "connected"):
         return ""
     if state == "connecting":
@@ -517,9 +581,6 @@ def _format_state_label(state: str | None, error: str | None) -> str:
     if state == "disconnected":
         return "[disconnected]"
     if state == "failed":
-        reason = (error or "").strip().splitlines()[0] if error else ""
-        if len(reason) > 60:
-            reason = reason[:57] + "..."
         return f"[failed: {reason}]" if reason else "[failed]"
     return f"[{state}]"
 
@@ -544,21 +605,42 @@ def _displayed_providers(ns: "NamespaceLike") -> list[Namespace]:
 
 
 def _render_registry(registry: "NamespaceRegistry") -> str:
-    """Layer 1: 列所有 namespace（首行摘要）。"""
+    """Layer 1: 列所有 namespace（首行摘要）—— registry 视角。
+
+    该入口仅接受 registry，维持史用消费者（测试等）的向后兼容。
+    sandbox-bound help 路径请走 :func:`_render_registry_from_namespaces`。
+    """
     names = sorted(registry._namespaces.keys())
-    if not names:
+    namespaces: list[NamespaceLike] = []
+    for name in names:
+        ns = registry.get(name)
+        if ns is not None:
+            namespaces.append(ns)
+    return _render_registry_from_namespaces(namespaces)
+
+
+def _render_registry_from_namespaces(
+    namespaces: list["NamespaceLike"],
+) -> str:
+    """Layer 1: 基于 namespace 列表（而非 registry）渲染。
+
+    为 sandbox-bound help 路径提供——sandbox 视角下的可见集已合并
+    decl + external，与 :func:`_render_registry`（registry 视角）共享同一
+    渲染格式。
+    """
+    if not namespaces:
         return "No namespaces registered."
 
+    sorted_ns = sorted(namespaces, key=lambda n: n._name)
+    names = [n._name for n in sorted_ns]
     max_name = max(len(n) for n in names)
 
     lines = ["Available namespaces:", ""]
-    for name in names:
-        ns = registry.get(name)
-        if ns is None:
-            continue
+    for ns in sorted_ns:
+        name = ns._name
         desc = _first_line(ns._description)
         count_text = _format_function_count(ns)
-        label = _format_state_label(ns.connection_state, ns.connection_error)
+        label = _format_state_label(ns)
         padded = f"{name:<{max_name}}"
         # multi-provider badge — 按 displayed（贡献函数的 provider）数算
         provider_badge = ""
@@ -606,7 +688,7 @@ def _render_namespace(ns: "NamespaceLike") -> str:
     if is_multi:
         lines.append(f"Providers ({len(displayed)}):")
         for i, p in enumerate(displayed, 1):
-            label = _format_state_label(p.connection_state, p.connection_error)
+            label = _format_state_label(p)
             label_str = f" {label}" if label else ""
             lines.append(f"  [{i}] kind={p.provider_kind}, "
                          f"state={p.connection_state or '—'}, "

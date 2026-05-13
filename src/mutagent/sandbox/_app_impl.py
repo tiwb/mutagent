@@ -13,13 +13,17 @@ import inspect
 import logging
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 import mutobj
 import mutagent
 from mutagent.sandbox.app import SandboxApp, CleanupCallback
 from mutagent.sandbox._engine import execute
-from mutagent.sandbox._namespace import Namespace, NamespaceRegistry
+from mutagent.sandbox._namespace import (
+    MergedNamespaceView,
+    Namespace,
+    NamespaceRegistry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -232,6 +236,54 @@ SandboxApp.bind_main_loop = _bind_main_loop  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
+# Namespace 收集 — sandbox 可见集合的单一来源
+# ---------------------------------------------------------------------------
+
+def _collect_namespaces(
+    sandbox: SandboxApp,
+) -> dict[str, Namespace | MergedNamespaceView]:
+    """sandbox 可见的全部 namespace（decl 先 + external 后，同名走 merged view）。
+
+    这是 ``_build_namespace_dict``（exec_code 路径）与 ``share.py::_all_namespaces``
+    （跨进程序列化路径）共享的单一合并入口，保证两条路径看到的 namespace 可见集
+    严格一致。
+
+    单 provider 名返回原始 :class:`Namespace`；同名 2+ providers 返回
+    :class:`MergedNamespaceView`（按「先注册先赢」解析）。
+
+    WARN-once 稳定性：
+    - 无 decl namespace 时走主 registry 的原生 view（跨调用稳定）
+    - 有 decl namespace 时走 temp_registry（每次构造新 view，WARN 按需触发）
+    """
+    decl_namespaces = _build_declaration_namespaces(sandbox)
+    registry = _get_registry(sandbox)
+
+    if not decl_namespaces:
+        # 主 registry 视图直通 —— 复用原生 MergedNamespaceView，WARN-once 稳定
+        result: dict[str, Namespace | MergedNamespaceView] = {}
+        for name in registry._namespaces:
+            ns = registry.get(name)
+            if ns is not None:
+                result[name] = ns
+        return result
+
+    # decl 先注册 → 本地 NamespaceTools 优先于外部 peer（与 exec_code 同序）
+    temp_registry = NamespaceRegistry()
+    for ns in decl_namespaces.values():
+        temp_registry.add(ns)
+    for providers in registry._namespaces.values():
+        for p in providers:
+            temp_registry.add(p)
+
+    result = {}
+    for name in temp_registry._namespaces:
+        ns = temp_registry.get(name)
+        if ns is not None:
+            result[name] = ns
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Namespace dict 构建（cache + rebuild）
 # ---------------------------------------------------------------------------
 
@@ -244,6 +296,9 @@ def _build_namespace_dict(self: SandboxApp) -> dict[str, Any]:
 
     multi-provider：同名 2+ providers 走 ``MergedNamespaceView``；
     单 provider 名仍返回 Namespace 实例。详 ``_namespace.NamespaceRegistry``。
+
+    ``help`` 键走 sandbox 视角：闭包捕获 sandbox，通过 ``iter_namespaces`` /
+    ``get_namespace`` 访问当前可见集，与 exec_code 路径严格一致。
     """
     cached = getattr(self, '_cached_ns', None)
     cached_gen = getattr(self, '_cached_gen', -1)
@@ -252,33 +307,64 @@ def _build_namespace_dict(self: SandboxApp) -> dict[str, Any]:
     if cached is not None and cached_gen == current_gen:
         return cached
 
-    registry = _get_registry(self)
-
-    # NamespaceTools（Declaration 自动发现）— 按名合入 temp registry
-    decl_namespaces = _build_declaration_namespaces(self)
-
-    # 构合完整 view：外部注入的全部 providers + decl namespaces
-    # 直接复用主 registry 的 provider list（view 实例也复用，
-    # WARN-once 状态才能跨 cache lifetime 保留。。。但 cache 按代位
-    # 重建的场景下，view 实例仍是 registry._views[name] 同一个，OK）
-    if decl_namespaces:
-        # decl 先注册 → 本地 NamespaceTools 优先于外部 peer
-        temp_registry = NamespaceRegistry()
-        for ns in decl_namespaces.values():
-            temp_registry.add(ns)
-        for providers in registry._namespaces.values():
-            for p in providers:
-                temp_registry.add(p)
-        ns_dict = temp_registry.build_namespace_dict()
-    else:
-        # 没 decl namespace 时直接走主 registry，避免 temp view 覆盖主 view、
-        # 导致 WARN-once 跨 cache 周期重复触发
-        ns_dict = registry.build_namespace_dict()
+    collected = _collect_namespaces(self)
+    ns_dict: dict[str, Any] = dict(collected)
+    ns_dict['help'] = _make_sandbox_help(self)
 
     # 缓存
     object.__setattr__(self, '_cached_ns', ns_dict)
     object.__setattr__(self, '_cached_gen', current_gen)
     return ns_dict
+
+
+def _make_sandbox_help(sandbox: SandboxApp) -> Callable:
+    """生成 sandbox-bound ``help()``。
+
+    与 ``NamespaceRegistry._make_help`` 的区别：数据源是 sandbox 而非 registry，
+    所以 Layer 1 列表包含 decl + external 合并后的完整集合（与 exec_code
+    可见集一致），而非仅外部注入的 registry 视角。
+    """
+    from mutagent.sandbox._namespace import (
+        _render_function,
+        _render_namespace,
+        _render_registry_from_namespaces,
+    )
+
+    def help(func_or_name: Any = None) -> str:
+        """查看 namespace / 函数的文档。
+
+        - help()                           列出所有 namespace
+        - help(namespace)                  namespace 完整说明 + 函数列表
+        - help(namespace.function)         函数签名 + 完整文档
+        - help("namespace.function")       同上（字符串形式）
+        """
+        # Layer 1: 列所有 namespace
+        if func_or_name is None:
+            return _render_registry_from_namespaces(
+                list(sandbox.iter_namespaces()))
+
+        # Layer 2: 聚焦某个 namespace（含 view）
+        if isinstance(func_or_name, (Namespace, MergedNamespaceView)):
+            return _render_namespace(func_or_name)
+
+        # Layer 3: 聚焦某个函数
+        if callable(func_or_name):
+            return _render_function(func_or_name)
+
+        if isinstance(func_or_name, str):
+            parts = func_or_name.split('.', 1)
+            if len(parts) == 2:
+                ns = sandbox.get_namespace(parts[0])
+                if ns is not None and parts[1] in ns._functions:
+                    return _render_function(
+                        ns._functions[parts[1]],
+                        ns_name=parts[0],
+                        fn_name=parts[1])
+            return f"(no documentation for '{func_or_name}')"
+
+        return "(no documentation)"
+
+    return help
 
 
 def _invalidate_cache(self: SandboxApp) -> None:
@@ -407,6 +493,35 @@ def _unregister_mcp_connection(self: SandboxApp, name: str) -> None:
 @mutagent.impl(SandboxApp.mcp_connections)
 def _mcp_connections(self: SandboxApp) -> dict[str, Any]:
     return dict(_get_mcp_conns(self))
+
+
+@mutagent.impl(SandboxApp.iter_namespaces)
+def _iter_namespaces(
+    self: SandboxApp,
+) -> Iterator[Namespace | MergedNamespaceView]:
+    """按名排序遍历 sandbox 可见的全部 namespace。
+
+    实现沿用 ``_build_namespace_dict`` 的缓存路径（跳过 ``help`` 键），
+    与 ``exec_code`` 内看到的集合严格一致。
+    """
+    ns_dict = _build_namespace_dict(self)
+    for name in sorted(k for k in ns_dict if k != 'help'):
+        yield ns_dict[name]
+
+
+@mutagent.impl(SandboxApp.get_namespace)
+def _get_namespace(
+    self: SandboxApp, name: str,
+) -> Namespace | MergedNamespaceView | None:
+    """按名获取 namespace；不存在返回 ``None``。与 ``iter_namespaces`` 来自同一可见集。"""
+    if name == 'help':
+        return None
+    ns_dict = _build_namespace_dict(self)
+    value = ns_dict.get(name)
+    # help 键是 callable，其他都是 Namespace / MergedNamespaceView
+    if isinstance(value, (Namespace, MergedNamespaceView)):
+        return value
+    return None
 
 
 @mutagent.impl(SandboxApp.exec_code)

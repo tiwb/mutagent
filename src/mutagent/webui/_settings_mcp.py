@@ -23,6 +23,7 @@ from mutagent.sandbox._adapter_mcp import (
     MCPConnection,
     _sanitize_ns_name,
 )
+from mutagent.sandbox._namespace import connection_status
 from mutagent.sandbox._signature import format_callable_signature
 from mutagent.webui.settings import SettingsPanel
 from mutgui import Bind, Callback, ViewBlock
@@ -367,10 +368,24 @@ def _state_tag_color(state: str) -> str:
 
 
 def _state_tag_text(state: str, conn: MCPConnection | None) -> str:
+    """UI state tag 文字。
+
+    failed 时 reason 截断和文本端统一为 60 字符（原等于 50，调宽后
+    与 :func:`mutagent.sandbox._namespace.connection_status` / ``_format_state_label``
+    输出在同一 failed ns 上严格一致）。
+
+    仍允许 conn 是 None 的史用调用形态（不需要 ns）。有 conn 时
+    直接复用 ``connection_status`` 的 reason 归一化结果——对单个
+    MCPConnection 会写一个最小 shim 凑出 ns.connection_state /
+    ns.connection_error 两个字段供纯函数读取。
+    """
     if state == "failed" and conn is not None and conn.last_error:
-        reason = conn.last_error.strip().splitlines()[0] if conn.last_error else ""
-        if len(reason) > 50:
-            reason = reason[:47] + "..."
+        # 复用纯函数 connection_status 的截断逻辑：造一个最小 ns-like shim
+        class _Shim:
+            _connection = conn  # 使 connection_status 不返 (None, None)
+            connection_state = "failed"
+            connection_error = conn.last_error
+        _, reason = connection_status(_Shim())  # type: ignore[arg-type]
         return f"failed: {reason}" if reason else "failed"
     return state
 
@@ -925,7 +940,15 @@ def _fn_signature(func: Any) -> str:
 
 
 def _fn_detail(func: Any, fn_name: str) -> str:
-    """返回函数的完整签名 + docstring 文本。"""
+    """返回函数的完整签名 + docstring 文本。
+
+    签名走 ``inspect.signature`` 统一入口（MCP tool / pysandbox wrapper 的
+    ``__signature__`` 伪装先由 ``format_callable_signature`` 处理）。此处不
+    再手拼 ``Parameters:`` 表 ——约束行由
+    ``format_param_schema_lines`` 统一输出到 docstring
+    （``feature-mcp-schema-help-display.iter3.md``）。iter3 落地前，约束信息
+    本身由 MCP tool description 以 text 形式给出。
+    """
     sig = _fn_signature(func)
     desc = getattr(func, '_mcp_description', None) or ''
     doc = (getattr(func, '__doc__', '') or '').strip()
@@ -939,29 +962,6 @@ def _fn_detail(func: Any, fn_name: str) -> str:
     if desc:
         lines.append("")
         lines.append(desc)
-
-    # MCP tool 额外展示参数表
-    schema = getattr(func, '_mcp_input_schema', None)
-    if schema and isinstance(schema, dict):
-        props = schema.get('properties', {}) or {}
-        required = set(schema.get('required', []) or [])
-        if props:
-            lines.append("")
-            lines.append("Parameters:")
-            for pname, pinfo in props.items():
-                ptype = pinfo.get('type', 'Any') if isinstance(pinfo, dict) else 'Any'
-                pdesc = pinfo.get('description', '') if isinstance(pinfo, dict) else ''
-                has_schema_default = (
-                    isinstance(pinfo, dict) and 'default' in pinfo
-                )
-                req_mark = (
-                    " (required)"
-                    if (pname in required and not has_schema_default)
-                    else ""
-                )
-                lines.append(f"  {pname}: {ptype}{req_mark}")
-                if pdesc:
-                    lines.append(f"      {pdesc}")
     return '\n'.join(lines)
 
 

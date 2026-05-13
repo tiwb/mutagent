@@ -8,12 +8,15 @@ MCP/CLI 生命周期由调用方（``connect_sources`` / 应用层）管理。
 
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable, TYPE_CHECKING
+from typing import Any, Awaitable, Callable, Iterator, TYPE_CHECKING
 
 import mutagent
 
 if TYPE_CHECKING:
-    from mutagent.sandbox._namespace import Namespace
+    from mutagent.sandbox._namespace import (
+        MergedNamespaceView,
+        Namespace,
+    )
 
 
 # 类型别名：on_remove 回调可以是 sync 或 async
@@ -141,6 +144,29 @@ class SandboxApp(mutagent.Declaration):
         Returns:
             ``{name: MCPConnection}`` 的浅拷贝。key 是原始 source 名。
             从未调用 ``register_mcp_connection`` 时返回空 dict。
+        """
+        ...
+
+    def iter_namespaces(self) -> Iterator["Namespace | MergedNamespaceView"]:
+        """按名排序遍历 sandbox 当前可见的全部 namespace。
+
+        返回的集合包含外部注入（``add_namespace``）与 NamespaceTools
+        Declaration 自动发现的合并结果，与 ``exec_code`` / ``help()``
+        路径可见集严格一致。
+
+        同名 2+ providers 时返回 :class:`MergedNamespaceView`，单 provider
+        时返回 :class:`Namespace`。这两类对象接口等价（同名 property），
+        消费者通常无需按类型分支。
+        """
+        ...
+
+    def get_namespace(
+        self, name: str
+    ) -> "Namespace | MergedNamespaceView | None":
+        """按名获取一个 namespace。
+
+        多 provider 时返回合并视图；不存在时返回 ``None``。
+        与 :meth:`iter_namespaces` 来自同一可见集。
         """
         ...
 
