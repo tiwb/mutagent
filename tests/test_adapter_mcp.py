@@ -1427,5 +1427,95 @@ class TestMakeToolFuncSignature:
         fn, _ = self._make_func("browser_console_messages", schema)
         doc = getattr(fn, "__doc__", "")
         assert "level: string (required)" not in doc
-        assert "level: string — " in doc
-        assert "target: string (required) — " in doc
+        assert "    level: string" in doc
+        assert "    target: string (required)" in doc
+
+    def test_docstring_appends_schema_constraint_suffixes(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "level": {
+                    "type": "string",
+                    "description": "Log level.",
+                    "default": "info",
+                    "enum": ["error", "warning", "info", "debug"],
+                },
+                "index": {
+                    "type": "number",
+                    "description": "Target index.",
+                    "minimum": 0,
+                    "maximum": 100,
+                },
+                "paths": {
+                    "type": "array",
+                    "description": "Local file paths.",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                    "maxItems": 10,
+                    "uniqueItems": True,
+                },
+                "metadata": {
+                    "type": "object",
+                    "description": "Extra metadata.",
+                    "additionalProperties": {"type": "string"},
+                    "propertyNames": {"pattern": "^[a-z_]+$"},
+                },
+            },
+            "required": ["level", "index"],
+        }
+        fn, _ = self._make_func("browser_console_messages", schema)
+        doc = getattr(fn, "__doc__", "")
+        assert (
+            "level: string — Log level.\n"
+            "        Allowed: error | warning | info | debug."
+            in doc
+        )
+        assert (
+            "index: number (required) — Target index.\n"
+            "        Range: 0..100."
+            in doc
+        )
+        assert (
+            "paths: array — Local file paths.\n"
+            "        Items: string. Items count: 1..10. Items must be unique."
+            in doc
+        )
+        assert (
+            "metadata: object — Extra metadata.\n"
+            "        Extra values: string. Keys match: ^[a-z_]+$."
+            in doc
+        )
+
+    def test_docstring_four_branch_layout(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "desc_and_suffix": {
+                    "type": "string",
+                    "description": "Operation to perform",
+                    "enum": ["list", "new"],
+                },
+                "desc_only": {
+                    "type": "number",
+                    "description": "Target index.",
+                },
+                "suffix_only": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                    "maxItems": 10,
+                },
+                "bare": {
+                    "type": "boolean",
+                },
+            },
+            "required": ["desc_and_suffix"],
+        }
+        fn, _ = self._make_func("browser_tabs", schema)
+        doc = getattr(fn, "__doc__", "")
+        assert "    desc_and_suffix: string (required) — Operation to perform" in doc
+        assert "        Allowed: list | new." in doc
+        assert "    desc_only: number — Target index." in doc
+        assert "    suffix_only: array — Items: string. Items count: 1..10." in doc
+        assert "    bare: boolean" in doc
+        assert "    bare: boolean — " not in doc

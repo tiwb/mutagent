@@ -506,6 +506,18 @@ class TestDescribeFunctionParams:
         assert "default_repr" in p
         assert "2020" in p["default_repr"]
 
+    def test_missing_sentinel_becomes_default_missing_flag(self) -> None:
+        from mutagent.sandbox.share import _describe_function
+        from mutagent.sandbox._signature import _MISSING
+
+        def upload(paths=_MISSING):
+            return paths
+
+        entry = _describe_function(upload)
+        p = entry["params"][0]
+        assert "default" not in p
+        assert p["default_missing"] is True
+
     def test_keyword_only(self) -> None:
         from mutagent.sandbox.share import _describe_function
 
@@ -668,6 +680,44 @@ class TestPeerBuildWithParams:
 
         # 原 bug 断言：help 形式（func.__doc__）不再以 "logs(" 开头
         assert not (logs.__doc__ or "").lstrip().startswith("logs(")
+
+    def test_peer_namespace_optional_no_default_keeps_ellipsis_signature(self) -> None:
+        import inspect as _inspect
+
+        from mutagent.sandbox._adapter_pysandbox import build_peer_namespaces
+        from mutagent.sandbox._signature import _MISSING
+
+        sandbox = _FakeSandbox()
+        ns = Namespace("mutbot", description="mutbot runtime introspection")
+
+        def browser_file_upload(paths=_MISSING) -> dict[str, Any]:
+            return {"paths": paths}
+
+        ns.register(
+            "browser_file_upload",
+            browser_file_upload,
+            browser_file_upload.__doc__ or "",
+        )
+        sandbox._registry.add(ns)
+        dispatch = _make_server_dispatch(sandbox)
+
+        class _FakeConn:
+            ns_name = "mutbot_local"
+            state = "connected"
+            last_error = None
+            main_loop = None
+
+        conn = _FakeConn()
+        client = _FakeHTTPClient(dispatch)
+        init_result = {"capabilities": PYSANDBOX_CAPABILITY}
+
+        namespaces = asyncio.run(
+            build_peer_namespaces(conn, init_result, client))  # type: ignore[arg-type]
+        peer_ns = namespaces[0]
+        upload = peer_ns._functions["browser_file_upload"]
+        sig = _inspect.signature(upload)
+        assert sig.parameters["paths"].default is _MISSING
+        assert str(sig) == "(paths=...)"
 
 
 # ---------------------------------------------------------------------------

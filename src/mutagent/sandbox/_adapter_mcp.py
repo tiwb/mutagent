@@ -814,6 +814,8 @@ def _make_tool_func(conn: MCPConnection, tool_name: str,
     位置调用规范化为 kwargs 后再走 RPC。构造失败时回落为
     ``(**kwargs)`` wrapper。
     """
+    from mutagent.sandbox._signature import format_param_description_suffix
+
     properties = input_schema.get("properties", {})
     required = set(input_schema.get("required", []))
 
@@ -823,13 +825,22 @@ def _make_tool_func(conn: MCPConnection, tool_name: str,
         for pname, pinfo in properties.items():
             ptype = pinfo.get("type", "any")
             pdesc = pinfo.get("description", "")
+            suffix = format_param_description_suffix(pinfo)
             has_schema_default = "default" in pinfo
             req_mark = (
                 " (required)"
                 if (pname in required and not has_schema_default)
                 else ""
             )
-            doc_lines.append(f"    {pname}: {ptype}{req_mark} — {pdesc}")
+            head = f"    {pname}: {ptype}{req_mark}"
+            if pdesc:
+                doc_lines.append(f"{head} — {pdesc}")
+                if suffix:
+                    doc_lines.append(f"        {suffix}")
+            elif suffix:
+                doc_lines.append(f"{head} — {suffix}")
+            else:
+                doc_lines.append(head)
     doc = '\n'.join(doc_lines)
 
     async def call_with_retry(kwargs: dict[str, Any]) -> Any:

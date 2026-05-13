@@ -20,7 +20,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
-from mutagent.sandbox._signature import format_signature
+from mutagent.sandbox._signature import _MISSING, format_signature
 from mutio.mcp.protocol import (
     INTERNAL_ERROR,
     INVALID_PARAMS,
@@ -165,7 +165,9 @@ def _describe_function(fn: Any) -> dict[str, Any]:
             if p.annotation is not inspect.Parameter.empty:
                 entry["annotation"] = _annotation_to_str(p.annotation)
             if p.default is not inspect.Parameter.empty:
-                if _default_is_json_safe(p.default):
+                if p.default is _MISSING:
+                    entry["default_missing"] = True
+                elif _default_is_json_safe(p.default):
                     entry["default"] = p.default
                 else:
                     # 非 JSON 原生默认值：只留 repr 供展示，不允许回传

@@ -15,6 +15,7 @@ from mutagent.sandbox._signature import (
     _MISSING,
     build_signature,
     format_callable_signature,
+    format_param_description_suffix,
     format_signature,
     json_type_to_annotation,
     mcp_schema_to_specs,
@@ -116,6 +117,76 @@ class TestMcpSchemaToSpecs:
         ]
 
 
+class TestFormatParamDescriptionSuffix:
+
+    def test_empty_constraints_returns_empty(self) -> None:
+        assert format_param_description_suffix({"type": "string"}) == ""
+
+    def test_formats_supported_constraints_in_stable_order(self) -> None:
+        suffix = format_param_description_suffix({
+            "type": "array",
+            "enum": ["alpha", "beta"],
+            "const": "v1",
+            "minimum": 0,
+            "maximum": 100,
+            "multipleOf": 0.5,
+            "minLength": 1,
+            "maxLength": 8,
+            "pattern": "^[a-z_]+$",
+            "format": "email",
+            "items": {"type": "string"},
+            "minItems": 1,
+            "maxItems": 10,
+            "uniqueItems": True,
+            "additionalProperties": {"type": "string"},
+            "propertyNames": {"pattern": "^[a-z]+$", "minLength": 1, "maxLength": 5},
+        })
+        assert suffix == (
+            "Allowed: alpha | beta. Must be: \"v1\". Range: 0..100. "
+            "Multiple of: 0.5. Length: 1..8. Pattern: ^[a-z_]+$. "
+            "Format: email. Items: string. Items count: 1..10. "
+            "Items must be unique. Extra values: string. "
+            "Keys match: ^[a-z]+$. Keys length: 1..5."
+        )
+
+    def test_single_sided_and_exclusive_ranges(self) -> None:
+        assert format_param_description_suffix({"minimum": 0}) == "Range: >= 0."
+        assert format_param_description_suffix({"maximum": 10}) == "Range: <= 10."
+        assert (
+            format_param_description_suffix({
+                "exclusiveMinimum": 0,
+                "exclusiveMaximum": 1,
+            })
+            == "Range: > 0 and < 1."
+        )
+
+    def test_object_items_and_object_properties_use_spec_fallbacks(self) -> None:
+        assert (
+            format_param_description_suffix({"items": {"type": "object"}})
+            == "Each item is an object; see raw schema."
+        )
+        assert format_param_description_suffix({
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+        }) == ""
+        assert (
+            format_param_description_suffix({"additionalProperties": False})
+            == "No extra keys."
+        )
+
+    def test_unknown_top_level_constraints_append_fallback_once(self) -> None:
+        suffix = format_param_description_suffix({
+            "enum": ["list", "select"],
+            "oneOf": [{"type": "string"}],
+            "$ref": "#/$defs/Action",
+        })
+        assert suffix == (
+            "Allowed: list | select. "
+            "Additional constraints apply; see raw schema via "
+            "tool._mcp_input_schema."
+        )
+
+
 # ---------------------------------------------------------------------------
 # build_signature — 核心分组策略
 # ---------------------------------------------------------------------------
@@ -205,6 +276,13 @@ class TestBuildSignature:
         ])
         assert sig.parameters["a"].default is None
         assert sig.parameters["b"].kind == inspect.Parameter.KEYWORD_ONLY
+
+    def test_default_missing_flag_restores_missing_sentinel(self) -> None:
+        sig = build_signature([
+            {"name": "paths", "annotation": "list", "default_missing": True},
+        ])
+        assert sig.parameters["paths"].default is _MISSING
+        assert str(sig) == "(paths: 'list' = ...)"
 
     def test_explicit_keyword_only_forces_all_following_kw(self) -> None:
         sig = build_signature([

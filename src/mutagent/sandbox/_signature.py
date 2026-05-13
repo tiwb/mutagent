@@ -28,6 +28,7 @@ Python `inspect.Signature` 里不能直接表达，因为 `Parameter.empty` 的�
 from __future__ import annotations
 
 import inspect
+import json
 import logging
 from collections.abc import Iterable, Mapping
 from typing import Any
@@ -91,6 +92,181 @@ def json_type_to_annotation(ptype: Any) -> str:
                 seen.append(p)
         return " | ".join(seen) if seen else "Any"
     return "Any"
+
+
+_IGNORED_SCHEMA_KEYS = {
+    "default",
+    "description",
+    "properties",
+    "required",
+    "title",
+    "type",
+}
+
+_SUPPORTED_SCHEMA_KEYS = {
+    "additionalProperties",
+    "const",
+    "enum",
+    "exclusiveMaximum",
+    "exclusiveMinimum",
+    "format",
+    "items",
+    "maxItems",
+    "maxLength",
+    "maximum",
+    "minItems",
+    "minLength",
+    "minimum",
+    "multipleOf",
+    "pattern",
+    "propertyNames",
+    "uniqueItems",
+}
+
+
+def _format_json_literal(value: Any) -> str:
+    """返回 JSON 风格字面量。"""
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _format_allowed_value(value: Any) -> str:
+    """enum 展示更偏向人读，不给字符串额外加引号。"""
+    if isinstance(value, str):
+        return value
+    return _format_json_literal(value)
+
+
+def _format_range_clause(
+    *,
+    label: str,
+    minimum: Any = None,
+    maximum: Any = None,
+    exclusive_minimum: Any = None,
+    exclusive_maximum: Any = None,
+) -> str | None:
+    """格式化区间类约束。"""
+    lower_op = ">=" if minimum is not None else ">" if exclusive_minimum is not None else None
+    lower_value = minimum if minimum is not None else exclusive_minimum
+    upper_op = "<=" if maximum is not None else "<" if exclusive_maximum is not None else None
+    upper_value = maximum if maximum is not None else exclusive_maximum
+    if lower_op is None and upper_op is None:
+        return None
+    if (
+        lower_op == ">="
+        and upper_op == "<="
+        and lower_value is not None
+        and upper_value is not None
+    ):
+        return f"{label}: {lower_value}..{upper_value}."
+    if lower_op is not None and upper_op is not None:
+        return f"{label}: {lower_op} {lower_value} and {upper_op} {upper_value}."
+    if lower_op is not None:
+        return f"{label}: {lower_op} {lower_value}."
+    return f"{label}: {upper_op} {upper_value}."
+
+
+def format_param_description_suffix(pinfo: Mapping[str, Any]) -> str:
+    """把 JSON Schema property 的约束字段翻译成 docstring 描述后缀。
+
+    输入一个 property dict（MCP ``input_schema.properties.<name>``），输出一段
+    英文后缀字符串，形如 ``"Allowed: a | b. Range: 0..100."``。无约束时返回
+    空串。
+
+    翻译规则见 spec ``feature-mcp-schema-help-display.md``。本函数不处理
+    ``description`` / ``type`` / ``default`` / ``required``，这些由 signature 和
+    docstring 基线格式承担。
+
+    不认识的顶层关键字（``oneOf`` / ``anyOf`` / ``allOf`` / ``$ref`` / ``not`` 等）
+    触发兜底句 ``"Additional constraints apply; see raw schema via
+    tool._mcp_input_schema."``。
+    """
+    clauses: list[str] = []
+
+    enum_values = pinfo.get("enum")
+    if isinstance(enum_values, list) and enum_values:
+        values = " | ".join(_format_allowed_value(v) for v in enum_values)
+        clauses.append(f"Allowed: {values}.")
+
+    if "const" in pinfo:
+        clauses.append(f"Must be: {_format_json_literal(pinfo['const'])}.")
+
+    range_clause = _format_range_clause(
+        label="Range",
+        minimum=pinfo.get("minimum"),
+        maximum=pinfo.get("maximum"),
+        exclusive_minimum=pinfo.get("exclusiveMinimum"),
+        exclusive_maximum=pinfo.get("exclusiveMaximum"),
+    )
+    if range_clause:
+        clauses.append(range_clause)
+
+    if "multipleOf" in pinfo:
+        clauses.append(f"Multiple of: {pinfo['multipleOf']}.")
+
+    length_clause = _format_range_clause(
+        label="Length",
+        minimum=pinfo.get("minLength"),
+        maximum=pinfo.get("maxLength"),
+    )
+    if length_clause:
+        clauses.append(length_clause)
+
+    pattern = pinfo.get("pattern")
+    if isinstance(pattern, str) and pattern:
+        clauses.append(f"Pattern: {pattern}.")
+
+    fmt = pinfo.get("format")
+    if isinstance(fmt, str) and fmt:
+        clauses.append(f"Format: {fmt}.")
+
+    items = pinfo.get("items")
+    if isinstance(items, Mapping):
+        item_type = items.get("type")
+        if item_type == "object":
+            clauses.append("Each item is an object; see raw schema.")
+        elif isinstance(item_type, str):
+            clauses.append(f"Items: {item_type}.")
+
+    items_count_clause = _format_range_clause(
+        label="Items count",
+        minimum=pinfo.get("minItems"),
+        maximum=pinfo.get("maxItems"),
+    )
+    if items_count_clause:
+        clauses.append(items_count_clause)
+
+    if pinfo.get("uniqueItems") is True:
+        clauses.append("Items must be unique.")
+
+    additional_properties = pinfo.get("additionalProperties")
+    if additional_properties is False:
+        clauses.append("No extra keys.")
+    elif isinstance(additional_properties, Mapping):
+        extra_type = additional_properties.get("type")
+        if isinstance(extra_type, str):
+            clauses.append(f"Extra values: {extra_type}.")
+
+    property_names = pinfo.get("propertyNames")
+    if isinstance(property_names, Mapping):
+        key_pattern = property_names.get("pattern")
+        if isinstance(key_pattern, str) and key_pattern:
+            clauses.append(f"Keys match: {key_pattern}.")
+        keys_length_clause = _format_range_clause(
+            label="Keys length",
+            minimum=property_names.get("minLength"),
+            maximum=property_names.get("maxLength"),
+        )
+        if keys_length_clause:
+            clauses.append(keys_length_clause)
+
+    unknown_keys = set(pinfo) - _IGNORED_SCHEMA_KEYS - _SUPPORTED_SCHEMA_KEYS
+    if unknown_keys:
+        clauses.append(
+            "Additional constraints apply; see raw schema via "
+            "tool._mcp_input_schema."
+        )
+
+    return " ".join(clauses)
 
 
 def mcp_schema_to_specs(input_schema: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -157,7 +333,7 @@ def build_signature(specs: Iterable[Mapping[str, Any]]) -> inspect.Signature:
             raise ValueError(f"duplicate param name: {name}")
         seen_names.add(name)
 
-        has_default = "default" in spec
+        has_default = "default" in spec or bool(spec.get("default_missing"))
         # required 字段只在 default 缺失时才参与判断；显式 required=False 也算可选
         required = spec.get("required")
         if required is None:
@@ -194,7 +370,10 @@ def build_signature(specs: Iterable[Mapping[str, Any]]) -> inspect.Signature:
             annotation = str(annotation_raw)
 
         # default：字段存在（即使值为 None）才算有默认值
-        default: Any = spec["default"] if has_default else inspect.Parameter.empty
+        if spec.get("default_missing"):
+            default = _MISSING
+        else:
+            default = spec["default"] if "default" in spec else inspect.Parameter.empty
 
         params.append(inspect.Parameter(
             name, kind, default=default, annotation=annotation))
