@@ -22,6 +22,7 @@ from mutagent.webui._settings_mcp import (
     _check_name_conflicts,
     _config_changed_at_runtime,
     _draft_to_config,
+    _fn_detail,
     _format_args_text,
     _format_env_text,
     _parse_args_text,
@@ -609,6 +610,35 @@ class TestRenderSmoke:
         ids = [c.get("$id") for c in children]
         assert "mcp-add-actions" in ids
         assert "mcp-list" in ids
+
+
+class TestFunctionDetailRendering:
+
+    def test_fn_detail_suppresses_required_when_schema_has_default(self):
+        def tool() -> None:
+            return None
+
+        tool.__signature__ = None  # type: ignore[attr-defined]
+        tool._mcp_description = "desc"  # type: ignore[attr-defined]
+        tool._mcp_input_schema = {  # type: ignore[attr-defined]
+            "properties": {
+                "level": {
+                    "type": "string",
+                    "default": "info",
+                    "description": "Log level",
+                },
+                "target": {
+                    "type": "string",
+                    "description": "Target selector",
+                },
+            },
+            "required": ["level", "target"],
+        }
+
+        detail = _fn_detail(tool, "browser_console_messages")
+        assert "level: string (required)" not in detail
+        assert "  level: string" in detail
+        assert "  target: string (required)" in detail
 
     def test_render_edit_stdio_has_command_args_env(self):
         panel, _ = _make_panel(mcp_sources={

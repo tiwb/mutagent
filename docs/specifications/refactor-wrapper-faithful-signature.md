@@ -161,6 +161,7 @@ functions: {
 
 - `src/mutagent/sandbox/share.py:105` — `_describe_function`，服务端生成 describe 条目，需扩展 `params` 字段
 - `src/mutagent/sandbox/_adapter_mcp.py:799` — `_make_tool_func`，MCP tool wrapper 构造入口
+- `docs/specifications/bugfix-mcp-optional-param-binding.md` — 补充 MCP optional-no-default 参数的 omitted sentinel 机制与 RPC 过滤修复
 - Python stdlib `inspect.Signature` / `Parameter` / `BoundArguments` — 核心 API，详见 [inspect 文档](https://docs.python.org/3/library/inspect.html#inspect.Signature)
 - `__signature__` 属性覆盖：`inspect.signature()` 查找顺序见 CPython `Lib/inspect.py::_signature_from_callable`
 
@@ -204,4 +205,3 @@ functions: {
 - [x] 原 bug 断言测试：``TestWrapAsyncSignature.test_render_function_single_signature`` — 断言 ``_render_function`` 输出中签名字符串仅出现一次（6 例）
 - [x] 设计方案里被简化/退役的属性清理：``_display_signature`` 未实际引入（无需处理）；``_mcp_input_schema`` 在 ``_fn_signature`` / ``_fn_detail`` 中的使用是合理的 fallback 路径和参数表展示，保留
 - [x] 相关文档/注释同步：``_make_namespace_func`` 顶部注释已更新（不再拼签名）；``_wrap_async`` 注释已补充 ``__signature__`` + 位置调用说明
-

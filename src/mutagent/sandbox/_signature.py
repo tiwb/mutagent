@@ -9,6 +9,11 @@
 因此参数分组策略（保序 + 智能降级）、annotation 字符串化、默认值 sentinel
 处理只有一份实现。
 
+MCP schema 还有一类特殊参数：**协议层可省略，但 schema 没写 default**。这在
+Python `inspect.Signature` 里不能直接表达，因为 `Parameter.empty` 的语义是
+“必填”。这里用 `_MISSING` sentinel 占位，让 wrapper 既能通过 `sig.bind()`，
+又能在 RPC 发送前删掉该 key，把“省略参数”的原始语义还给服务端。
+
 **ParamSpec 约定**（dict）：
 
 - ``name``: 参数名（必填）
@@ -28,6 +33,19 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+class _MissingSentinel:
+    """MCP optional-no-default 参数占位符。"""
+
+    def __repr__(self) -> str:
+        return "..."
+
+    def __bool__(self) -> bool:
+        return False
+
+
+_MISSING = _MissingSentinel()
 
 
 # JSON Schema type → Python 展示字符串
@@ -67,8 +85,9 @@ def mcp_schema_to_specs(input_schema: Mapping[str, Any]) -> list[dict[str, Any]]
     """把 MCP tool 的 ``input_schema``（JSON Schema）转为 ``ParamSpec`` 列表。
 
     - ``properties`` 的顺序被保留（Python 3.7+ dict 保序）
-    - ``required`` 成员 → ``required=True``
+    - ``required`` 成员 → ``required=True``；其余参数显式写 ``required=False``
     - ``default`` 原样透传（JSON 原生值，可安全回传）
+    - optional-no-default 参数注入 ``default=_MISSING``，避免被错误构造成必填
     - ``type`` → ``annotation`` 字符串
     """
     specs: list[dict[str, Any]] = []
@@ -83,8 +102,12 @@ def mcp_schema_to_specs(input_schema: Mapping[str, Any]) -> list[dict[str, Any]]
         spec: dict[str, Any] = {"name": pname}
         if pname in required:
             spec["required"] = True
+        else:
+            spec["required"] = False
         if "default" in info:
             spec["default"] = info["default"]
+        elif pname not in required:
+            spec["default"] = _MISSING
         ptype = info.get("type")
         if ptype is not None:
             spec["annotation"] = json_type_to_annotation(ptype)
@@ -107,10 +130,10 @@ def build_signature(specs: Iterable[Mapping[str, Any]]) -> inspect.Signature:
     """
     params: list[inspect.Parameter] = []
     seen_names: set[str] = set()
-    # 见过可选参数：本身不触发降级，但在这之后出现的 required 必须降为
+    # 见过默认值：本身不触发降级，但在这之后出现的无 default 参数必须降为
     # KEYWORD_ONLY（Python 语法约束：POS_OR_KW 无 default 参数不能排在有
     # default 的后面）。
-    saw_optional = False
+    saw_default = False
     # 一旦出现 KEYWORD_ONLY，后续不能再回到 POSITIONAL_OR_KEYWORD。
     kw_only_from_now = False
 
@@ -127,28 +150,26 @@ def build_signature(specs: Iterable[Mapping[str, Any]]) -> inspect.Signature:
         required = spec.get("required")
         if required is None:
             required = not has_default
-        is_optional = has_default or not required
-
         kind_hint = spec.get("kind")
         kind: inspect._ParameterKind
         if kind_hint == "POSITIONAL_ONLY":
             kind = inspect.Parameter.POSITIONAL_ONLY
-            if is_optional:
-                saw_optional = True
+            if has_default:
+                saw_default = True
         elif kind_hint == "KEYWORD_ONLY":
             kind = inspect.Parameter.KEYWORD_ONLY
             kw_only_from_now = True
         elif kind_hint in (None, "POSITIONAL_OR_KEYWORD"):
             if kw_only_from_now:
                 kind = inspect.Parameter.KEYWORD_ONLY
-            elif saw_optional and not is_optional:
-                # 见过 optional 之后又来 required → 触发降级
+            elif saw_default and not has_default:
+                # 见过默认值之后又来无 default 参数 → 触发降级
                 kind = inspect.Parameter.KEYWORD_ONLY
                 kw_only_from_now = True
             else:
                 kind = inspect.Parameter.POSITIONAL_OR_KEYWORD
-                if is_optional:
-                    saw_optional = True
+                if has_default:
+                    saw_default = True
         else:
             raise ValueError(
                 f"unsupported kind in spec {name!r}: {kind_hint!r}")

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from typing import cast
 
 import pytest
@@ -22,6 +23,7 @@ from mutagent.sandbox._adapter_mcp import (
     _is_transport_error,
     bridge_mcp_server,
 )
+from mutagent.sandbox._signature import _MISSING
 
 
 # ============================================================
@@ -1207,3 +1209,223 @@ class TestMakeToolFuncSignature:
         fn, _inspect = self._make_func("ping", {"type": "object"})
         sig = _inspect.signature(fn)
         assert list(sig.parameters) == []
+
+    def test_optional_no_default_signature_uses_omitted_default(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "level": {"type": "string", "default": "info"},
+                "all": {"type": "boolean"},
+                "filename": {"type": "string"},
+            },
+            "required": [],
+        }
+        fn, _inspect = self._make_func("browser_console_messages", schema)
+        sig = _inspect.signature(fn)
+        assert sig.parameters["all"].default is _MISSING
+        assert sig.parameters["filename"].default is _MISSING
+        assert str(sig) == (
+            "(level: 'str' = 'info', all: 'bool' = ..., "
+            "filename: 'str' = ...)"
+        )
+
+    def test_browser_console_messages_filters_omitted_params(self, monkeypatch):
+        from mutagent.sandbox import _adapter_mcp
+
+        class _DoneFuture:
+            def __init__(self, value):
+                self._value = value
+
+            def result(self, timeout=None):
+                return self._value
+
+        def _run_now(coro, _loop):
+            return _DoneFuture(asyncio.run(coro))
+
+        monkeypatch.setattr(
+            _adapter_mcp.asyncio, "run_coroutine_threadsafe", _run_now)
+
+        class _DummyClient:
+            def __init__(self):
+                self.call_log = []
+
+            async def call_tool(self, name, arguments):
+                self.call_log.append((name, arguments))
+                return "ok"
+
+        class _DummyConn:
+            def __init__(self):
+                self.main_loop = None
+                self.client = _DummyClient()
+
+            async def ensure_connected(self):
+                return None
+
+            def mark_disconnected(self, *a, **kw):
+                return None
+
+            async def reconnect(self):
+                return None
+
+        conn = _DummyConn()
+        fn = _adapter_mcp._make_tool_func(
+            conn,
+            "browser_console_messages",
+            "desc",
+            {
+                "type": "object",
+                "properties": {
+                    "level": {"type": "string", "default": "info"},
+                    "all": {"type": "boolean"},
+                    "filename": {"type": "string"},
+                },
+                "required": [],
+            },
+        )
+
+        assert fn() == "ok"
+        assert fn(all=True) == "ok"
+        assert conn.client.call_log == [
+            ("browser_console_messages", {"level": "info"}),
+            ("browser_console_messages", {"level": "info", "all": True}),
+        ]
+
+    def test_browser_click_accepts_required_only_call(self, monkeypatch):
+        from mutagent.sandbox import _adapter_mcp
+
+        class _DoneFuture:
+            def __init__(self, value):
+                self._value = value
+
+            def result(self, timeout=None):
+                return self._value
+
+        def _run_now(coro, _loop):
+            return _DoneFuture(asyncio.run(coro))
+
+        monkeypatch.setattr(
+            _adapter_mcp.asyncio, "run_coroutine_threadsafe", _run_now)
+
+        class _DummyClient:
+            def __init__(self):
+                self.call_log = []
+
+            async def call_tool(self, name, arguments):
+                self.call_log.append((name, arguments))
+                return "ok"
+
+        class _DummyConn:
+            def __init__(self):
+                self.main_loop = None
+                self.client = _DummyClient()
+
+            async def ensure_connected(self):
+                return None
+
+            def mark_disconnected(self, *a, **kw):
+                return None
+
+            async def reconnect(self):
+                return None
+
+        conn = _DummyConn()
+        fn = _adapter_mcp._make_tool_func(
+            conn,
+            "browser_click",
+            "desc",
+            {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string"},
+                    "element": {"type": "string"},
+                    "doubleClick": {"type": "boolean"},
+                    "button": {"type": "string"},
+                    "modifiers": {"type": "array"},
+                },
+                "required": ["target"],
+            },
+        )
+
+        assert str(inspect.signature(fn)) == (
+            "(target: 'str', element: 'str' = ..., "
+            "doubleClick: 'bool' = ..., button: 'str' = ..., "
+            "modifiers: 'list' = ...)"
+        )
+        assert fn(target="test") == "ok"
+        assert conn.client.call_log == [("browser_click", {"target": "test"})]
+
+    def test_browser_wait_for_accepts_all_params_omitted(self, monkeypatch):
+        from mutagent.sandbox import _adapter_mcp
+
+        class _DoneFuture:
+            def __init__(self, value):
+                self._value = value
+
+            def result(self, timeout=None):
+                return self._value
+
+        def _run_now(coro, _loop):
+            return _DoneFuture(asyncio.run(coro))
+
+        monkeypatch.setattr(
+            _adapter_mcp.asyncio, "run_coroutine_threadsafe", _run_now)
+
+        class _DummyClient:
+            def __init__(self):
+                self.call_log = []
+
+            async def call_tool(self, name, arguments):
+                self.call_log.append((name, arguments))
+                return "ok"
+
+        class _DummyConn:
+            def __init__(self):
+                self.main_loop = None
+                self.client = _DummyClient()
+
+            async def ensure_connected(self):
+                return None
+
+            def mark_disconnected(self, *a, **kw):
+                return None
+
+            async def reconnect(self):
+                return None
+
+        conn = _DummyConn()
+        fn = _adapter_mcp._make_tool_func(
+            conn,
+            "browser_wait_for",
+            "desc",
+            {
+                "type": "object",
+                "properties": {
+                    "time": {"type": "number"},
+                    "text": {"type": "string"},
+                    "textGone": {"type": "string"},
+                },
+                "required": [],
+            },
+        )
+
+        assert str(inspect.signature(fn)) == (
+            "(time: 'float' = ..., text: 'str' = ..., "
+            "textGone: 'str' = ...)"
+        )
+        assert fn() == "ok"
+        assert conn.client.call_log == [("browser_wait_for", {})]
+
+    def test_docstring_required_label_ignores_schema_default(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "level": {"type": "string", "default": "info"},
+                "target": {"type": "string"},
+            },
+            "required": ["level", "target"],
+        }
+        fn, _ = self._make_func("browser_console_messages", schema)
+        doc = getattr(fn, "__doc__", "")
+        assert "level: string (required)" not in doc
+        assert "level: string — " in doc
+        assert "target: string (required) — " in doc

@@ -823,11 +823,19 @@ def _make_tool_func(conn: MCPConnection, tool_name: str,
         for pname, pinfo in properties.items():
             ptype = pinfo.get("type", "any")
             pdesc = pinfo.get("description", "")
-            req_mark = " (required)" if pname in required else ""
+            has_schema_default = "default" in pinfo
+            req_mark = (
+                " (required)"
+                if (pname in required and not has_schema_default)
+                else ""
+            )
             doc_lines.append(f"    {pname}: {ptype}{req_mark} — {pdesc}")
     doc = '\n'.join(doc_lines)
 
     async def call_with_retry(kwargs: dict[str, Any]) -> Any:
+        from mutagent.sandbox._signature import _MISSING
+
+        kwargs = {k: v for k, v in kwargs.items() if v is not _MISSING}
         await conn.ensure_connected()
         assert conn.client is not None  # ensure_connected 成功后必非 None
         try:

@@ -983,7 +983,14 @@ def _fn_detail(func: Any, fn_name: str) -> str:
             for pname, pinfo in props.items():
                 ptype = pinfo.get('type', 'Any') if isinstance(pinfo, dict) else 'Any'
                 pdesc = pinfo.get('description', '') if isinstance(pinfo, dict) else ''
-                req_mark = " (required)" if pname in required else ""
+                has_schema_default = (
+                    isinstance(pinfo, dict) and 'default' in pinfo
+                )
+                req_mark = (
+                    " (required)"
+                    if (pname in required and not has_schema_default)
+                    else ""
+                )
                 lines.append(f"  {pname}: {ptype}{req_mark}")
                 if pdesc:
                     lines.append(f"      {pdesc}")

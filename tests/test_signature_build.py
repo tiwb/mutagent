@@ -12,6 +12,7 @@ import inspect
 import pytest
 
 from mutagent.sandbox._signature import (
+    _MISSING,
     build_signature,
     json_type_to_annotation,
     mcp_schema_to_specs,
@@ -67,7 +68,7 @@ class TestMcpSchemaToSpecs:
         specs = mcp_schema_to_specs(schema)
         assert specs == [
             {"name": "path", "required": True, "annotation": "str"},
-            {"name": "limit", "default": 100, "annotation": "int"},
+            {"name": "limit", "required": False, "default": 100, "annotation": "int"},
         ]
 
     def test_empty_schema(self) -> None:
@@ -77,7 +78,7 @@ class TestMcpSchemaToSpecs:
     def test_missing_type(self) -> None:
         schema = {"properties": {"x": {}}, "required": []}
         specs = mcp_schema_to_specs(schema)
-        assert specs == [{"name": "x"}]
+        assert specs == [{"name": "x", "required": False, "default": _MISSING}]
 
     def test_order_preserved(self) -> None:
         schema = {
@@ -100,6 +101,17 @@ class TestMcpSchemaToSpecs:
         specs = mcp_schema_to_specs(schema)
         assert specs[0]["default"] is None
         assert "default" in specs[0]
+        assert specs[0]["required"] is False
+
+    def test_optional_without_default_gets_missing_sentinel(self) -> None:
+        schema = {
+            "properties": {"all": {"type": "boolean"}},
+            "required": [],
+        }
+        specs = mcp_schema_to_specs(schema)
+        assert specs == [
+            {"name": "all", "required": False, "default": _MISSING, "annotation": "bool"},
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -286,3 +298,24 @@ class TestMcpSchemaIntegration:
         specs = mcp_schema_to_specs(schema)
         sig = build_signature(specs)
         assert sig.parameters["b"].kind == inspect.Parameter.KEYWORD_ONLY
+
+    def test_optional_without_default_renders_omitted_default(self) -> None:
+        schema = {
+            "properties": {
+                "level": {"type": "string", "default": "info"},
+                "all": {"type": "boolean"},
+                "filename": {"type": "string"},
+            },
+            "required": [],
+        }
+        specs = mcp_schema_to_specs(schema)
+        sig = build_signature(specs)
+        bound = sig.bind()
+        bound.apply_defaults()
+        assert bound.arguments["level"] == "info"
+        assert bound.arguments["all"] is _MISSING
+        assert bound.arguments["filename"] is _MISSING
+        assert str(sig) == (
+            "(level: 'str' = 'info', all: 'bool' = ..., "
+            "filename: 'str' = ...)"
+        )
