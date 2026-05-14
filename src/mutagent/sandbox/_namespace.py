@@ -20,7 +20,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal, TYPE_CHECKING
 
-from mutagent.sandbox._signature import format_callable_signature
+from mutagent.sandbox._signature import (
+    _RENDER_LINE_WIDTH,
+    format_callable_signature,
+)
 
 if TYPE_CHECKING:
     from mutagent.sandbox._adapter_mcp import MCPConnection
@@ -767,13 +770,20 @@ def _render_namespace(ns: "NamespaceLike") -> str:
 
 def _render_function(func: Callable, ns_name: str = "",
                      fn_name: str = "") -> str:
-    """Layer 3: 函数签名 + 完整 docstring。"""
+    """Layer 3: 函数签名 + 完整 docstring。
+
+    调用 ``format_callable_signature`` 时传入 ``max_width`` 启用 Black 风格多行折行
+    （feature-mcp-schema-help-display.iter3.md）。以 ``qualified`` 名长度折减后的
+    有效宽度递递进去，让「函数名 + 签名」整体不超 ``_RENDER_LINE_WIDTH``。
+    """
     name = fn_name or getattr(func, '__name__', str(func))
     prefix = ns_name or getattr(func, '__namespace__', '')
     qualified = f"{prefix}.{name}" if prefix else name
 
     doc = getattr(func, '__doc__', None) or '(no documentation)'
-    sig_str = format_callable_signature(func)
+    # 预留 20 列下限避免 qualified 过长时折行阈值变负 / 过小
+    effective_width = max(_RENDER_LINE_WIDTH - len(qualified), 20)
+    sig_str = format_callable_signature(func, max_width=effective_width)
     if sig_str is not None:
         return f"{qualified}{sig_str}\n\n{doc}"
     return f"{qualified}\n\n{doc}"

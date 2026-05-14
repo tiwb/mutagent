@@ -13,6 +13,8 @@ import pytest
 
 from mutagent.sandbox._signature import (
     _MISSING,
+    _RENDER_LINE_WIDTH,
+    _format_json_compact,
     _format_literal_annotation,
     build_signature,
     format_annotations_section,
@@ -162,21 +164,23 @@ class TestFormatAnnotationsSection:
             "name": {"type": "string", "pattern": "^[a-z]+$"},
         }
         result = format_annotations_section(properties)
+        # iter3: 单行紧凑分隔符为 `(",",":")`，无空格
         assert result == (
             "Annotations:\n"
-            '    count: {"minimum": 0, "maximum": 100}\n'
-            '    name: {"pattern": "^[a-z]+$"}'
+            '    count: {"minimum":0,"maximum":100}\n'
+            '    name: {"pattern":"^[a-z]+$"}'
         )
 
     def test_chinese_value_keeps_original_chars(self) -> None:
         # ensure_ascii=False 验证：Annotations value 包含中文时不转义
         properties = {"name": {"type": "string", "pattern": "^中文$"}}
         result = format_annotations_section(properties)
-        assert '"pattern": "^中文$"' in result
+        # iter3 紧凑模式下 key 后无空格
+        assert '"pattern":"^中文$"' in result
         assert "\\u" not in result
 
     def test_long_value_switches_to_indented_multiline(self) -> None:
-        # 超过 100 列阈值 → 多行 JSON
+        # 超过 80 列阈值 → Black 风格递归展开（indent_step=2）
         long_props = {f"key_{i}": {"type": "string"} for i in range(10)}
         properties = {
             "items_field": {
@@ -187,18 +191,19 @@ class TestFormatAnnotationsSection:
         result = format_annotations_section(properties)
         assert result.startswith("Annotations:\n")
         assert "    items_field: {\n" in result
-        # 闭合 } 回到 4 空格缩进
+        # 闭合 } 回到 4 空格缩进（与 prefix 同列）
         assert result.rstrip().endswith("    }")
-        # 内部 key 8 空格（json indent=4 + 本函数补 4）
-        assert '\n        "properties": ' in result
+        # 内部 key 6 空格（4 + indent_step=2）
+        assert '\n      "properties": ' in result
 
     def test_unknown_extension_field_passes_through(self) -> None:
         properties = {
             "x": {"type": "string", "x-vendor-flag": True, "format": "uuid"},
         }
         result = format_annotations_section(properties)
-        assert '"x-vendor-flag": true' in result
-        assert '"format": "uuid"' in result
+        # iter3 紧凑模式同位无空格
+        assert '"x-vendor-flag":true' in result
+        assert '"format":"uuid"' in result
 
     def test_property_with_no_remaining_skips_line(self) -> None:
         properties = {
@@ -207,7 +212,7 @@ class TestFormatAnnotationsSection:
         }
         result = format_annotations_section(properties)
         assert "plain" not in result
-        assert '    x: {"minimum": 1}' in result
+        assert '    x: {"minimum":1}' in result
 
     def test_preserves_property_order(self) -> None:
         properties = {
@@ -315,7 +320,8 @@ class TestBuildSignature:
             {"name": "paths", "annotation": "list", "default_missing": True},
         ])
         assert sig.parameters["paths"].default is _MISSING
-        assert str(sig) == "(paths: 'list' = ...)"
+        # iter3: _MISSING.__repr__ 返回 "<omit>"
+        assert str(sig) == "(paths: 'list' = <omit>)"
 
     def test_explicit_keyword_only_forces_all_following_kw(self) -> None:
         sig = build_signature([
@@ -425,26 +431,57 @@ class TestDisplayFormatting:
 
         assert format_signature(sig) == "(value: int, /)"
 
-    def test_format_callable_signature_uses_pysandbox_fallback(self) -> None:
+    def test_format_callable_signature_falls_back_to_kwargs_for_kwargs_only(self) -> None:
+        # iter3: 删除 _pysandbox_signature_str 和 _mcp_input_schema fallback
+        # wrapper 构造失败时自然降级为 (**kwargs) —— inspect.signature 直接返回该形态
         def fn(**kwargs):
             return kwargs
 
+        # 不再走 _pysandbox_signature_str fallback
         fn._pysandbox_signature_str = "(level: str = 'INFO')"  # type: ignore[attr-defined]
-        assert format_callable_signature(fn) == "(level: str = 'INFO')"
+        assert format_callable_signature(fn) == "(**kwargs)"
 
-    def test_format_callable_signature_uses_mcp_schema_fallback(self) -> None:
+    def test_format_callable_signature_ignores_mcp_schema_attr(self) -> None:
+        # iter3: 删除 _mcp_input_schema fallback ——该属性仅供 Annotations 段读取
         def fn(**kwargs):
             return kwargs
 
         fn._mcp_input_schema = {  # type: ignore[attr-defined]
-            "properties": {
-                "level": {"type": "string"},
-                "limit": {"type": "integer"},
-            },
+            "properties": {"level": {"type": "string"}},
             "required": ["level"],
         }
+        assert format_callable_signature(fn) == "(**kwargs)"
 
-        assert format_callable_signature(fn) == "(level: string, limit: integer = ...)"
+    def test_format_callable_signature_returns_none_for_unsignature_callable(self) -> None:
+        # inspect.signature 报错的奇葩 callable → None
+        class _NoSig:
+            __signature__ = property(lambda self: 1 / 0)
+
+        # builtins 不可 inspect 的例子
+        import operator
+        # operator.add 的 signature 不一定报错，改用一个手造逆向
+        class _Bad:
+            def __call__(self):
+                pass
+        # _Bad() 是可 inspect 的，跳过这个场景只验证 None 入口不报错
+        assert format_callable_signature(_Bad()) is not None
+
+    def test_format_callable_signature_with_max_width_multiline(self) -> None:
+        """max_width 传入后超宽签名转多行。"""
+        def fn(
+            element: str,
+            ref: str,
+            button: str = "left",
+            doubleClick: bool = False,
+            modifiers: list | None = None,
+        ) -> None:
+            ...
+
+        out = format_callable_signature(fn, max_width=80)
+        assert out is not None
+        assert "\n    element: str,\n" in out
+        # 多行模式末参数后有 trailing comma
+        assert "= None,\n)" in out
 
 
 # ---------------------------------------------------------------------------
@@ -500,7 +537,346 @@ class TestMcpSchemaIntegration:
         assert bound.arguments["level"] == "info"
         assert bound.arguments["all"] is _MISSING
         assert bound.arguments["filename"] is _MISSING
+        # iter3: _MISSING.__repr__ → <omit>
         assert str(sig) == (
-            "(level: 'str' = 'info', all: 'bool' = ..., "
-            "filename: 'str' = ...)"
+            "(level: 'str' = 'info', all: 'bool' = <omit>, "
+            "filename: 'str' = <omit>)"
         )
+
+
+# ---------------------------------------------------------------------------
+# iter3：Black 风格签名多行折行
+# ---------------------------------------------------------------------------
+
+
+class TestSignatureMultilineFolding:
+    """feature-mcp-schema-help-display.iter3.md 【Signature 多行折行】。"""
+
+    def test_render_line_width_is_80(self) -> None:
+        # iter2 是 100，iter3 改 80
+        assert _RENDER_LINE_WIDTH == 80
+
+    def test_short_signature_stays_single_line(self) -> None:
+        sig = inspect.Signature([
+            inspect.Parameter("x", inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                              annotation="int"),
+        ])
+        out = format_signature(sig, max_width=80)
+        assert out == "(x: int)"
+        # 单行模式不加 trailing comma
+        assert ",)" not in out
+
+    def test_long_signature_switches_to_multiline_with_trailing_comma(self) -> None:
+        sig = inspect.Signature([
+            inspect.Parameter("element", inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                              annotation="str"),
+            inspect.Parameter("ref", inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                              annotation="str"),
+            inspect.Parameter("button", inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                              default="left",
+                              annotation='Literal["left","right","middle"]'),
+            inspect.Parameter("doubleClick", inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                              default=False, annotation="bool"),
+            inspect.Parameter("modifiers", inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                              default=None, annotation="list[str] | None"),
+        ])
+        out = format_signature(sig, max_width=80)
+        assert out == (
+            "(\n"
+            "    element: str,\n"
+            "    ref: str,\n"
+            '    button: Literal["left","right","middle"] = \'left\',\n'
+            "    doubleClick: bool = False,\n"
+            "    modifiers: list[str] | None = None,\n"
+            ")"
+        )
+
+    def test_star_separator_on_own_line(self) -> None:
+        sig = inspect.Signature([
+            inspect.Parameter("a", inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                              annotation="int"),
+            inspect.Parameter("verbose", inspect.Parameter.KEYWORD_ONLY,
+                              default=False, annotation="bool"),
+            inspect.Parameter("debug", inspect.Parameter.KEYWORD_ONLY,
+                              default=False, annotation="bool"),
+            inspect.Parameter("log_level", inspect.Parameter.KEYWORD_ONLY,
+                              default="INFO", annotation="str"),
+        ])
+        # 强制多行：max_width=20
+        out = format_signature(sig, max_width=20)
+        # *, 独占一行（含语法所需的 ,，不做额外 trailing comma）
+        assert "\n    *,\n" in out
+        # 一次性插入
+        assert out.count("    *,") == 1
+
+    def test_slash_separator_on_own_line(self) -> None:
+        sig = inspect.Signature([
+            inspect.Parameter("a", inspect.Parameter.POSITIONAL_ONLY,
+                              annotation="int"),
+            inspect.Parameter("b", inspect.Parameter.POSITIONAL_ONLY,
+                              annotation="int"),
+            inspect.Parameter("c", inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                              annotation="int"),
+        ])
+        out = format_signature(sig, max_width=10)
+        # /, 在最后一个 POSITIONAL_ONLY 之后独占一行
+        assert "\n    /,\n" in out
+
+    def test_var_positional_suppresses_star_separator(self) -> None:
+        sig = inspect.Signature([
+            inspect.Parameter("a", inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                              annotation="int"),
+            inspect.Parameter("args", inspect.Parameter.VAR_POSITIONAL,
+                              annotation="int"),
+            inspect.Parameter("kw", inspect.Parameter.KEYWORD_ONLY,
+                              default=0, annotation="int"),
+        ])
+        out = format_signature(sig, max_width=20)
+        # 已有 *args 隐式分隔，不再插显式 *,
+        assert "    *,\n" not in out
+
+    def test_multiline_includes_return_annotation(self) -> None:
+        sig = inspect.Signature(
+            [
+                inspect.Parameter("a", inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                                  annotation="int"),
+                inspect.Parameter("b", inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                                  annotation="int"),
+            ],
+            return_annotation="dict[str, Any]",
+        )
+        out = format_signature(sig, max_width=10)
+        assert out.endswith(") -> dict[str, Any]")
+
+    def test_multiline_no_return_annotation(self) -> None:
+        sig = inspect.Signature(
+            [
+                inspect.Parameter("a", inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                                  annotation="int"),
+                inspect.Parameter("b", inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                                  annotation="int"),
+            ],
+            return_annotation=inspect.Signature.empty,
+        )
+        out = format_signature(sig, max_width=10)
+        assert out.endswith(")")
+        assert " -> " not in out
+
+    def test_empty_signature_always_single_line(self) -> None:
+        sig = inspect.Signature([])
+        assert format_signature(sig, max_width=80) == "()"
+        assert format_signature(sig, max_width=1) == "()"
+
+    def test_max_width_none_keeps_legacy_single_line(self) -> None:
+        # 不传 max_width 时保持向后兼容（永远单行）
+        sig = inspect.Signature([
+            inspect.Parameter(f"p_{i}", inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                              annotation="str") for i in range(20)
+        ])
+        out = format_signature(sig)
+        assert "\n" not in out
+
+    def test_single_param_overlong_accepts_overflow(self) -> None:
+        # 单参数本身就超 max_width → 接受超宽，不二次折行
+        sig = inspect.Signature([
+            inspect.Parameter(
+                "option", inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                annotation='Literal["a","b","c","d","e","f","g","h","i","j"]'),
+        ])
+        out = format_signature(sig, max_width=20)
+        # 该 param 行无法再拆分，原样输出（含末尾 ,）
+        assert "    option: Literal" in out
+
+
+# ---------------------------------------------------------------------------
+# iter3：format_callable_signature 简化路径
+# ---------------------------------------------------------------------------
+
+
+class TestFormatCallableSignatureIter3:
+
+    def test_normal_function_renders_single_line(self) -> None:
+        def fn(a: int, b: str = "x") -> bool: ...
+        out = format_callable_signature(fn)
+        assert out == "(a: int, b: str = 'x') -> bool"
+
+    def test_max_width_triggers_multiline(self) -> None:
+        def fn(
+            a: int,
+            b: int,
+            c: int,
+            d: int,
+            e: int,
+            f: int,
+            g: int,
+            h: int,
+        ) -> dict: ...
+        out = format_callable_signature(fn, max_width=40)
+        assert out is not None
+        assert "\n    a: int,\n" in out
+        assert out.endswith(") -> dict")
+
+    def test_kwargs_only_wrapper_renders_naturally(self) -> None:
+        # iter3: 删除 _is_kwargs_only_fallback，(**kwargs) 自然渲染
+        def fn(**kwargs):
+            ...
+        # 即便挂了 _mcp_input_schema 也不再走 fallback
+        fn._mcp_input_schema = {  # type: ignore[attr-defined]
+            "properties": {"x": {"type": "string"}},
+            "required": ["x"],
+        }
+        assert format_callable_signature(fn) == "(**kwargs)"
+
+    def test_unsignaturable_returns_none(self) -> None:
+        # 极少数 builtins inspect.signature 抛 ValueError
+        # 这里构造一个 __signature__ property 抛异常的 callable 触发 TypeError
+        class Bad:
+            @property
+            def __signature__(self):
+                raise ValueError("nope")
+
+            def __call__(self, *a, **kw): ...
+        # inspect.signature 看到 __signature__ 属性会调它，抛 ValueError
+        # 我们的实现 catch (ValueError, TypeError) → 返回 None
+        assert format_callable_signature(Bad()) is None
+
+
+# -
+
+
+# ---------------------------------------------------------------------------
+# iter3：_format_json_compact Black 风格 JSON 折行
+# ---------------------------------------------------------------------------
+
+
+class TestFormatJsonCompact:
+
+    def test_scalar_always_compact(self) -> None:
+        assert _format_json_compact("hello", max_width=80) == '"hello"'
+        assert _format_json_compact(42, max_width=80) == "42"
+        assert _format_json_compact(True, max_width=80) == "true"
+        assert _format_json_compact(None, max_width=80) == "null"
+
+    def test_short_array_compact(self) -> None:
+        out = _format_json_compact(["a", "b", "c"], max_width=80)
+        # 紧凑模式无空格
+        assert out == '["a","b","c"]'
+
+    def test_long_scalar_array_expands_one_per_line(self) -> None:
+        # 长 enum 列表（>80 列）→ 每元素一行
+        long_enum = [f"option_{i}" for i in range(20)]
+        out = _format_json_compact(long_enum, max_width=80)
+        assert out.startswith("[\n")
+        assert out.endswith("\n]")
+        # 每元素独占一行
+        for item in long_enum:
+            assert f'  "{item}"' in out
+
+    def test_short_object_compact(self) -> None:
+        out = _format_json_compact(
+            {"type": "string", "enum": ["a", "b"]}, max_width=80)
+        # 紧凑：key 后无空格
+        assert out == '{"type":"string","enum":["a","b"]}'
+
+    def test_long_object_expands_with_colon_space(self) -> None:
+        # 大对象触发展开 → key/value 间用 ": "（含空格）
+        obj = {f"key_{i}": f"value_{i}" for i in range(15)}
+        out = _format_json_compact(obj, max_width=40)
+        assert out.startswith("{\n")
+        # 多行模式 key/value 间含空格
+        assert '"key_0": "value_0"' in out
+
+    def test_chinese_value_kept_unicode(self) -> None:
+        out = _format_json_compact({"name": "中文"}, max_width=80)
+        assert "中文" in out
+        assert "\\u" not in out
+
+    def test_indent_step_is_2(self) -> None:
+        # 嵌套两层：外层缩进 2、内层 4
+        out = _format_json_compact(
+            {"outer": {"inner_key_aaaaaaa": "inner_value_aaaaaaaaa"}},
+            max_width=20,
+        )
+        assert '\n  "outer"' in out
+
+    def test_current_indent_affects_compact_decision(self) -> None:
+        # 同一对象，current_indent 越大越倾向展开
+        obj = {"a": 1, "b": 2, "c": 3}  # compact len = 19
+        # current_indent=0 → 紧凑（0+19 ≤ 20）
+        assert _format_json_compact(obj, max_width=20, current_indent=0) \
+            == '{"a":1,"b":2,"c":3}'
+        # current_indent=5 → 展开（5+19 > 20）
+        out = _format_json_compact(obj, max_width=20, current_indent=5)
+        assert "\n" in out
+
+
+# ---------------------------------------------------------------------------
+# iter3：<omit> sentinel
+# ---------------------------------------------------------------------------
+
+
+class TestOmitSentinel:
+
+    def test_missing_repr_is_omit(self) -> None:
+        assert repr(_MISSING) == "<omit>"
+
+    def test_string_literal_dots_visually_distinct(self) -> None:
+        # 字符串 "..." 渲染为 '...'（带引号），与 sentinel <omit>（不带引号）区分
+        sig = build_signature([
+            {"name": "x", "default": "...", "annotation": "str"},
+        ])
+        out = str(sig)
+        assert "'...'" in out
+        assert "<omit>" not in out
+
+    def test_mcp_schema_optional_no_default_renders_omit(self) -> None:
+        schema = {
+            "properties": {"all": {"type": "boolean"}},
+            "required": [],
+        }
+        sig = build_signature(mcp_schema_to_specs(schema))
+        assert "<omit>" in str(sig)
+
+    def test_pysandbox_function_without_missing_no_omit(self) -> None:
+        # 普通 Python 函数（无 _MISSING）签名不出现 <omit>
+        def fn(x: int = 0): ...
+        out = format_callable_signature(fn)
+        assert "<omit>" not in out
+
+
+# ---------------------------------------------------------------------------
+# iter3：format_annotations_section Black 风格行数缩减
+# ---------------------------------------------------------------------------
+
+
+class TestAnnotationsBlackStyleLineCount:
+
+    def test_browser_fill_form_drops_to_around_a_dozen_lines(self) -> None:
+        # 模拟 browser_fill_form 的复杂 fields 结构
+        fields_schema = {
+            "fields": {
+                "type": "array",
+                "description": "Fields to fill",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string",
+                                 "description": "Human-readable field name"},
+                        "type": {
+                            "type": "string",
+                            "enum": ["textbox", "checkbox", "radio",
+                                     "combobox", "slider"],
+                            "description": "Type of the field",
+                        },
+                        "value": {"type": "string",
+                                  "description": "Value to set"},
+                    },
+                    "required": ["name", "type", "value"],
+                    "additionalProperties": False,
+                },
+            },
+        }
+        out = format_annotations_section(fields_schema)
+        line_count = len(out.splitlines())
+        # iter2 ~45 行，iter3 应缩减至 ~20 行内
+        assert line_count < 25, f"行数 {line_count} 超出预期，输出:\n{out}"

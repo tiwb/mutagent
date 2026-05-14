@@ -1225,8 +1225,8 @@ class TestMakeToolFuncSignature:
         assert sig.parameters["all"].default is _MISSING
         assert sig.parameters["filename"].default is _MISSING
         assert str(sig) == (
-            "(level: 'str' = 'info', all: 'bool' = ..., "
-            "filename: 'str' = ...)"
+            "(level: 'str' = 'info', all: 'bool' = <omit>, "
+            "filename: 'str' = <omit>)"
         )
 
     def test_browser_console_messages_filters_omitted_params(self, monkeypatch):
@@ -1347,9 +1347,9 @@ class TestMakeToolFuncSignature:
         )
 
         assert str(inspect.signature(fn)) == (
-            "(target: 'str', element: 'str' = ..., "
-            "doubleClick: 'bool' = ..., button: 'str' = ..., "
-            "modifiers: 'list' = ...)"
+            "(target: 'str', element: 'str' = <omit>, "
+            "doubleClick: 'bool' = <omit>, button: 'str' = <omit>, "
+            "modifiers: 'list' = <omit>)"
         )
         assert fn(target="test") == "ok"
         assert conn.client.call_log == [("browser_click", {"target": "test"})]
@@ -1409,8 +1409,8 @@ class TestMakeToolFuncSignature:
         )
 
         assert str(inspect.signature(fn)) == (
-            "(time: 'float' = ..., text: 'str' = ..., "
-            "textGone: 'str' = ...)"
+            "(time: 'float' = <omit>, text: 'str' = <omit>, "
+            "textGone: 'str' = <omit>)"
         )
         assert fn() == "ok"
         assert conn.client.call_log == [("browser_wait_for", {})]
@@ -1480,17 +1480,17 @@ class TestMakeToolFuncSignature:
         assert "\nAnnotations:\n" in doc
         # enum 已进 signature 不再出现在 Annotations
         assert '"enum":' not in doc
-        assert '    index: {"minimum": 0, "maximum": 100}' in doc
+        assert '    index: {"minimum":0,"maximum":100}' in doc
         assert (
-            '    paths: {"items": {"type": "string"}, '
-            '"minItems": 1, "maxItems": 10, "uniqueItems": true}'
+            '    paths: {"items":{"type":"string"},'
+            '"minItems":1,"maxItems":10,"uniqueItems":true}'
             in doc
         )
-        # metadata 单行超 100 列 → 多行 JSON；首行 以 ``    metadata: {`` 起，
-        # 内部 key 8 空格缩进，闭合 ``}`` 4 空格
+        # metadata 单行超 80 列 → Black 风格展开；首行以 ``    metadata: {`` 起，
+        # 内部 key 6 空格缩进（4 + indent_step=2），闭合 ``}`` 4 空格
         assert "    metadata: {\n" in doc
-        assert '        "additionalProperties": {' in doc
-        assert '        "propertyNames": {' in doc
+        assert '      "additionalProperties": {' in doc
+        assert '      "propertyNames": {' in doc
 
     def test_docstring_three_section_layout(self):
         # 「头部 description + Args + Annotations」完整布局验证
@@ -1529,11 +1529,11 @@ class TestMakeToolFuncSignature:
         # bare 不再拼任何后缀
         assert "    bare:\n" in doc or doc.rstrip().endswith("    bare:")
         # Annotations 段：desc_and_anno 仅保留 pattern（enum 已走 signature）
-        assert '    desc_and_anno: {"pattern": "^[a-z]+$"}' in doc
+        assert '    desc_and_anno: {"pattern":"^[a-z]+$"}' in doc
         # desc_only 无剩余字段 → 不出现在 Annotations
         # anno_only 有 items / minItems
         assert (
-            '    anno_only: {"items": {"type": "string"}, "minItems": 1}'
+            '    anno_only: {"items":{"type":"string"},"minItems":1}'
             in doc
         )
         # bare 无剩余 → Annotations 不出现该名

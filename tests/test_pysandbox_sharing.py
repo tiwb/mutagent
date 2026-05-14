@@ -584,9 +584,10 @@ class TestMakeNamespaceFuncSignature:
             {"name": "last_n", "kind": "POSITIONAL_OR_KEYWORD",
              "default": 10, "annotation": "int"},
         ]
+        # iter3: signature_str 形参已删除
         fn = _make_namespace_func(
             self._fake_conn(), "mutbot", "logs",  # type: ignore[arg-type]
-            "(level='INFO', last_n=10)", "Query logs.", params)
+            "Query logs.", params)
         sig = _inspect.signature(fn)
         assert list(sig.parameters) == ["level", "last_n"]
         assert sig.parameters["level"].default == "INFO"
@@ -603,7 +604,7 @@ class TestMakeNamespaceFuncSignature:
 
         fn = _make_namespace_func(
             self._fake_conn(), "mutbot", "logs",  # type: ignore[arg-type]
-            "(level='INFO', last_n=10)", "Query logs.", None)
+            "Query logs.", None)
         sig = _inspect.signature(fn)
         params = list(sig.parameters.values())
         assert len(params) == 1
@@ -620,7 +621,7 @@ class TestMakeNamespaceFuncSignature:
         bad_params = [{"default": 1}]  # 缺 name
         fn = _make_namespace_func(
             self._fake_conn(), "mutbot", "weird",  # type: ignore[arg-type]
-            "(...)", "", bad_params)
+            "", bad_params)
         sig = _inspect.signature(fn)
         assert len(list(sig.parameters)) == 1
         assert list(sig.parameters.values())[0].kind is _inspect.Parameter.VAR_KEYWORD
@@ -631,9 +632,10 @@ class TestMakeNamespaceFuncSignature:
         params = [{"name": "x", "required": True, "annotation": "int"}]
         fn = _make_namespace_func(
             self._fake_conn(), "ns", "f",  # type: ignore[arg-type]
-            "(x: int)", "doc", params)
+            "doc", params)
         assert callable(getattr(fn, "_async_original"))
-        assert fn._pysandbox_signature_str == "(x: int)"  # type: ignore[attr-defined]
+        # iter3: _pysandbox_signature_str 不再写入
+        assert not hasattr(fn, "_pysandbox_signature_str")
 
 
 # ============================================================
@@ -681,7 +683,7 @@ class TestPeerBuildWithParams:
         # 原 bug 断言：help 形式（func.__doc__）不再以 "logs(" 开头
         assert not (logs.__doc__ or "").lstrip().startswith("logs(")
 
-    def test_peer_namespace_optional_no_default_keeps_ellipsis_signature(self) -> None:
+    def test_peer_namespace_optional_no_default_keeps_omit_signature(self) -> None:
         import inspect as _inspect
 
         from mutagent.sandbox._adapter_pysandbox import build_peer_namespaces
@@ -717,7 +719,8 @@ class TestPeerBuildWithParams:
         upload = peer_ns._functions["browser_file_upload"]
         sig = _inspect.signature(upload)
         assert sig.parameters["paths"].default is _MISSING
-        assert str(sig) == "(paths=...)"
+        # iter3: _MISSING.__repr__ → <omit>
+        assert str(sig) == "(paths=<omit>)"
 
 
 # ---------------------------------------------------------------------------

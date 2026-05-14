@@ -930,10 +930,9 @@ def _toggle_fn(full_name: str, *, view: MCPSettingsPanel) -> None:
 def _fn_signature(func: Any) -> str:
     """构建函数签名字符串。
 
-    优先走 `inspect.signature`：MCP tool / pysandbox namespace wrapper 已经
-    把真签名挂在 `__signature__` 上（见
-    `refactor-wrapper-faithful-signature.md`）。只在 wrapper 构造失败降级为
-    `(**kwargs)` 形态时，才回落到 `_mcp_input_schema` 合成路径。
+    走 ``format_callable_signature`` 统一入口：内部仅进一步调 ``inspect.signature``。
+    iter3 已删除三条 fallback——wrapper 构造失败时签名自然降级为 ``(**kwargs)``，
+    参数详细信息交给 Annotations 段表达。
     """
     sig = format_callable_signature(func)
     return sig if sig is not None else "()"
@@ -942,12 +941,10 @@ def _fn_signature(func: Any) -> str:
 def _fn_detail(func: Any, fn_name: str) -> str:
     """返回函数的完整签名 + docstring 文本。
 
-    签名走 ``inspect.signature`` 统一入口（MCP tool / pysandbox wrapper 的
-    ``__signature__`` 伪装先由 ``format_callable_signature`` 处理）。此处不
-    再手拼 ``Parameters:`` 表 ——约束行由
-    ``format_param_schema_lines`` 统一输出到 docstring
-    （``feature-mcp-schema-help-display.iter3.md``）。iter3 落地前，约束信息
-    本身由 MCP tool description 以 text 形式给出。
+    签名走 ``format_callable_signature`` 统一入口（iter3 后只走
+    ``inspect.signature`` 主路径）。约束信息由
+    ``feature-mcp-schema-help-display.iter2.md`` 的 ``Annotations:`` 段统一输出
+    到 docstring；本函数不再手拼 ``Parameters:`` 表。
     """
     sig = _fn_signature(func)
     desc = getattr(func, '_mcp_description', None) or ''

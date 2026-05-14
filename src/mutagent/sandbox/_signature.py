@@ -37,10 +37,15 @@ logger = logging.getLogger(__name__)
 
 
 class _MissingSentinel:
-    """MCP optional-no-default 参数占位符。"""
+    """MCP optional-no-default 参数占位符。
+
+    repr 使用 ``<omit>`` 而非 ``...``，避免与 Python ``Ellipsis`` /
+    Pydantic ``Field(...)``（含义为「必填」）的反向语义碰撞。尖括号占位符
+    在 CLI / template / OpenAPI 圈约定俗成，自解释、零歧义。
+    """
 
     def __repr__(self) -> str:
-        return "..."
+        return "<omit>"
 
     def __bool__(self) -> bool:
         return False
@@ -98,9 +103,9 @@ def json_type_to_annotation(ptype: Any) -> str:
 # MCP schema → docstring 渲染（feature-mcp-schema-help-display.iter2.md）
 # ---------------------------------------------------------------------------
 
-# Annotations 段单行 / 多行 切换阈值。100 列 = 常见 Python 行宽。
-# 作为渲染模块内部参数集中定义，不在调用点散落写死。
-_RENDER_LINE_WIDTH = 100
+# 渲染折行宽度阈值。signature 多行折行 / Annotations JSON 折行共用。
+# 80 列 = PEP 8 / Black 默认；agent 训练数据中高频出现的「Python 标准行宽」。
+_RENDER_LINE_WIDTH = 80
 
 # 按「三处投影职责唯一」原则，已被 signature / Args 段表达的 schema
 # 字段不重复出现在 Annotations 段：
@@ -155,16 +160,73 @@ def _format_literal_annotation(enum_values: Iterable[Any]) -> str | None:
     return f"Literal[{', '.join(_literal_part(v) for v in items)}]"
 
 
-def _indent_continuation(text: str, indent: str = "    ") -> str:
-    """多行文本除首行外全部加 indent 前缀，首行不变。
+def _format_json_compact(
+    obj: Any,
+    *,
+    max_width: int,
+    current_indent: int = 0,
+    indent_step: int = 2,
+) -> str:
+    """Black 风格紧凑 JSON 渲染：能单行就单行，超宽逐层展开。
 
-    用于将 ``json.dumps(..., indent=4)`` 产生的多行 JSON 嵌入到
-    ``    name: {...}`` 结构里：内部 key 8 空格缩进，闭合 ``}`` 4 空格。
+    Args:
+        obj: 要渲染的 JSON 兼容对象（``Mapping`` / ``list`` / 标量）。
+            非 JSON 兼容值（dataclass、自定义对象）行为未定义，调用方负责保证。
+        max_width: 整行最大列数（含外层缩进与 prefix）。
+        current_indent: 该值如展开后，子节点的逻辑左缩进列数。
+            紧凑判断公式：``current_indent + len(compact) <= max_width``。
+            注：作为简化设计，此处把「行起始列」当作 indent 估算紧凑宽度，
+            外层有 ``key: `` 前缀时实际行宽可能略超 ``max_width``
+            ——help 文本场景下可接受。
+        indent_step: 每层缩进步长，默认 2（Black 风格）。
+
+    分隔符策略：
+        - 紧凑模式 → ``separators=(",",":")``（无空格）
+        - 展开模式 → 元素间 ``,\n``；对象 key/value 间 ``": "``（含空格）
+
+    复杂度：每节点先 try compact 再决定展开，深嵌套有 O(深度 × 节点数)
+    重复序列化成本。MCP schema 实际深度 ≤ 4，可接受。
+
+    未来若有第二个消费方（如 logs dump、debug pretty-print）可上提到 mutio。
     """
-    lines = text.split("\n")
-    if len(lines) == 1:
-        return lines[0]
-    return lines[0] + "".join(f"\n{indent}{ln}" for ln in lines[1:])
+    # 标量 → 始终紧凑
+    if not isinstance(obj, (Mapping, list)):
+        return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+    # 容器 → 先尝试紧凑
+    compact = json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    if current_indent + len(compact) <= max_width:
+        return compact
+
+    # 超宽 → 展开
+    inner_indent_n = current_indent + indent_step
+    inner_indent = " " * inner_indent_n
+    close_indent = " " * current_indent
+
+    if isinstance(obj, list):
+        items = [
+            _format_json_compact(
+                v, max_width=max_width,
+                current_indent=inner_indent_n,
+                indent_step=indent_step,
+            )
+            for v in obj
+        ]
+        body = ",\n".join(f"{inner_indent}{it}" for it in items)
+        return f"[\n{body}\n{close_indent}]"
+
+    # Mapping
+    parts: list[str] = []
+    for k, v in obj.items():
+        key_str = json.dumps(k, ensure_ascii=False)
+        val_str = _format_json_compact(
+            v, max_width=max_width,
+            current_indent=inner_indent_n,
+            indent_step=indent_step,
+        )
+        parts.append(f"{inner_indent}{key_str}: {val_str}")
+    body = ",\n".join(parts)
+    return f"{{\n{body}\n{close_indent}}}"
 
 
 def format_annotations_section(
@@ -196,13 +258,12 @@ def format_annotations_section(
         }
         if not remaining:
             continue
-        single = json.dumps(remaining, ensure_ascii=False)
         prefix = f"    {pname}: "
-        if len(prefix) + len(single) <= line_width:
-            entries.append(f"{prefix}{single}")
-        else:
-            multi = json.dumps(remaining, ensure_ascii=False, indent=4)
-            entries.append(f"{prefix}{_indent_continuation(multi)}")
+        # current_indent=4：value 如展开后子节点逻辑缩进起算 4+indent_step=6。
+        # prefix 实际占 len(prefix) 列，紧凑宽度判断略保守，help 文本场景可接受。
+        formatted = _format_json_compact(
+            remaining, max_width=line_width, current_indent=4)
+        entries.append(f"{prefix}{formatted}")
     if not entries:
         return ""
     return "Annotations:\n" + "\n".join(entries)
@@ -331,8 +392,20 @@ def build_signature(specs: Iterable[Mapping[str, Any]]) -> inspect.Signature:
     return inspect.Signature(params)
 
 
-def format_signature(sig: inspect.Signature) -> str:
-    """格式化签名字符串，仅去掉字符串 annotation 的引号。"""
+def format_signature(
+    sig: inspect.Signature,
+    *,
+    max_width: int | None = None,
+) -> str:
+    """格式化签名字符串，仅去掉字符串 annotation 的引号。
+
+    Args:
+        sig: ``inspect.Signature`` 实例。
+        max_width: 可选。``None``（默认）→ 永远单行（向后兼容
+            ``__repr__`` 等老路径）。具体数值 → 单行能装下保持单行，超宽
+            切换为 Black 风格多行（每参数一行 + trailing comma，分隔符
+            ``*`` / ``/`` 独占一行）。
+    """
     params = [
         p.replace(annotation=_RawAnnotation(p.annotation))
         if isinstance(p.annotation, str) else p
@@ -341,51 +414,75 @@ def format_signature(sig: inspect.Signature) -> str:
     ret = sig.return_annotation
     if isinstance(ret, str):
         ret = _RawAnnotation(ret)
-    return str(sig.replace(parameters=params, return_annotation=ret))
+    sig2 = sig.replace(parameters=params, return_annotation=ret)
+    single_line = str(sig2)
+    if max_width is None or len(single_line) <= max_width:
+        return single_line
+    # 空参数总是单行（无折行需求）
+    if not params:
+        return single_line
+    return _format_signature_multiline(params, ret)
 
 
-def _is_kwargs_only_fallback(sig: inspect.Signature) -> bool:
-    """识别 wrapper 构造失败后的 ``(**kwargs)`` 降级签名。"""
-    params = list(sig.parameters.values())
-    return len(params) == 1 and params[0].kind is inspect.Parameter.VAR_KEYWORD
+def _format_signature_multiline(
+    params: list[inspect.Parameter],
+    return_annotation: Any,
+) -> str:
+    """Black 风格多行签名渲染。
+
+    - 每参数一行，末尾 trailing comma
+    - ``*`` / ``/`` 分隔符独占一行（语法需要的 ``,`` 跟随，不额外补）
+    - return annotation 跟在 ``)`` 同一行：``) -> RetType``
+    - 闭合 ``)`` 回到第一列，与函数名对齐
+    """
+    indent = "    "
+    out: list[str] = ["("]
+
+    has_var_positional = any(
+        p.kind is inspect.Parameter.VAR_POSITIONAL for p in params)
+    # 最后一个 POSITIONAL_ONLY 的下标（之后插 ``/`` 分隔符）
+    last_pos_only = -1
+    for i, p in enumerate(params):
+        if p.kind is inspect.Parameter.POSITIONAL_ONLY:
+            last_pos_only = i
+
+    star_inserted = False
+    for i, p in enumerate(params):
+        # 首个 KEYWORD_ONLY 之前插 ``*,``（仅在无 VAR_POSITIONAL 时）
+        if (p.kind is inspect.Parameter.KEYWORD_ONLY
+                and not has_var_positional
+                and not star_inserted):
+            out.append(f"{indent}*,")
+            star_inserted = True
+        out.append(f"{indent}{p},")
+        if i == last_pos_only:
+            out.append(f"{indent}/,")
+
+    if return_annotation is inspect.Signature.empty:
+        out.append(")")
+    else:
+        out.append(f") -> {inspect.formatannotation(return_annotation)}")
+
+    return "\n".join(out)
 
 
-def _format_schema_signature(input_schema: Mapping[str, Any]) -> str:
-    """按现有 MCP settings fallback 规则合成签名字符串。"""
-    props = input_schema.get("properties") or {}
-    if not isinstance(props, Mapping):
-        return "()"
-    required = set(input_schema.get("required") or [])
-    params: list[str] = []
-    for pname, pinfo in props.items():
-        ptype = pinfo.get("type", "Any") if isinstance(pinfo, Mapping) else "Any"
-        if pname in required:
-            params.append(f"{pname}: {ptype}")
-        else:
-            params.append(f"{pname}: {ptype} = ...")
-    return f"({', '.join(params)})"
+def format_callable_signature(
+    func: Any,
+    *,
+    max_width: int | None = None,
+) -> str | None:
+    """统一格式化 callable 的展示签名。
 
-
-def format_callable_signature(func: Any) -> str | None:
-    """统一格式化 callable 的展示签名，必要时走各类 fallback。"""
+    所有入口路径（MCP 桥接 / pysandbox peer / 同进程 Namespace / CLI adapter）
+    在正常情况下 wrapper 都挂了 ``__signature__``，收敛到 :func:`format_signature`
+    主路径。wrapper 构造失败时签名自然降级为 ``(**kwargs)``（Python 原生形态），
+    参数详细信息依靠 ``Annotations:`` 段补充。
+    """
     try:
         sig = inspect.signature(func)
     except (ValueError, TypeError):
-        sig = None
-    if sig is not None and not _is_kwargs_only_fallback(sig):
-        return format_signature(sig)
-
-    fallback = getattr(func, "_pysandbox_signature_str", None)
-    if isinstance(fallback, str) and fallback:
-        return fallback
-
-    schema = getattr(func, "_mcp_input_schema", None)
-    if isinstance(schema, Mapping):
-        return _format_schema_signature(schema)
-
-    if sig is not None:
-        return format_signature(sig)
-    return None
+        return None
+    return format_signature(sig, max_width=max_width)
 
 
 def try_build_signature(

@@ -676,13 +676,16 @@ class TestFunctionDetailRendering:
         assert "Parameters:" not in detail
         assert "(required)" not in detail
 
-    def test_fn_detail_uses_pysandbox_signature_fallback(self):
+    def test_fn_detail_kwargs_only_wrapper_renders_kwargs(self):
+        """iter3: 删除 _pysandbox_signature_str / _mcp_input_schema fallback，
+        wrapper 是 (**kwargs) 形态时直接渲染为 (**kwargs)。"""
         def tool(**kwargs) -> None:
             return None
 
+        # 这些属性 iter3 后不再被 fallback 读取
         tool._pysandbox_signature_str = "(level: str = 'INFO') -> str"  # type: ignore[attr-defined]
         detail = _fn_detail(tool, "peer.logs")
-        assert detail.startswith("peer.logs(level: str = 'INFO') -> str")
+        assert detail.startswith("peer.logs(**kwargs)")
 
     def test_render_edit_stdio_has_command_args_env(self):
         panel, _ = _make_panel(mcp_sources={

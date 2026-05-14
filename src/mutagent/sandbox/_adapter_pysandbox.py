@@ -70,7 +70,6 @@ def _make_namespace_func(
     conn: "MCPConnection",
     ns_name: str,
     fn_name: str,
-    signature_str: str,
     doc: str,
     params: list[dict[str, Any]] | None = None,
 ) -> Any:
@@ -86,8 +85,12 @@ def _make_namespace_func(
     签名层：
     - 新 server 返回的 ``params`` 存在时，用 ``_signature.build_signature`` 构造
       真签名挂在 ``__signature__`` 上；wrapper 内用 ``sig.bind`` 规范化参数
-    - ``params`` 缺失（老 server）或构造失败，回落为旧版 ``(**kwargs)`` wrapper
-    - ``__doc__`` 不再拼接签名首行（去重复展示 bug）
+    - ``params`` 缺失（老 server）或构造失败，回落为旧版 ``(**kwargs)`` wrapper；
+      展示层会自然降级为 ``ns_func(**kwargs)``，参数详细信息依 Annotations 段补充
+    - ``__doc__`` 不拼接签名首行（去重复展示 bug）
+
+    注：iter3 后不再写入 ``_pysandbox_signature_str`` 属性，format_callable_signature
+    已去除 fallback 分发。
     """
     # 延迟 import 避免循环
     from mutagent.sandbox._adapter_mcp import HTTPMCPClient, _is_transport_error
@@ -142,8 +145,6 @@ def _make_namespace_func(
     ns_func.__name__ = fn_name
     ns_func.__doc__ = doc  # 停止向 doc 拼接签名首行
     ns_func._async_original = _ns_async  # type: ignore[attr-defined]
-    # 保留老字段供老 server + 展示层 fallback 使用
-    ns_func._pysandbox_signature_str = signature_str  # type: ignore[attr-defined]
     return ns_func
 
 
@@ -210,14 +211,13 @@ async def build_peer_namespaces(
         for fn_name, info in functions.items():
             if not isinstance(info, dict):
                 continue
-            sig_str = info.get("signature") or ""
             doc = info.get("doc") or ""
             # params 是新 server 的 additive 可选字段，缺失不影响老 server 兼容
             params = info.get("params")
             if not isinstance(params, list):
                 params = None
             fn = _make_namespace_func(
-                conn, name, fn_name, sig_str, doc, params)
+                conn, name, fn_name, doc, params)
             # description 取 doc 首段（与 tool 路径一致：register 时存全文）
             ns.register(fn_name, fn, doc)
 
