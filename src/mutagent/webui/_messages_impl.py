@@ -481,7 +481,7 @@ def tool_call_card_render(self: ToolCallCard) -> ViewBlock:
             "$id": "toggle",
             "size": "small",
             "children": "展开" if not self.item.expanded else "收起",
-            "onClick": Callback(_toggle_tool_card, view="@view"),
+            "onClick": Callback(_toggle_tool_card, view=self),
         },
     ]
     if self.item.expanded:

@@ -96,7 +96,7 @@ def render(self: ChatInput) -> ViewBlock:
             "placeholder": placeholder,
             "$children": [self.toolbar],
             "onChange": Bind(self, "text", "$0"),
-            "onSubmit": Callback(_submit, view="@view"),
+            "onSubmit": Callback(_submit, view=self),
         }
     ])
 

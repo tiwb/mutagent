@@ -7,7 +7,7 @@ from typing import Any
 
 import mutagent
 from mutagent.webui.toolbar import AgentStatusBar
-from mutgui import Action, ActionContext, ActionRef, Callback, ViewBlock
+from mutgui import Action, ActionContext, ActionRef, Callback, Expr, ViewBlock
 
 
 # ── 私有辅助：从 ActionContext 提取 Conversation；通用 async 调用包装 ─────
@@ -205,8 +205,8 @@ def status_bar_render(self: AgentStatusBar) -> ViewBlock:
         "open": self.expanded,
         "onOpenChange": Callback(
             lambda visible, *, view: setattr(view, 'expanded', visible) or view.invalidate(),
-            "$0",
-            view="@view",
+            Expr.wire("$0"),
+            view=self,
         ),
         "content": detail_panel,
         "$children": [compact_row],

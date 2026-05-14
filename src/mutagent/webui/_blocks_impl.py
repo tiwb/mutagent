@@ -237,7 +237,7 @@ def thinking_block_render(self: ThinkingBlock) -> ViewBlock:
                     "$id": "thinking-toggle",
                     "size": "small",
                     "children": "展开" if not self.expanded else "收起",
-                    "onClick": Callback(_toggle_thinking, view="@view"),
+                    "onClick": Callback(_toggle_thinking, view=self),
                 },
             ],
         }
