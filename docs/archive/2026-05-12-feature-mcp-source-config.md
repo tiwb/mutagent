@@ -1,6 +1,6 @@
 # MCP 连接设置 UI
 
-**状态**：🔄 实施中
+**状态**：✅ 已完成
 **日期**：2026-05-12
 **类型**：功能设计
 
@@ -410,7 +410,7 @@ def _write_config(self, mcp_sources: dict) -> None:
 
 - [x] `tests/test_adapter_mcp.py` 补充：`make_client` 转发 env、`StdioMCPClient.connect` Popen 收到合并后 env（并保留父进程 PATH）、缺省时 env=None、`list_tools_metadata` 返回结构与空列表退化
 - [x] `tests/test_mcp_settings_panel.py`（8 个分类、共43 个 case）：env 文本解析全分支、args 解析、draft↔config、加载跳转、sanitized 名冲突、按钮状态映射、运行期变更横幅、Save / Delete / Rename 流程、stdio/http 表单渲染、autostart=false conn 反查
-- [ ] 手动验证：mutagent webui 实跑，加 stdio + http 两类 source，验证 Connect/Disconnect/Reconnect/Reload tools 全链路
+- [x] 手动验证：mutagent webui 实跑，加 stdio + http 两类 source，验证 Connect/Disconnect/Reconnect/Reload tools 全链路
 
 ## 变更记录
 
@@ -446,4 +446,4 @@ def _write_config(self, mcp_sources: dict) -> None:
 
 ### 完成态
 
-- [ ] 所有 checkbox 完成后向用户确认 → 改 status 为 ✅ 已完成
+- [x] 所有 checkbox 完成后向用户确认 → 改 status 为 ✅ 已完成
