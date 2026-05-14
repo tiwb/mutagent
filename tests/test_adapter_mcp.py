@@ -1415,7 +1415,9 @@ class TestMakeToolFuncSignature:
         assert fn() == "ok"
         assert conn.client.call_log == [("browser_wait_for", {})]
 
-    def test_docstring_required_label_ignores_schema_default(self):
+    def test_docstring_no_required_marker_in_args(self):
+        # 新格式：Args 段仅 ``name: description.``， required 不再出现于 doc，
+        # 完全交给 signature 表达（有无 default 区分必填/可选）。
         schema = {
             "type": "object",
             "properties": {
@@ -1426,11 +1428,14 @@ class TestMakeToolFuncSignature:
         }
         fn, _ = self._make_func("browser_console_messages", schema)
         doc = getattr(fn, "__doc__", "")
-        assert "level: string (required)" not in doc
-        assert "    level: string" in doc
-        assert "    target: string (required)" in doc
+        assert "(required)" not in doc
+        # Args 段仅保留 ``name:``（无 description 时仅 "name:"）
+        assert "    level:" in doc
+        assert "    target:" in doc
+        # 原「: string」类型后缀不再进 doc（类型走 signature）
+        assert "    level: string" not in doc
 
-    def test_docstring_appends_schema_constraint_suffixes(self):
+    def test_docstring_renders_annotations_section(self):
         schema = {
             "type": "object",
             "properties": {
@@ -1465,57 +1470,74 @@ class TestMakeToolFuncSignature:
         }
         fn, _ = self._make_func("browser_console_messages", schema)
         doc = getattr(fn, "__doc__", "")
+        # Args 段仅走 description，不再含「— Allowed: ...」之类翻译
+        assert "    level: Log level." in doc
+        assert "    index: Target index." in doc
+        assert "Allowed:" not in doc
+        assert "Range:" not in doc
+        assert "Items must be unique." not in doc
+        # Annotations 段顶格头 + JSON 透传
+        assert "\nAnnotations:\n" in doc
+        # enum 已进 signature 不再出现在 Annotations
+        assert '"enum":' not in doc
+        assert '    index: {"minimum": 0, "maximum": 100}' in doc
         assert (
-            "level: string — Log level.\n"
-            "        Allowed: error | warning | info | debug."
+            '    paths: {"items": {"type": "string"}, '
+            '"minItems": 1, "maxItems": 10, "uniqueItems": true}'
             in doc
         )
-        assert (
-            "index: number (required) — Target index.\n"
-            "        Range: 0..100."
-            in doc
-        )
-        assert (
-            "paths: array — Local file paths.\n"
-            "        Items: string. Items count: 1..10. Items must be unique."
-            in doc
-        )
-        assert (
-            "metadata: object — Extra metadata.\n"
-            "        Extra values: string. Keys match: ^[a-z_]+$."
-            in doc
-        )
+        # metadata 单行超 100 列 → 多行 JSON；首行 以 ``    metadata: {`` 起，
+        # 内部 key 8 空格缩进，闭合 ``}`` 4 空格
+        assert "    metadata: {\n" in doc
+        assert '        "additionalProperties": {' in doc
+        assert '        "propertyNames": {' in doc
 
-    def test_docstring_four_branch_layout(self):
+    def test_docstring_three_section_layout(self):
+        # 「头部 description + Args + Annotations」完整布局验证
         schema = {
             "type": "object",
             "properties": {
-                "desc_and_suffix": {
+                "desc_and_anno": {
                     "type": "string",
                     "description": "Operation to perform",
                     "enum": ["list", "new"],
+                    "pattern": "^[a-z]+$",
                 },
                 "desc_only": {
                     "type": "number",
                     "description": "Target index.",
                 },
-                "suffix_only": {
+                "anno_only": {
                     "type": "array",
                     "items": {"type": "string"},
                     "minItems": 1,
-                    "maxItems": 10,
                 },
-                "bare": {
-                    "type": "boolean",
-                },
+                "bare": {"type": "boolean"},
             },
-            "required": ["desc_and_suffix"],
+            "required": ["desc_and_anno"],
         }
         fn, _ = self._make_func("browser_tabs", schema)
         doc = getattr(fn, "__doc__", "")
-        assert "    desc_and_suffix: string (required) — Operation to perform" in doc
-        assert "        Allowed: list | new." in doc
-        assert "    desc_only: number — Target index." in doc
-        assert "    suffix_only: array — Items: string. Items count: 1..10." in doc
-        assert "    bare: boolean" in doc
-        assert "    bare: boolean — " not in doc
+        # 顶部头 desc + 空行 + Args:
+        assert doc.startswith("desc\n\nArgs:\n")
+        # Args 段四个分支
+        assert "    desc_and_anno: Operation to perform" in doc
+        assert "    desc_only: Target index." in doc
+        # 无 description 时 "name:" 仍保留冒号
+        assert "    anno_only:" in doc
+        assert "    bare:" in doc
+        # bare 不再拼任何后缀
+        assert "    bare:\n" in doc or doc.rstrip().endswith("    bare:")
+        # Annotations 段：desc_and_anno 仅保留 pattern（enum 已走 signature）
+        assert '    desc_and_anno: {"pattern": "^[a-z]+$"}' in doc
+        # desc_only 无剩余字段 → 不出现在 Annotations
+        # anno_only 有 items / minItems
+        assert (
+            '    anno_only: {"items": {"type": "string"}, "minItems": 1}'
+            in doc
+        )
+        # bare 无剩余 → Annotations 不出现该名
+        anno_idx = doc.index("Annotations:")
+        anno_section = doc[anno_idx:]
+        assert "bare" not in anno_section
+        assert "desc_only" not in anno_section

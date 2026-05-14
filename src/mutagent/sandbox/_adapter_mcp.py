@@ -813,35 +813,39 @@ def _make_tool_func(conn: MCPConnection, tool_name: str,
     refactor-wrapper-faithful-signature.md）；wrapper 内用 ``sig.bind`` 把
     位置调用规范化为 kwargs 后再走 RPC。构造失败时回落为
     ``(**kwargs)`` wrapper。
+
+    docstring 层：按 feature-mcp-schema-help-display.iter2.md 渲染为
+    「头部 description + Args 段 + Annotations 段」三段式。Args 段仅
+    写 ``name: description.``，所有约束字段原词进入 ``Annotations:`` 段
+    以 JSON 透传。
     """
-    from mutagent.sandbox._signature import format_param_description_suffix
+    from mutagent.sandbox._signature import format_annotations_section
 
-    properties = input_schema.get("properties", {})
-    required = set(input_schema.get("required", []))
+    properties = input_schema.get("properties", {}) or {}
 
-    doc_lines = [description, ""]
-    if properties:
-        doc_lines.append("Args:")
+    sections: list[str] = []
+    if description:
+        sections.append(description)
+
+    if isinstance(properties, dict) and properties:
+        args_lines = ["Args:"]
         for pname, pinfo in properties.items():
-            ptype = pinfo.get("type", "any")
-            pdesc = pinfo.get("description", "")
-            suffix = format_param_description_suffix(pinfo)
-            has_schema_default = "default" in pinfo
-            req_mark = (
-                " (required)"
-                if (pname in required and not has_schema_default)
-                else ""
+            pdesc = (
+                pinfo.get("description", "")
+                if isinstance(pinfo, dict) else ""
             )
-            head = f"    {pname}: {ptype}{req_mark}"
             if pdesc:
-                doc_lines.append(f"{head} — {pdesc}")
-                if suffix:
-                    doc_lines.append(f"        {suffix}")
-            elif suffix:
-                doc_lines.append(f"{head} — {suffix}")
+                args_lines.append(f"    {pname}: {pdesc}")
             else:
-                doc_lines.append(head)
-    doc = '\n'.join(doc_lines)
+                # 无 description 仍保留 "name:"，与有描述行视觉一致
+                args_lines.append(f"    {pname}:")
+        sections.append("\n".join(args_lines))
+
+        annotations_section = format_annotations_section(properties)
+        if annotations_section:
+            sections.append(annotations_section)
+
+    doc = "\n\n".join(sections)
 
     async def call_with_retry(kwargs: dict[str, Any]) -> Any:
         from mutagent.sandbox._signature import _MISSING

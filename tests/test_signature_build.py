@@ -13,9 +13,10 @@ import pytest
 
 from mutagent.sandbox._signature import (
     _MISSING,
+    _format_literal_annotation,
     build_signature,
+    format_annotations_section,
     format_callable_signature,
-    format_param_description_suffix,
     format_signature,
     json_type_to_annotation,
     mcp_schema_to_specs,
@@ -117,74 +118,106 @@ class TestMcpSchemaToSpecs:
         ]
 
 
-class TestFormatParamDescriptionSuffix:
+class TestFormatLiteralAnnotation:
+    """feature-mcp-schema-help-display.iter2.md 【enum → Literal 升级】。"""
 
-    def test_empty_constraints_returns_empty(self) -> None:
-        assert format_param_description_suffix({"type": "string"}) == ""
-
-    def test_formats_supported_constraints_in_stable_order(self) -> None:
-        suffix = format_param_description_suffix({
-            "type": "array",
-            "enum": ["alpha", "beta"],
-            "const": "v1",
-            "minimum": 0,
-            "maximum": 100,
-            "multipleOf": 0.5,
-            "minLength": 1,
-            "maxLength": 8,
-            "pattern": "^[a-z_]+$",
-            "format": "email",
-            "items": {"type": "string"},
-            "minItems": 1,
-            "maxItems": 10,
-            "uniqueItems": True,
-            "additionalProperties": {"type": "string"},
-            "propertyNames": {"pattern": "^[a-z]+$", "minLength": 1, "maxLength": 5},
-        })
-        assert suffix == (
-            "Allowed: alpha | beta. Must be: \"v1\". Range: 0..100. "
-            "Multiple of: 0.5. Length: 1..8. Pattern: ^[a-z_]+$. "
-            "Format: email. Items: string. Items count: 1..10. "
-            "Items must be unique. Extra values: string. "
-            "Keys match: ^[a-z]+$. Keys length: 1..5."
-        )
-
-    def test_single_sided_and_exclusive_ranges(self) -> None:
-        assert format_param_description_suffix({"minimum": 0}) == "Range: >= 0."
-        assert format_param_description_suffix({"maximum": 10}) == "Range: <= 10."
+    def test_string_enum(self) -> None:
         assert (
-            format_param_description_suffix({
-                "exclusiveMinimum": 0,
-                "exclusiveMaximum": 1,
-            })
-            == "Range: > 0 and < 1."
+            _format_literal_annotation(["DEBUG", "INFO"])
+            == 'Literal["DEBUG", "INFO"]'
         )
 
-    def test_object_items_and_object_properties_use_spec_fallbacks(self) -> None:
+    def test_integer_enum(self) -> None:
+        assert _format_literal_annotation([1, 2, 3]) == "Literal[1, 2, 3]"
+
+    def test_mixed_type_enum(self) -> None:
+        # 混合类型也走 Literal，Python typing 原生支持
         assert (
-            format_param_description_suffix({"items": {"type": "object"}})
-            == "Each item is an object; see raw schema."
-        )
-        assert format_param_description_suffix({
-            "type": "object",
-            "properties": {"name": {"type": "string"}},
-        }) == ""
-        assert (
-            format_param_description_suffix({"additionalProperties": False})
-            == "No extra keys."
+            _format_literal_annotation(["x", 1, None, True])
+            == 'Literal["x", 1, None, True]'
         )
 
-    def test_unknown_top_level_constraints_append_fallback_once(self) -> None:
-        suffix = format_param_description_suffix({
-            "enum": ["list", "select"],
-            "oneOf": [{"type": "string"}],
-            "$ref": "#/$defs/Action",
-        })
-        assert suffix == (
-            "Allowed: list | select. "
-            "Additional constraints apply; see raw schema via "
-            "tool._mcp_input_schema."
+    def test_empty_returns_none(self) -> None:
+        assert _format_literal_annotation([]) is None
+
+    def test_non_iterable_returns_none(self) -> None:
+        assert _format_literal_annotation(123) is None  # type: ignore[arg-type]
+
+
+class TestFormatAnnotationsSection:
+    """feature-mcp-schema-help-display.iter2.md 【Annotations 段】渲染。"""
+
+    def test_no_remaining_fields_returns_empty(self) -> None:
+        # 只有 type/default/enum/description → 全被 signature/Args 表达 → 返空
+        properties = {
+            "a": {"type": "string", "description": "x"},
+            "b": {"type": "integer", "default": 0},
+            "c": {"type": "string", "enum": ["x", "y"]},
+        }
+        assert format_annotations_section(properties) == ""
+
+    def test_basic_constraints_pass_through_as_json(self) -> None:
+        properties = {
+            "count": {"type": "integer", "minimum": 0, "maximum": 100},
+            "name": {"type": "string", "pattern": "^[a-z]+$"},
+        }
+        result = format_annotations_section(properties)
+        assert result == (
+            "Annotations:\n"
+            '    count: {"minimum": 0, "maximum": 100}\n'
+            '    name: {"pattern": "^[a-z]+$"}'
         )
+
+    def test_chinese_value_keeps_original_chars(self) -> None:
+        # ensure_ascii=False 验证：Annotations value 包含中文时不转义
+        properties = {"name": {"type": "string", "pattern": "^中文$"}}
+        result = format_annotations_section(properties)
+        assert '"pattern": "^中文$"' in result
+        assert "\\u" not in result
+
+    def test_long_value_switches_to_indented_multiline(self) -> None:
+        # 超过 100 列阈值 → 多行 JSON
+        long_props = {f"key_{i}": {"type": "string"} for i in range(10)}
+        properties = {
+            "items_field": {
+                "type": "object",
+                "properties": long_props,
+            },
+        }
+        result = format_annotations_section(properties)
+        assert result.startswith("Annotations:\n")
+        assert "    items_field: {\n" in result
+        # 闭合 } 回到 4 空格缩进
+        assert result.rstrip().endswith("    }")
+        # 内部 key 8 空格（json indent=4 + 本函数补 4）
+        assert '\n        "properties": ' in result
+
+    def test_unknown_extension_field_passes_through(self) -> None:
+        properties = {
+            "x": {"type": "string", "x-vendor-flag": True, "format": "uuid"},
+        }
+        result = format_annotations_section(properties)
+        assert '"x-vendor-flag": true' in result
+        assert '"format": "uuid"' in result
+
+    def test_property_with_no_remaining_skips_line(self) -> None:
+        properties = {
+            "plain": {"type": "string", "description": "d"},
+            "x": {"type": "integer", "minimum": 1},
+        }
+        result = format_annotations_section(properties)
+        assert "plain" not in result
+        assert '    x: {"minimum": 1}' in result
+
+    def test_preserves_property_order(self) -> None:
+        properties = {
+            "b": {"type": "string", "pattern": "b"},
+            "a": {"type": "string", "pattern": "a"},
+        }
+        result = format_annotations_section(properties)
+        b_idx = result.index("    b:")
+        a_idx = result.index("    a:")
+        assert b_idx < a_idx
 
 
 # ---------------------------------------------------------------------------

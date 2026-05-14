@@ -94,34 +94,27 @@ def json_type_to_annotation(ptype: Any) -> str:
     return "Any"
 
 
-_IGNORED_SCHEMA_KEYS = {
-    "default",
-    "description",
-    "properties",
-    "required",
-    "title",
-    "type",
-}
+# ---------------------------------------------------------------------------
+# MCP schema → docstring 渲染（feature-mcp-schema-help-display.iter2.md）
+# ---------------------------------------------------------------------------
 
-_SUPPORTED_SCHEMA_KEYS = {
-    "additionalProperties",
-    "const",
+# Annotations 段单行 / 多行 切换阈值。100 列 = 常见 Python 行宽。
+# 作为渲染模块内部参数集中定义，不在调用点散落写死。
+_RENDER_LINE_WIDTH = 100
+
+# 按「三处投影职责唯一」原则，已被 signature / Args 段表达的 schema
+# 字段不重复出现在 Annotations 段：
+#   - type        → signature annotation
+#   - default     → signature default
+#   - enum        → signature Literal[...]
+#   - description → Args 段散文
+# 其余字段（含未知扩展）原词下放 Annotations 段。
+_SCHEMA_KEYS_TAKEN_BY_SIGNATURE = frozenset({
+    "type",
+    "default",
     "enum",
-    "exclusiveMaximum",
-    "exclusiveMinimum",
-    "format",
-    "items",
-    "maxItems",
-    "maxLength",
-    "maximum",
-    "minItems",
-    "minLength",
-    "minimum",
-    "multipleOf",
-    "pattern",
-    "propertyNames",
-    "uniqueItems",
-}
+    "description",
+})
 
 
 def _format_json_literal(value: Any) -> str:
@@ -129,144 +122,90 @@ def _format_json_literal(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-def _format_allowed_value(value: Any) -> str:
-    """enum 展示更偏向人读，不给字符串额外加引号。"""
-    if isinstance(value, str):
-        return value
-    return _format_json_literal(value)
+def _literal_part(value: Any) -> str:
+    """为 typing.Literal[...] 输出单个字面量项。
 
-
-def _format_range_clause(
-    *,
-    label: str,
-    minimum: Any = None,
-    maximum: Any = None,
-    exclusive_minimum: Any = None,
-    exclusive_maximum: Any = None,
-) -> str | None:
-    """格式化区间类约束。"""
-    lower_op = ">=" if minimum is not None else ">" if exclusive_minimum is not None else None
-    lower_value = minimum if minimum is not None else exclusive_minimum
-    upper_op = "<=" if maximum is not None else "<" if exclusive_maximum is not None else None
-    upper_value = maximum if maximum is not None else exclusive_maximum
-    if lower_op is None and upper_op is None:
-        return None
-    if (
-        lower_op == ">="
-        and upper_op == "<="
-        and lower_value is not None
-        and upper_value is not None
-    ):
-        return f"{label}: {lower_value}..{upper_value}."
-    if lower_op is not None and upper_op is not None:
-        return f"{label}: {lower_op} {lower_value} and {upper_op} {upper_value}."
-    if lower_op is not None:
-        return f"{label}: {lower_op} {lower_value}."
-    return f"{label}: {upper_op} {upper_value}."
-
-
-def format_param_description_suffix(pinfo: Mapping[str, Any]) -> str:
-    """把 JSON Schema property 的约束字段翻译成 docstring 描述后缀。
-
-    输入一个 property dict（MCP ``input_schema.properties.<name>``），输出一段
-    英文后缀字符串，形如 ``"Allowed: a | b. Range: 0..100."``。无约束时返回
-    空串。
-
-    翻译规则见 spec ``feature-mcp-schema-help-display.md``。本函数不处理
-    ``description`` / ``type`` / ``default`` / ``required``，这些由 signature 和
-    docstring 基线格式承担。
-
-    不认识的顶层关键字（``oneOf`` / ``anyOf`` / ``allOf`` / ``$ref`` / ``not`` 等）
-    触发兜底句 ``"Additional constraints apply; see raw schema via
-    tool._mcp_input_schema."``。
+    - str → 双引号（与 spec 示例一致，不走 Python repr 的单引号）
+    - True / False / None → Python 关键字拼写（typing.Literal 只认 Python 值）
+    - 数字 → repr；其他 → fallback repr
     """
-    clauses: list[str] = []
+    if value is True:
+        return "True"
+    if value is False:
+        return "False"
+    if value is None:
+        return "None"
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    return repr(value)
 
-    enum_values = pinfo.get("enum")
-    if isinstance(enum_values, list) and enum_values:
-        values = " | ".join(_format_allowed_value(v) for v in enum_values)
-        clauses.append(f"Allowed: {values}.")
 
-    if "const" in pinfo:
-        clauses.append(f"Must be: {_format_json_literal(pinfo['const'])}.")
+def _format_literal_annotation(enum_values: Iterable[Any]) -> str | None:
+    """把 enum 列表渲染为 ``Literal[...]`` annotation 字符串。
 
-    range_clause = _format_range_clause(
-        label="Range",
-        minimum=pinfo.get("minimum"),
-        maximum=pinfo.get("maximum"),
-        exclusive_minimum=pinfo.get("exclusiveMinimum"),
-        exclusive_maximum=pinfo.get("exclusiveMaximum"),
-    )
-    if range_clause:
-        clauses.append(range_clause)
+    空 / 非可迭代 返回 ``None``，调用方回落到 ``json_type_to_annotation``。
+    同类型 / 混合类型字面量一律走 typing.Literal，Python typing 原生支持。
+    """
+    try:
+        items = list(enum_values)
+    except TypeError:
+        return None
+    if not items:
+        return None
+    return f"Literal[{', '.join(_literal_part(v) for v in items)}]"
 
-    if "multipleOf" in pinfo:
-        clauses.append(f"Multiple of: {pinfo['multipleOf']}.")
 
-    length_clause = _format_range_clause(
-        label="Length",
-        minimum=pinfo.get("minLength"),
-        maximum=pinfo.get("maxLength"),
-    )
-    if length_clause:
-        clauses.append(length_clause)
+def _indent_continuation(text: str, indent: str = "    ") -> str:
+    """多行文本除首行外全部加 indent 前缀，首行不变。
 
-    pattern = pinfo.get("pattern")
-    if isinstance(pattern, str) and pattern:
-        clauses.append(f"Pattern: {pattern}.")
+    用于将 ``json.dumps(..., indent=4)`` 产生的多行 JSON 嵌入到
+    ``    name: {...}`` 结构里：内部 key 8 空格缩进，闭合 ``}`` 4 空格。
+    """
+    lines = text.split("\n")
+    if len(lines) == 1:
+        return lines[0]
+    return lines[0] + "".join(f"\n{indent}{ln}" for ln in lines[1:])
 
-    fmt = pinfo.get("format")
-    if isinstance(fmt, str) and fmt:
-        clauses.append(f"Format: {fmt}.")
 
-    items = pinfo.get("items")
-    if isinstance(items, Mapping):
-        item_type = items.get("type")
-        if item_type == "object":
-            clauses.append("Each item is an object; see raw schema.")
-        elif isinstance(item_type, str):
-            clauses.append(f"Items: {item_type}.")
+def format_annotations_section(
+    properties: Mapping[str, Any],
+    *,
+    line_width: int = _RENDER_LINE_WIDTH,
+) -> str:
+    """根据 MCP schema properties 渲染 ``Annotations:`` 段。
 
-    items_count_clause = _format_range_clause(
-        label="Items count",
-        minimum=pinfo.get("minItems"),
-        maximum=pinfo.get("maxItems"),
-    )
-    if items_count_clause:
-        clauses.append(items_count_clause)
+    - 剩余字段 = ``pinfo`` 去掉 ``_SCHEMA_KEYS_TAKEN_BY_SIGNATURE`` 的部分
+    - 按 properties 原顺序迭代；property 无剩余字段 → 不输出该行
+    - 所有 property 都没剩余 → 返回空串（上层整段省略）
+    - 单行 ≤ ``line_width`` → 单行 JSON；超阈值 → ``indent=4`` 多行
+    - 全程 ``ensure_ascii=False``，中文 / Unicode 直出原字符
 
-    if pinfo.get("uniqueItems") is True:
-        clauses.append("Items must be unique.")
-
-    additional_properties = pinfo.get("additionalProperties")
-    if additional_properties is False:
-        clauses.append("No extra keys.")
-    elif isinstance(additional_properties, Mapping):
-        extra_type = additional_properties.get("type")
-        if isinstance(extra_type, str):
-            clauses.append(f"Extra values: {extra_type}.")
-
-    property_names = pinfo.get("propertyNames")
-    if isinstance(property_names, Mapping):
-        key_pattern = property_names.get("pattern")
-        if isinstance(key_pattern, str) and key_pattern:
-            clauses.append(f"Keys match: {key_pattern}.")
-        keys_length_clause = _format_range_clause(
-            label="Keys length",
-            minimum=property_names.get("minLength"),
-            maximum=property_names.get("maxLength"),
-        )
-        if keys_length_clause:
-            clauses.append(keys_length_clause)
-
-    unknown_keys = set(pinfo) - _IGNORED_SCHEMA_KEYS - _SUPPORTED_SCHEMA_KEYS
-    if unknown_keys:
-        clauses.append(
-            "Additional constraints apply; see raw schema via "
-            "tool._mcp_input_schema."
-        )
-
-    return " ".join(clauses)
+    返回以 ``"Annotations:"`` 顶格头起始、后跟多个 ``    name: <json>``
+    行的多行字符串；无字段时返空串。
+    """
+    if not isinstance(properties, Mapping):
+        return ""
+    entries: list[str] = []
+    for pname, pinfo in properties.items():
+        if not isinstance(pname, str) or not isinstance(pinfo, Mapping):
+            continue
+        # 保顺剔除已被 signature / Args 段表达的字段
+        remaining: dict[str, Any] = {
+            k: v for k, v in pinfo.items()
+            if k not in _SCHEMA_KEYS_TAKEN_BY_SIGNATURE
+        }
+        if not remaining:
+            continue
+        single = json.dumps(remaining, ensure_ascii=False)
+        prefix = f"    {pname}: "
+        if len(prefix) + len(single) <= line_width:
+            entries.append(f"{prefix}{single}")
+        else:
+            multi = json.dumps(remaining, ensure_ascii=False, indent=4)
+            entries.append(f"{prefix}{_indent_continuation(multi)}")
+    if not entries:
+        return ""
+    return "Annotations:\n" + "\n".join(entries)
 
 
 def mcp_schema_to_specs(input_schema: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -276,7 +215,8 @@ def mcp_schema_to_specs(input_schema: Mapping[str, Any]) -> list[dict[str, Any]]
     - ``required`` 成员 → ``required=True``；其余参数显式写 ``required=False``
     - ``default`` 原样透传（JSON 原生值，可安全回传）
     - optional-no-default 参数注入 ``default=_MISSING``，避免被错误构造成必填
-    - ``type`` → ``annotation`` 字符串
+    - ``enum`` → ``annotation`` 升级为 ``Literal[...]``（python first + IDE 补全）
+    - ``type`` → ``annotation`` 字符串（仅在无 enum 时使用）
     """
     specs: list[dict[str, Any]] = []
     properties = input_schema.get("properties") or {}
@@ -296,9 +236,19 @@ def mcp_schema_to_specs(input_schema: Mapping[str, Any]) -> list[dict[str, Any]]
             spec["default"] = info["default"]
         elif pname not in required:
             spec["default"] = _MISSING
-        ptype = info.get("type")
-        if ptype is not None:
-            spec["annotation"] = json_type_to_annotation(ptype)
+        # enum 优先升级 annotation 为 Literal[...]；堆退到 type 映射。
+        # 字符串透传，与 _RawAnnotation 展示机制兼容。
+        enum_values = info.get("enum")
+        literal = (
+            _format_literal_annotation(enum_values)
+            if isinstance(enum_values, list) else None
+        )
+        if literal is not None:
+            spec["annotation"] = literal
+        else:
+            ptype = info.get("type")
+            if ptype is not None:
+                spec["annotation"] = json_type_to_annotation(ptype)
         specs.append(spec)
     return specs
 

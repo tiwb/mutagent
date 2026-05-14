@@ -1,15 +1,13 @@
 # MCP Schema 字段在 help() 中完整展示
 
-**状态**：✅ Phase 1-2a 完成（含 iter1 修正），Phase 2b 前置已满足（Refactor R3 完成）
+**状态**：✅ 已完成
 **日期**：2026-05-13
 **类型**：功能设计
-**前置**：`bugfix-mcp-optional-param-binding.md`（已完成 Phase 1-4）
-**迭代**：`feature-mcp-schema-help-display.iter1.md`（✅ 已完成）
-**后续联动**：`refactor-namespace-describe-api.md`（消费侧统一数据层；见本文「消费侧约定」一节）
+**前置**：`bugfix-mcp-optional-param-binding.md`
 
 ## 需求
 
-`help(playwright.browser_console_messages)` 和 `help(playwright)` 展示的信息与
+`help(playwright.browser_console_messages)` 和 `help(playwright)` 展示的信息**与
 MCP server 返回的原始 JSON Schema 之间存在字段丢失，用户看不到完整的参数约束。
 
 ### 信息丢失清单
@@ -329,21 +327,16 @@ def format_param_description_suffix(
 
 **Phase 2b：`(required)` 清理（前置已满足，可启动）**
 
-- [ ] 前置确认：Settings Panel `_fn_detail` 已完成消费侧迁移（本文未继续，已由 refactor-namespace-describe-api R3 交付）
-- [ ] 移除 `_make_tool_func` 里 `(required)` 标记追加逻辑
-- [ ] 更新 Phase 2a 集成测试断言
-- [ ] 手工 review Settings Panel 和 `help()` 输出
+- [x] 前置确认：Settings Panel `_fn_detail` 已完成消费侧迁移（本文未继续，已由 refactor-namespace-describe-api R3 交付）
+- [x] 移除 `_make_tool_func` 里 `(required)` 标记追加逻辑（由 iter2 实施一并完成）
+- [x] 更新 Phase 2a 集成测试断言（iter2 重写了全套测试）
+- [x] 手工 review Settings Panel 和 `help()` 输出（人工确认通过）
 
 **依赖关系**
 
 - Phase 1 无外部依赖，可立即开工。
 - Phase 2a 在 Phase 1 合并后即可开工。
 - Phase 2b 前置 “Settings Panel `_fn_detail` 已完成消费侧迁移” 已由 `refactor-namespace-describe-api.md` R3 交付，可启动。
-
-**遗留**
-
-Phase 3（嵌套 / 罕见字段展开）暂不实施。playwright 21 tool 中无此需求，完整 schema
-已通过 `_mcp_input_schema` attr 保留。真遇到具体 MCP server 需求时另起 spec。
 
 ## 关键参考
 
@@ -362,6 +355,5 @@ Phase 3（嵌套 / 罕见字段展开）暂不实施。playwright 21 tool 中无
 
 ## 迭代
 
-- **iter1**：`feature-mcp-schema-help-display.iter1.md` — 验收反馈与修正（方案 B 独立缩进行、`_MISSING` sentinel 丢失、上游 default 双写）
-- **iter2**：`feature-mcp-schema-help-display.iter2.md` — Google-style 参数头对齐（方案 B `name (type): desc` + Python 类型词汇，依赖 Phase 2b 完成）
-- **iter3**：`feature-mcp-schema-help-display.iter3.md` — 约束行规则化（key 原词 + value Python repr，抽纯函数 `format_param_schema_lines` 供 `help()` 与 Settings Panel 共用，订正本 spec Q2 消费侧约定）
+- **iter1**：`feature-mcp-schema-help-display.iter1.md`（✅ 已完成）— 验收反馈与修正（方案 B 独立缩进行、`_MISSING` sentinel 丢失、上游 default 双写）
+- **iter2**：`feature-mcp-schema-help-display.iter2.md`（✅ 已完成）— 方向性重写。与 mutio 协商后改为三段式渲染：signature 承担 `Literal[...]` enum、Args 段仅 `name: description.`、所有约束字段原词进 `Annotations:` 段以 JSON 透传。完全取代了本 spec 的英文约束翻译路线，同时完成了 Phase 2b 的 `(required)` 清理。本 spec 中关于 iter2/iter3 的原始描述（Google-style 参数头对齐、约束行规则化）不再适用。
