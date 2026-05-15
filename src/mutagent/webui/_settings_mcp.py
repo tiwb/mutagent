@@ -14,7 +14,6 @@ import json
 import logging
 import re
 from copy import deepcopy
-from functools import partial
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -773,7 +772,7 @@ def _render_list_row(self: MCPSettingsPanel, key: str,
                     "cursor": "pointer",
                     "minWidth": "0",
                 },
-                "onClick": Callback(partial(_edit_source, key), view=self),
+                "onClick": Callback(_edit_source, key, view=self),
                 "$children": [
                     {
                         "$component": "div",
@@ -819,7 +818,7 @@ def _render_list_row(self: MCPSettingsPanel, key: str,
                 "loading": pending,
                 "disabled": btn_disabled,
                 "children": btn_label,
-                "onClick": Callback(partial(btn_handler, key), view=self),
+                "onClick": Callback(btn_handler, key, view=self),
             },
         ],
     }
@@ -846,13 +845,13 @@ def _render_list(self: MCPSettingsPanel) -> list[dict[str, Any]]:
                 "$component": "antd.Button",
                 "$id": "mcp-add-stdio",
                 "children": "+ Add stdio",
-                "onClick": Callback(partial(_start_add, "stdio"), view=self),
+                "onClick": Callback(_start_add, "stdio", view=self),
             },
             {
                 "$component": "antd.Button",
                 "$id": "mcp-add-http",
                 "children": "+ Add HTTP",
-                "onClick": Callback(partial(_start_add, "http"), view=self),
+                "onClick": Callback(_start_add, "http", view=self),
             },
         ],
     })
@@ -1055,7 +1054,7 @@ def _render_function_browser(self: MCPSettingsPanel,
                                 "padding": "2px 0",
                                 "cursor": "pointer",
                             },
-                            "onClick": Callback(partial(_toggle_fn, full_name), view=self),
+                            "onClick": Callback(_toggle_fn, full_name, view=self),
                             "$children": [
                                 {
                                     "$component": "div",
@@ -1112,7 +1111,7 @@ def _render_function_browser(self: MCPSettingsPanel,
                         "cursor": "pointer",
                         "userSelect": "none",
                     },
-                    "onClick": Callback(partial(_toggle_ns, ns_name), view=self),
+                    "onClick": Callback(_toggle_ns, ns_name, view=self),
                     "$children": [
                         {
                             "$component": "div",
@@ -1406,7 +1405,7 @@ def _render_edit(self: MCPSettingsPanel) -> list[dict[str, Any]]:
             "size": "small",
             "loading": self.pending_button.endswith(":reload"),
             "children": "Reload",
-            "onClick": Callback(partial(_btn_reload_tools, key), view=self),
+            "onClick": Callback(_btn_reload_tools, key, view=self),
         })
     items.append({
         "$component": "div",
@@ -1446,7 +1445,7 @@ def _render_edit(self: MCPSettingsPanel) -> list[dict[str, Any]]:
                 "loading": pending and self.pending_button.endswith(":disconnect"),
                 "disabled": conn_disabled,
                 "children": "Disconnect",
-                "onClick": Callback(partial(_btn_disconnect, key), view=self),
+                "onClick": Callback(_btn_disconnect, key, view=self),
             })
         elif state == "failed":
             action_right.append({
@@ -1456,7 +1455,7 @@ def _render_edit(self: MCPSettingsPanel) -> list[dict[str, Any]]:
                 "loading": pending and self.pending_button.endswith(":reconnect"),
                 "disabled": conn_disabled,
                 "children": "Reconnect",
-                "onClick": Callback(partial(_btn_reconnect, key), view=self),
+                "onClick": Callback(_btn_reconnect, key, view=self),
             })
         elif state == "connecting":
             action_right.append({
@@ -1475,7 +1474,7 @@ def _render_edit(self: MCPSettingsPanel) -> list[dict[str, Any]]:
                 "loading": pending and self.pending_button.endswith(":connect"),
                 "disabled": conn_disabled,
                 "children": "Connect",
-                "onClick": Callback(partial(_btn_connect, key), view=self),
+                "onClick": Callback(_btn_connect, key, view=self),
             })
 
     action_right.append({

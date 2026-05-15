@@ -10,7 +10,6 @@ import inspect
 import json
 import re
 from copy import deepcopy
-from functools import partial
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -615,7 +614,7 @@ def _render_list(self: LLMSettingsPanel) -> list[dict[str, Any]]:
                 "justifyContent": "flex-start",
                 "alignItems": "stretch",
             },
-            "onClick": Callback(partial(_edit_provider, key), view=self),
+            "onClick": Callback(_edit_provider, key, view=self),
             "$children": [{
                 "$component": "div",
                 "$id": f"provider-text-{key}",
@@ -670,7 +669,7 @@ def _render_list(self: LLMSettingsPanel) -> list[dict[str, Any]]:
             "$component": "antd.Button",
             "$id": _provider_add_button_id(provider_path),
             "children": f"Add {_provider_label_from_path(provider_path)}",
-            "onClick": Callback(partial(_start_add_provider, provider_path), view=self),
+            "onClick": Callback(_start_add_provider, provider_path, view=self),
         })
     items.extend([
         {
