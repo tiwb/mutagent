@@ -117,7 +117,6 @@ def __init__(self: Conversation, *, agent: Any, app: Any = None) -> None:
         id="conversation-toolbar",
         categories=["mutagent.conversation.toolbar"],
         context=ActionContext(
-            owner=self,
             data={"conversation": self},
         ),
         label_mode="auto",
@@ -152,7 +151,6 @@ def _refresh_shell(self: Conversation) -> None:
     self.chat_input.disabled = False
     self.chat_input.is_busy = self.is_busy
     self.toolbar.context = ActionContext(
-        owner=self,
         data={"conversation": self},
     )
     self.status_bar.invalidate()

@@ -30,7 +30,7 @@ def __init__(
     self.toolbar = ActionToolbar(
         id="chat-input-toolbar",
         categories=["mutagent.chat_input.toolbar"],
-        context=ActionContext(owner=self, data={"chat_input": self}),
+        context=ActionContext(data={"chat_input": self}),
         label_mode="auto",
     )
     self.conversation = None
@@ -79,7 +79,6 @@ def render(self: ChatInput) -> ViewBlock:
         else "Type a message… (Ctrl+Enter to send)"
     )
     self.toolbar.context = ActionContext(
-        owner=self,
         data={
             "chat_input": self,
             "conversation": self.conversation,
