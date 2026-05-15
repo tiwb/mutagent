@@ -1,7 +1,7 @@
 """mutagent.webui -- built-in WebUI: agent widgets, actions, server, and CLI."""
 
 from .conversation import Conversation
-from .settings import SettingsPanel, SettingsDrawer
+from .settings import SettingsPanel, SettingsPage
 from .toolbar import AgentStatusBar
 from .messages import (
     MessageList,
@@ -25,7 +25,7 @@ from .server import WebUIServer
 __all__ = [
     "Conversation",
     "SettingsPanel",
-    "SettingsDrawer",
+    "SettingsPage",
     "AgentStatusBar",
     "MessageList",
     "ChatItem",
@@ -46,5 +46,5 @@ __all__ = [
     "WebUIServer",
 ]
 
-from . import _settings_llm  # noqa: E402,F401 — ensure SettingsPanel subclasses are registered before SettingsDrawer instantiates
+from . import _settings_llm  # noqa: E402,F401 — ensure SettingsPanel subclasses are registered before SettingsPage instantiates
 from . import _settings_mcp  # noqa: E402,F401

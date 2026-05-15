@@ -889,18 +889,7 @@ def _render_list(self: MCPSettingsPanel) -> list[dict[str, Any]]:
         "children": f"Config file: {_config_path(self)}",
     })
 
-    items.append({
-        "$component": "antd.Space",
-        "$id": "mcp-list-actions",
-        "$children": [
-            {
-                "$component": "antd.Button",
-                "$id": "mcp-close",
-                "children": "Close",
-                "onClick": Callback(_close_panel, view=self),
-            },
-        ],
-    })
+
     return items
 
 

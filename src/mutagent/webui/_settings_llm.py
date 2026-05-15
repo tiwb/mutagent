@@ -729,23 +729,11 @@ def _render_list(self: LLMSettingsPanel) -> list[dict[str, Any]]:
             "children": f"Config file: {_config_path(self)}",
         },
         {
-            "$component": "antd.Space",
-            "$id": "settings-list-actions",
-            "$children": [
-                {
-                    "$component": "antd.Button",
-                    "$id": "cancel",
-                    "children": "Cancel",
-                    "onClick": Callback(_cancel_settings, view=self),
-                },
-                {
-                    "$component": "antd.Button",
-                    "$id": "save-all",
-                    "type": "primary",
-                    "children": "Save Settings",
-                    "onClick": Callback(_save_all_settings, view=self),
-                },
-            ],
+            "$component": "antd.Button",
+            "$id": "save-all",
+            "type": "primary",
+            "children": "Save Settings",
+            "onClick": Callback(_save_all_settings, view=self),
         },
     ])
     return items

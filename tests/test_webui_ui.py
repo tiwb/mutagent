@@ -39,7 +39,7 @@ def test_conversation_child_views_have_stable_ids():
         conversation.message_list.id,
         conversation.chat_input.id,
         conversation.chat_input.toolbar.id,
-        conversation.settings_drawer.id,
+        conversation.settings_page.id,
     }
 
     assert "" not in child_ids
@@ -117,13 +117,24 @@ def test_chat_input_renders_unified_shell_and_press_enter_handler():
     assert "onSubmit" in shell
 
 
-def test_settings_drawer_renders_inline_in_conversation():
-    """SettingsDrawer is a View child — rendered as direct child in conversation tree."""
+def test_settings_page_excluded_from_conversation_mode_render():
+    """对话模式（current_route == ""）下，root 不包含 SettingsPage。
+
+    双模式架构下，设置页只在 ``current_route.startswith("settings")`` 时参与 wire tree。
+    对话模式下三个子节点严格是 toolbar-shell / messages-shell / chat_input View。
+    """
     conversation = Conversation(agent=_DummyAgent())
+    assert conversation.current_route == ""
+
     root = conversation.render().items[0]
-    # settings_drawer is the 4th child (after toolbar-shell, messages-shell, chat_input)
-    drawer_child = root["$children"][3]
-    assert drawer_child is conversation.settings_drawer
+    children = root["$children"]
+
+    assert len(children) == 3
+    assert children[0]["$id"] == "toolbar-shell"
+    assert children[1]["$id"] == "messages-shell"
+    assert children[2] is conversation.chat_input
+    # settings_page 不在对话模式的 wire tree 中
+    assert all(child is not conversation.settings_page for child in children)
 
 
 def test_settings_panel_list_page_only_offers_anthropic_and_openai():

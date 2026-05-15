@@ -290,20 +290,13 @@ class MainMenuAction(Action):
     variant = "dropdown"
 
     def menu_actions(self, context: ActionContext) -> list[ActionRef]:
-        # 延迟 import 规避 _toolbar_impl ↔ _settings_drawer_impl 启动期循环
-        from mutagent.webui._settings_drawer_impl import (
-            OpenSettingsAction,
-            RefreshModelsAction,
-        )
+        # 延迟 import 规避 _toolbar_impl ↔ _settings_page_impl 启动期循环
+        from mutagent.webui._settings_page_impl import OpenSettingsAction
 
-        drawer = context.get("settings_drawer")
-        items: list[ActionRef] = []
-        if drawer is not None:
-            for panel in drawer.list_panels():
-                items.append(ActionRef(action=OpenSettingsAction(
-                    panel_id=panel.panel_id,
-                    label=panel.panel_title,
-                    placement=getattr(panel, "panel_placement", ""),
-                )))
-        items.append(ActionRef(action=RefreshModelsAction))
-        return items
+        return [
+            ActionRef(action=OpenSettingsAction(
+                panel_id="",
+                label="Settings",
+                placement="settings:10/10",
+            )),
+        ]

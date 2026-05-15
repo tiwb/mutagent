@@ -141,7 +141,7 @@ def __init__(
             for message in _runtime_messages(registry):
                 await ws.send_json(message)
             channel = WebSocketChannel(ws)
-            viewport = ViewPort(conversation, channel)
+            viewport = ViewPort(conversation, channel, _client=first_message.get("client"))
             await viewport.initialize()
             await conversation.rendered()
             try:

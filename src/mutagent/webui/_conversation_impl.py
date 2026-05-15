@@ -20,8 +20,9 @@ from mutagent.webui.messages import (
     UserTextItem,
 )
 from mutagent.webui.toolbar import AgentStatusBar
-from mutagent.webui.settings import SettingsDrawer
+from mutagent.webui.settings import SettingsPage
 from mutgui import ActionContext, ActionToolbar, Callback, ViewBlock
+from mutgui.events import Event
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,22 @@ def _find_last_assistant(items: list[Any]) -> AssistantTextItem | None:
     return None
 
 
+# ── 路由解析 / 构造 ───────────────────────────────────────────
+#
+# route 是裸字符串，遵循 "<page>" 或 "<page>/<sub>" 的扁平约定。
+# URL hash 形如 "#/<page>/<sub>"，前缀 ``#/`` 给未来 ``#/history``
+# 等顶级页面留扩展空间。
+
+def _parse_hash(hash_value: str) -> str:
+    """hash → route。``"#/"`` / ``""`` → ``""``；``"#/settings/llm"`` → ``"settings/llm"``。"""
+    return hash_value.lstrip("#").lstrip("/")
+
+
+def _hash_for_route(route: str) -> str:
+    """route → hash。"""
+    return f"#/{route}" if route else "#/"
+
+
 @mutagent.impl(Conversation.__init__)
 def __init__(self: Conversation, *, agent: Any, app: Any = None) -> None:
     super(Conversation, self).__init__()
@@ -70,6 +87,8 @@ def __init__(self: Conversation, *, agent: Any, app: Any = None) -> None:
     self._turn_output_tokens = 0
     self._turn_started_at = 0.0
     self._total_cost = 0.0
+    # 路由：单一真相源。"" = 对话；"settings" / "settings/<id>" = 设置页
+    self.current_route = ""
     # 模块级函数绑定到 self（Conversation 类未声明这些为方法，手动用 partial 绑）
     self._handle_model_change = partial(_handle_model_change, self)
     self._handle_send = partial(_handle_send, self)
@@ -86,21 +105,34 @@ def __init__(self: Conversation, *, agent: Any, app: Any = None) -> None:
     self.chat_input.id = "chat-input"
     self.chat_input.conversation = self
     self.refresh_models = partial(_refresh_models_from_config, self)
-    self.settings_drawer = SettingsDrawer(
+    # SettingsPage：注入两个 request 回调，由它请求 Conversation 切换路由
+    self.settings_page = SettingsPage(
         app=app,
         agent=agent,
         on_models_changed=self.refresh_models,
+        on_request_close=partial(_on_settings_request_close, self),
+        on_request_navigate=partial(_on_settings_request_navigate, self),
     )
     self.toolbar = ActionToolbar(
         id="conversation-toolbar",
         categories=["mutagent.conversation.toolbar"],
         context=ActionContext(
             owner=self,
-            data={"conversation": self, "settings_drawer": self.settings_drawer},
+            data={"conversation": self},
         ),
         label_mode="auto",
     )
     self._subscription = agent.subscribe(self._handle_agent_event)
+
+
+async def _on_settings_request_close(self: Conversation) -> None:
+    """SettingsPage 请求关闭设置页 — 走 navigate_to 让路由 + URL 同步。"""
+    await self.navigate_to("")
+
+
+async def _on_settings_request_navigate(self: Conversation, route: str) -> None:
+    """SettingsPage 请求切到指定路由（菜单点击）— 同上。"""
+    await self.navigate_to(route)
 
 
 def _refresh_shell(self: Conversation) -> None:
@@ -121,7 +153,7 @@ def _refresh_shell(self: Conversation) -> None:
     self.chat_input.is_busy = self.is_busy
     self.toolbar.context = ActionContext(
         owner=self,
-        data={"conversation": self, "settings_drawer": self.settings_drawer},
+        data={"conversation": self},
     )
     self.status_bar.invalidate()
     self.chat_input.invalidate()
@@ -376,9 +408,107 @@ async def _handle_agent_event(self: Conversation, event: StreamEvent) -> None:
     self.invalidate()
 
 
+# ── 路由 / 双模式 render / 事件 ──────────────────────────────
+
+
+async def _apply_route(self: Conversation, route: str) -> None:
+    """按 prev/new 是否在 settings 内，分四象限处理 panel 生命周期。
+
+    最后写入 ``self.current_route``。``invalidate`` 由调用方负责。
+    """
+    prev = self.current_route
+    prev_in_settings = prev.startswith("settings")
+    new_in_settings = route.startswith("settings")
+
+    if new_in_settings:
+        # 解析目标 panel_id；空则用默认（SettingsPage.activate 内部兜底）
+        new_panel_id = ""
+        if route.startswith("settings/"):
+            new_panel_id = route[len("settings/"):]
+        # 从 settings → settings 同模式切换：activate 内部已处理 close 旧 panel
+        await self.settings_page.activate(new_panel_id)
+    elif prev_in_settings:
+        # 离开 settings → close 当前 panel
+        await self.settings_page.deactivate()
+    # 其他象限（conversation → conversation）无需做 panel 生命周期处理
+
+    self.current_route = route
+
+
+@mutagent.impl(Conversation.navigate_to)
+async def navigate_to(self: Conversation, route: str) -> None:
+    """编程式导航 — 后端主动改路由 + 同步 URL hash。
+
+    防循环：``mutgui.setHash`` 走 ``pushState/replaceState``，W3C 规定
+    不触发 ``hashchange`` 事件 → 不会回传后端 → 不会循环。
+    """
+    if route == self.current_route:
+        return
+    await _apply_route(self, route)
+    try:
+        await self.send_command("mutgui.setHash", hash=_hash_for_route(route))
+    except RuntimeError:
+        # 单元测试或没有 ViewPort 上下文时跳过 setHash；状态切换仍然完成
+        pass
+    self.invalidate()
+
+
+@mutagent.impl(Conversation.on_hash_change)
+async def on_hash_change(self: Conversation, hash_value: str) -> None:
+    """浏览器侧 hash 变化（back / forward / 手输 / 初始握手）→ 同步状态。
+
+    **不**回发 setHash —— URL 已经在前端是新值。
+    """
+    route = _parse_hash(hash_value)
+    if route == self.current_route:
+        return
+    await _apply_route(self, route)
+    self.invalidate()
+
+
+@mutagent.impl(Conversation.on_event)
+async def on_event(self: Conversation, event: Event) -> bool:
+    """拦截 root 级 ``$hashchange`` 系统事件，其他事件走默认子组件分发。
+
+    ``source: []`` 才到得了 root View 的 ``on_event``（``component_id == ""``）。
+    """
+    if event.component_id == "" and event.name == "$hashchange":
+        new_hash = ""
+        if isinstance(event.data, dict):
+            new_hash = str(event.data.get("hash", "") or "")
+        await on_hash_change(self, new_hash)
+        return True
+    return await super(Conversation, self).on_event(event)
+
+
 @mutagent.impl(Conversation.render)
 def render(self: Conversation) -> ViewBlock:
     _refresh_shell(self)
+    in_settings = self.current_route.startswith("settings")
+    if in_settings:
+        children: list[Any] = [self.settings_page]
+    else:
+        children = [
+            {
+                "$component": "div",
+                "$id": "toolbar-shell",
+                "style": {"padding": "8px 12px"},
+                "$children": [self.toolbar],
+            },
+            {
+                "$component": "div",
+                "$id": "messages-shell",
+                "style": {
+                    "flex": 1,
+                    "minHeight": 0,
+                    "display": "flex",
+                    "flexDirection": "column",
+                    "overflow": "hidden",
+                },
+                "$children": [self.message_list],
+            },
+            self.chat_input,
+        ]
     return ViewBlock([
         {
             "$component": "div",
@@ -394,27 +524,6 @@ def render(self: Conversation) -> ViewBlock:
                 "gap": 0,
                 "position": "relative",
             },
-            "$children": [
-                {
-                    "$component": "div",
-                    "$id": "toolbar-shell",
-                    "style": {"padding": "8px 12px"},
-                    "$children": [self.toolbar],
-                },
-                {
-                    "$component": "div",
-                    "$id": "messages-shell",
-                    "style": {
-                        "flex": 1,
-                        "minHeight": 0,
-                        "display": "flex",
-                        "flexDirection": "column",
-                        "overflow": "hidden",
-                    },
-                    "$children": [self.message_list],
-                },
-                self.chat_input,
-                self.settings_drawer,
-            ],
+            "$children": children,
         }
     ])
