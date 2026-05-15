@@ -445,11 +445,7 @@ async def navigate_to(self: Conversation, route: str) -> None:
     if route == self.current_route:
         return
     await _apply_route(self, route)
-    try:
-        await self.send_command("mutgui.setHash", hash=_hash_for_route(route))
-    except RuntimeError:
-        # 单元测试或没有 ViewPort 上下文时跳过 setHash；状态切换仍然完成
-        pass
+    await self.broadcast_command("mutgui.setHash", hash=_hash_for_route(route))
     self.invalidate()
 
 
@@ -463,6 +459,7 @@ async def on_hash_change(self: Conversation, hash_value: str) -> None:
     if route == self.current_route:
         return
     await _apply_route(self, route)
+    await self.broadcast_command("mutgui.setHash", hash=hash_value)
     self.invalidate()
 
 

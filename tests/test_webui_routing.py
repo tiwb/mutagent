@@ -72,14 +72,15 @@ def _make_conversation() -> Conversation:
     return Conversation(agent=_DummyAgent())
 
 
-def _patch_send_command(conv: Conversation) -> list[tuple[str, dict[str, Any]]]:
-    """劫持 send_command 记录调用，绕开 ViewPort 上下文要求。"""
+def _patch_commands(conv: Conversation) -> list[tuple[str, dict[str, Any]]]:
+    """劫持 send_command + broadcast_command 记录调用，绕开 ViewPort 上下文要求。"""
     calls: list[tuple[str, dict[str, Any]]] = []
 
     async def _record(name: str, /, **args: Any) -> None:
         calls.append((name, args))
 
     conv.send_command = _record  # type: ignore[method-assign]
+    conv.broadcast_command = _record  # type: ignore[method-assign]
     return calls
 
 
@@ -104,7 +105,7 @@ def _patch_panel_lifecycle(page: SettingsPage) -> list[tuple[str, str]]:
 
 def test_navigate_to_same_route_is_noop() -> None:
     conv = _make_conversation()
-    calls = _patch_send_command(conv)
+    calls = _patch_commands(conv)
     events = _patch_panel_lifecycle(conv.settings_page)
 
     asyncio.run(conv.navigate_to(""))
@@ -116,7 +117,7 @@ def test_navigate_to_same_route_is_noop() -> None:
 
 def test_navigate_to_settings_activates_default_panel() -> None:
     conv = _make_conversation()
-    calls = _patch_send_command(conv)
+    calls = _patch_commands(conv)
     events = _patch_panel_lifecycle(conv.settings_page)
 
     asyncio.run(conv.navigate_to("settings"))
@@ -129,7 +130,7 @@ def test_navigate_to_settings_activates_default_panel() -> None:
 
 def test_navigate_to_settings_panel_id_activates_specific_panel() -> None:
     conv = _make_conversation()
-    _patch_send_command(conv)
+    _patch_commands(conv)
     events = _patch_panel_lifecycle(conv.settings_page)
 
     asyncio.run(conv.navigate_to("settings/mcp"))
@@ -141,7 +142,7 @@ def test_navigate_to_settings_panel_id_activates_specific_panel() -> None:
 
 def test_navigate_between_panels_closes_old_opens_new() -> None:
     conv = _make_conversation()
-    _patch_send_command(conv)
+    _patch_commands(conv)
     events = _patch_panel_lifecycle(conv.settings_page)
 
     asyncio.run(conv.navigate_to("settings/llm"))
@@ -155,7 +156,7 @@ def test_navigate_between_panels_closes_old_opens_new() -> None:
 
 def test_navigate_back_to_conversation_deactivates_panel() -> None:
     conv = _make_conversation()
-    _patch_send_command(conv)
+    _patch_commands(conv)
     events = _patch_panel_lifecycle(conv.settings_page)
 
     asyncio.run(conv.navigate_to("settings/mcp"))
@@ -170,7 +171,7 @@ def test_navigate_back_to_conversation_deactivates_panel() -> None:
 
 def test_on_hash_change_drives_route_state() -> None:
     conv = _make_conversation()
-    calls = _patch_send_command(conv)
+    calls = _patch_commands(conv)
     events = _patch_panel_lifecycle(conv.settings_page)
 
     asyncio.run(conv.on_hash_change("#/settings/mcp"))
@@ -178,14 +179,15 @@ def test_on_hash_change_drives_route_state() -> None:
     assert conv.current_route == "settings/mcp"
     assert conv.settings_page.active_panel_id == "mcp"
     assert events == [("open", "mcp")]
-    # 关键防循环验证：on_hash_change 不回发 setHash
-    assert calls == []
+    # on_hash_change 现在广播 setHash 给所有 tab 同步 URL；
+    # 防循环由 W3C（pushState 不触发 hashchange）保证，而非后端 silence
+    assert calls == [("mutgui.setHash", {"hash": "#/settings/mcp"})]
 
 
 def test_on_hash_change_same_route_is_noop() -> None:
     conv = _make_conversation()
     asyncio.run(conv.on_hash_change("#/"))  # 与初始 "" 等价
-    calls = _patch_send_command(conv)
+    calls = _patch_commands(conv)
     events = _patch_panel_lifecycle(conv.settings_page)
 
     asyncio.run(conv.on_hash_change("#/"))
@@ -200,7 +202,7 @@ def test_on_hash_change_same_route_is_noop() -> None:
 
 def test_settings_mode_render_only_shows_settings_page() -> None:
     conv = _make_conversation()
-    _patch_send_command(conv)
+    _patch_commands(conv)
     asyncio.run(conv.navigate_to("settings/llm"))
 
     root = conv.render().items[0]
@@ -230,7 +232,7 @@ def test_conversation_mode_render_excludes_settings_page() -> None:
 
 def test_on_event_intercepts_root_hashchange() -> None:
     conv = _make_conversation()
-    _patch_send_command(conv)
+    _patch_commands(conv)
     events = _patch_panel_lifecycle(conv.settings_page)
 
     # 模拟 mutgui 系统事件：source=[], component_id="", name="$hashchange"
@@ -259,20 +261,37 @@ def test_on_event_falls_through_for_other_events() -> None:
 
 def test_navigate_to_emits_set_hash_command_once() -> None:
     conv = _make_conversation()
-    calls = _patch_send_command(conv)
+    calls = _patch_commands(conv)
 
     asyncio.run(conv.navigate_to("settings/llm"))
 
     assert calls == [("mutgui.setHash", {"hash": "#/settings/llm"})]
 
 
-def test_on_hash_change_does_not_emit_set_hash_command() -> None:
+def test_on_hash_change_broadcasts_set_hash_to_all_tabs() -> None:
+    """手动改 hash / back-forward → 后端广播 setHash 给所有 ViewPort。
+
+    防循环由 W3C 保证（pushState 不触发 hashchange），后端负责广播。
+    """
     conv = _make_conversation()
-    calls = _patch_send_command(conv)
+    calls = _patch_commands(conv)
 
     asyncio.run(conv.on_hash_change("#/settings/llm"))
 
+    assert calls == [("mutgui.setHash", {"hash": "#/settings/llm"})]
+
+
+def test_on_hash_change_same_route_still_noop() -> None:
+    conv = _make_conversation()
+    asyncio.run(conv.on_hash_change("#/"))  # 与初始 "" 等价
+    calls = _patch_commands(conv)
+    events = _patch_panel_lifecycle(conv.settings_page)
+
+    asyncio.run(conv.on_hash_change("#/"))
+
+    # 同 route 被 _apply_route 提前 return，不回发任何命令
     assert calls == []
+    assert events == []
 
 
 # ── 兼容方法：SettingsPage.close() → on_request_close ────────────
@@ -284,7 +303,7 @@ def test_settings_page_close_routes_back_to_conversation() -> None:
     新结构下应转发为 Conversation.navigate_to("") 路径，URL 同步回 #/。
     """
     conv = _make_conversation()
-    calls = _patch_send_command(conv)
+    calls = _patch_commands(conv)
     asyncio.run(conv.navigate_to("settings/llm"))
     calls.clear()  # 清掉 navigate_to 自己产生的 setHash
 
