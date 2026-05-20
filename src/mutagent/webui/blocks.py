@@ -22,4 +22,4 @@ class ThinkingBlock(View):
     def render(self) -> ViewBlock: ...
 
 
-from . import _blocks_impl  # noqa: E402,F401
+from . import _blocks_impl as _blocks_impl  # noqa: E402,F401

@@ -13,7 +13,7 @@ from mutagent.sandbox.app import SandboxApp, PYSANDBOX_DOC
 class PySandboxTools(MCPToolSet):
     """PySandbox tool — 在沙箱中执行 Python 代码。
 
-    需要在 server 启动时设置 _app 引用。
+    需要在 server 启动时设置 app 引用。
     使用 path 路由到 MCPView（由消费者定义 view）。
     """
     path = "/mcp"

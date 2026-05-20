@@ -37,4 +37,4 @@ class AgentStatusBar(View):
     def render(self) -> ViewBlock: ...
 
 
-from . import _toolbar_impl  # noqa: E402,F401
+from . import _toolbar_impl as _toolbar_impl  # noqa: E402,F401

@@ -20,6 +20,27 @@ from mutagent.webui.settings import SettingsPage, SettingsPanel
 from mutgui import Action, ActionContext, Callback, Expr, ViewBlock
 
 
+# ── Extension ─────────────────────────────────────────────────
+
+class SettingsPageExt(mutobj.Extension[SettingsPage]):
+    """SettingsPage 的运行时私有状态。"""
+    app: Any = None
+    agent: Any = None
+    on_models_changed: Any = None
+    on_request_close: Any = None
+    on_request_navigate: Any = None
+    panels: dict[str, SettingsPanel] = mutobj.field(default_factory=dict)
+    ordered_panel_ids: list[str] = mutobj.field(default_factory=list)
+    active: bool = False
+
+
+def _spext(self: SettingsPage) -> SettingsPageExt:
+    return SettingsPageExt.get_or_create(self)
+
+
+# ── helpers ──────────────────────────────────────────────────
+
+
 def _resolve_panel_attr(cls, attr_name: str, default: str = "") -> str:
     """Extract a string class-attribute from a mutobj Declaration subclass.
 
@@ -43,6 +64,9 @@ async def _call_maybe_async(handler: Any, *args: Any) -> None:
         await result
 
 
+# ── @impl: __init__ ──────────────────────────────────────────
+
+
 @mutagent.impl(SettingsPage.__init__)
 def __init__(
     self: SettingsPage,
@@ -54,50 +78,53 @@ def __init__(
     on_request_navigate: Any = None,
 ) -> None:
     super(SettingsPage, self).__init__()
+    ext = _spext(self)
     self.id = "settings-page"
-    self._app = app
-    self._agent = agent
-    self._on_models_changed = on_models_changed
-    self._on_request_close = on_request_close
-    self._on_request_navigate = on_request_navigate
+    ext.app = app
+    ext.agent = agent
+    ext.on_models_changed = on_models_changed
+    ext.on_request_close = on_request_close
+    ext.on_request_navigate = on_request_navigate
     self.active_panel_id = ""
 
     # ── 发现并实例化全部 SettingsPanel 子类 ─────
     panel_classes = mutobj.discover_subclasses(SettingsPanel)
-    self._panels: dict[str, SettingsPanel] = {}
-    self._ordered_panel_ids: list[str] = []
+    ext.panels = {}
+    ext.ordered_panel_ids = []
 
     for cls in panel_classes:
         panel_id = _resolve_panel_attr(cls, "panel_id")
         if not panel_id:
             continue
         panel = cls(app=app, agent=agent)
-        # 字段名 `drawer` 沿用历史（panel 文件零改动），实际指向 SettingsPage 实例
-        setattr(panel, "drawer", self)
-        self._panels[panel_id] = panel
+        setattr(panel, "page", self)
+        ext.panels[panel_id] = panel
 
     def _placement_key(panel_id: str) -> str:
-        panel = self._panels[panel_id]
+        panel = ext.panels[panel_id]
         placement = _resolve_panel_attr(type(panel), "panel_placement")
         return placement or f"zzzz:{panel_id}"
 
-    self._ordered_panel_ids = sorted(self._panels.keys(), key=_placement_key)
-    if self._ordered_panel_ids:
-        self.active_panel_id = self._ordered_panel_ids[0]
+    ext.ordered_panel_ids = sorted(ext.panels.keys(), key=_placement_key)
+    if ext.ordered_panel_ids:
+        self.active_panel_id = ext.ordered_panel_ids[0]
     # 是否处于"已激活"状态。初始 False：``active_panel_id`` 只是默认占位，
-    # panel 未触发过 ``on_open``。activate / deactivate 均仅在 _active=True 时
+    # panel 未触发过 ``on_open``。activate / deactivate 均仅在 active=True 时
     # 才 close 旧 panel，避免首次进入 settings 时误发 close 事件。
-    self._active = False
+    ext.active = False
+
+
+# ── @impl: render ────────────────────────────────────────────
 
 
 @mutagent.impl(SettingsPage.render)
 def render(self: SettingsPage) -> ViewBlock:
-    active = self._panels.get(self.active_panel_id)
+    ext = _spext(self)
+    active = ext.panels.get(self.active_panel_id)
 
-    # 左侧菜单 items
     menu_items: list[dict[str, Any]] = []
-    for panel_id in self._ordered_panel_ids:
-        panel = self._panels[panel_id]
+    for panel_id in ext.ordered_panel_ids:
+        panel = ext.panels[panel_id]
         title = _resolve_panel_attr(type(panel), "panel_title") or panel_id
         menu_items.append({"key": panel_id, "label": title})
 
@@ -126,7 +153,6 @@ def render(self: SettingsPage) -> ViewBlock:
         },
     }
 
-    # 左侧标题栏 —— 与右侧 header 完全对称
     sider_header: dict[str, Any] = {
         "$component": "div",
         "$id": "settings-sider-header",
@@ -224,29 +250,26 @@ def render(self: SettingsPage) -> ViewBlock:
     return ViewBlock([root])
 
 
+# ── @impl: activate / deactivate / close / list / notify ─────
+
+
 @mutagent.impl(SettingsPage.activate)
 async def activate(self: SettingsPage, panel_id: str) -> None:
-    """切到指定 panel；仅在"已激活"状态下才 close 旧 panel。
-
-    panel_id 为空时使用默认（首个）。调用者保证 route 已变（
-    ``Conversation.navigate_to`` 在 same-route 时已早返回），所以进到这里时
-    要么 panel 变了，要么从未激活过。
-    """
-    target = panel_id or (self._ordered_panel_ids[0] if self._ordered_panel_ids else "")
-    if not target or target not in self._panels:
+    ext = _spext(self)
+    target = panel_id or (ext.ordered_panel_ids[0] if ext.ordered_panel_ids else "")
+    if not target or target not in ext.panels:
         return
 
-    # 仅当之前已激活且 target 不是当前 panel 时才 close（避免首次进入误发）
-    if self._active:
-        prev = self._panels.get(self.active_panel_id)
-        if prev is not None and prev is not self._panels.get(target):
+    if ext.active:
+        prev = ext.panels.get(self.active_panel_id)
+        if prev is not None and prev is not ext.panels.get(target):
             on_close = getattr(prev, "on_close", None)
             if callable(on_close):
                 await _call_maybe_async(on_close)
 
     self.active_panel_id = target
-    self._active = True
-    new_panel = self._panels[target]
+    ext.active = True
+    new_panel = ext.panels[target]
     on_open = getattr(new_panel, "on_open", None)
     if callable(on_open):
         await _call_maybe_async(on_open)
@@ -256,41 +279,34 @@ async def activate(self: SettingsPage, panel_id: str) -> None:
 
 @mutagent.impl(SettingsPage.deactivate)
 async def deactivate(self: SettingsPage) -> None:
-    """离开 settings 视图：触发当前 panel.on_close（仅在已激活时）。
-
-    保留 ``active_panel_id`` 不清空——作为"上次激活"记忆（当前不依赖该
-    记忆，只为未来保留可能性）。再次进入 settings 时由 Conversation 显式
-    ``activate(panel_id)``，panel_id 来自 hash 解析，状态权威。
-    """
-    if self._active:
-        prev = self._panels.get(self.active_panel_id)
+    ext = _spext(self)
+    if ext.active:
+        prev = ext.panels.get(self.active_panel_id)
         if prev is not None:
             on_close = getattr(prev, "on_close", None)
             if callable(on_close):
                 await _call_maybe_async(on_close)
-    self._active = False
+    ext.active = False
     self.invalidate()
 
 
 @mutagent.impl(SettingsPage.close)
 async def close(self: SettingsPage) -> None:
-    """兼容方法 — 转发给 on_request_close 回调。
-
-    保留以维持 ``LLMSettingsPanel._save_all_settings`` 等既有代码：
-    ``await view.drawer.close()`` 不需修改。
-    """
-    if self._on_request_close is not None:
-        await _call_maybe_async(self._on_request_close)
+    ext = _spext(self)
+    if ext.on_request_close is not None:
+        await _call_maybe_async(ext.on_request_close)
 
 
 @mutagent.impl(SettingsPage.list_panels)
 def list_panels(self: SettingsPage) -> list[SettingsPanel]:
-    return [self._panels[pid] for pid in self._ordered_panel_ids]
+    ext = _spext(self)
+    return [ext.panels[pid] for pid in ext.ordered_panel_ids]
 
 
 @mutagent.impl(SettingsPage.notify_models_changed)
 async def notify_models_changed(self: SettingsPage, preferred_model: str = "") -> None:
-    cb = self._on_models_changed
+    ext = _spext(self)
+    cb = ext.on_models_changed
     if cb is not None:
         result = cb(preferred_model)
         if inspect.isawaitable(result):
@@ -301,21 +317,17 @@ async def notify_models_changed(self: SettingsPage, preferred_model: str = "") -
 
 
 async def _on_menu_click(view: SettingsPage, panel_id: str = "") -> None:
-    """antd.Menu onClick 回调 — 前端提取 ``$0.key`` 只发 panel_id 字符串。
-
-    必须走 on_request_navigate 让 Conversation 同步 URL；
-    不直接修改 active_panel_id，否则 URL 与 state 会失同步。
-    """
+    ext = _spext(view)
     if not panel_id:
         return
-    if view._on_request_navigate is not None:
-        await _call_maybe_async(view._on_request_navigate, f"settings/{panel_id}")
+    if ext.on_request_navigate is not None:
+        await _call_maybe_async(ext.on_request_navigate, f"settings/{panel_id}")
 
 
 async def _on_back_click(view: SettingsPage, *_: Any) -> None:
-    """← 返回对话 — 走 on_request_close 让 Conversation 决定怎么退。"""
-    if view._on_request_close is not None:
-        await _call_maybe_async(view._on_request_close)
+    ext = _spext(view)
+    if ext.on_request_close is not None:
+        await _call_maybe_async(ext.on_request_close)
 
 
 # ── Settings 域 Actions ────────────────────────────

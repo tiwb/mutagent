@@ -150,6 +150,8 @@ def _wrap_async(app: SandboxApp, coro_fn: Any) -> Any:
       签名: ``(fn_name: str, future: concurrent.futures.Future) -> Any``
       返回值作为 wrapper 返回值。未设置时超时抛 TimeoutError。
     """
+    fn_name = coro_fn.__name__
+
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         loop = getattr(app, '_async_loop', None)
         if loop is None:
@@ -174,7 +176,7 @@ def _wrap_async(app: SandboxApp, coro_fn: Any) -> Any:
         else:
             if args:
                 raise TypeError(
-                    f"{_fn_name}() takes 0 positional arguments "
+                    f"{fn_name}() takes 0 positional arguments "
                     f"but {len(args)} {'was' if len(args) == 1 else 'were'} given"
                 )
             call_kwargs = kwargs
@@ -189,7 +191,7 @@ def _wrap_async(app: SandboxApp, coro_fn: Any) -> Any:
             if future.done():
                 return future.result()
             if on_timeout is not None:
-                return on_timeout(_fn_name, future)
+                return on_timeout(fn_name, future)
             raise
 
     # ---------- 真签名 + 位置调用支持 ----------
@@ -217,22 +219,19 @@ def _wrap_async(app: SandboxApp, coro_fn: Any) -> Any:
     return wrapper
 
 
-def _bind_main_loop(self: SandboxApp) -> None:
+@mutobj.impl(SandboxApp.bind_main_loop)
+def sandbox_app_bind_main_loop(self: SandboxApp) -> None:
     """把当前 event loop 注入 SandboxApp，作为 async NamespaceTools 的目标 loop。
 
     必须在主 loop 线程里调用（典型场景：每个 pysandbox entry 在
     ``run_in_executor`` 之前一次）。重复调用幂等。
 
     这是「3 处 entry 都要写的注入代码」的统一入口。新增 entry
-    时只需 ``self._app.bind_main_loop()`` 一行，避免遗漏。
+    时只需 ``self.app.bind_main_loop()`` 一行，避免遗漏。
     """
     loop = asyncio.get_running_loop()
     object.__setattr__(self, '_async_loop', loop)
     object.__setattr__(self, '_async_loop_thread_id', threading.get_ident())
-
-
-# 辅助方法挂到 SandboxApp 上，供所有 pysandbox entry 复用
-SandboxApp.bind_main_loop = _bind_main_loop  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------

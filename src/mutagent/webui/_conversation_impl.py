@@ -8,6 +8,7 @@ import logging
 from typing import Any
 
 import mutagent
+import mutobj
 from mutagent.messages import Message, StreamEvent, TextBlock
 from mutagent.webui.chat_input import ChatInput
 from mutagent.webui.conversation import Conversation
@@ -26,6 +27,36 @@ from mutgui.events import Event
 
 logger = logging.getLogger(__name__)
 
+
+# ── Extension ──────────────────────────────────────────────────────
+
+class ConversationExt(mutobj.Extension[Conversation]):
+    """Conversation 的运行时私有状态。"""
+    items: list[Any] = mutobj.field(default_factory=list)
+    message_list: Any = None
+    status_bar: Any = None
+    chat_input: Any = None
+    toolbar: Any = None
+    settings_page: Any = None
+    cancel_requested: bool = False
+    current_assistant_id: str = ""
+    tool_item_ids: dict[str, str] = mutobj.field(default_factory=dict)
+    turn_input_tokens: int = 0
+    turn_output_tokens: int = 0
+    turn_started_at: float = 0.0
+    total_cost: float = 0.0
+    handle_model_change: Any = None
+    handle_send: Any = None
+    handle_cancel: Any = None
+    handle_agent_event: Any = None
+    subscription: Any = None
+
+
+def _cext(self: Conversation) -> ConversationExt:
+    return ConversationExt.get_or_create(self)
+
+
+# ── 工具函数 ──────────────────────────────────────────────────────
 
 def _now_item_id(prefix: str) -> str:
     return f"{prefix}-{time.time_ns()}"
@@ -68,52 +99,56 @@ def _hash_for_route(route: str) -> str:
     return f"#/{route}" if route else "#/"
 
 
+# ── @impl: __init__ ──────────────────────────────────────────────
+
+
 @mutagent.impl(Conversation.__init__)
 def __init__(self: Conversation, *, agent: Any, app: Any = None) -> None:
     super(Conversation, self).__init__()
+    ext = _cext(self)
     self.app = app
     self.agent = agent
-    self.items: list[Any] = []
-    self.message_list = MessageList(items=self.items)
-    self.message_list.id = "message-list"
+    ext.items = []
+    ext.message_list = MessageList(items=ext.items)
+    ext.message_list.id = "message-list"
     self.models = agent.list_models()
     self.current_model = _resolve_current_model_name(agent, self.models)
     self.status = "idle"
     self.is_busy = False
-    self._cancel_requested = False
-    self._current_assistant_id = ""
-    self._tool_item_ids: dict[str, str] = {}
-    self._turn_input_tokens = 0
-    self._turn_output_tokens = 0
-    self._turn_started_at = 0.0
-    self._total_cost = 0.0
+    ext.cancel_requested = False
+    ext.current_assistant_id = ""
+    ext.tool_item_ids = {}
+    ext.turn_input_tokens = 0
+    ext.turn_output_tokens = 0
+    ext.turn_started_at = 0.0
+    ext.total_cost = 0.0
     # 路由：单一真相源。"" = 对话；"settings" / "settings/<id>" = 设置页
     self.current_route = ""
     # 模块级函数绑定到 self（Conversation 类未声明这些为方法，手动用 partial 绑）
-    self._handle_model_change = partial(_handle_model_change, self)
-    self._handle_send = partial(_handle_send, self)
-    self._handle_cancel = partial(_handle_cancel, self)
-    self._handle_agent_event = partial(_handle_agent_event, self)
-    self.status_bar = AgentStatusBar(
+    ext.handle_model_change = partial(handle_model_change, self)
+    ext.handle_send = partial(handle_send, self)
+    ext.handle_cancel = partial(handle_cancel, self)
+    ext.handle_agent_event = partial(handle_agent_event, self)
+    ext.status_bar = AgentStatusBar(
         status=self.status,
     )
-    self.status_bar.id = "agent-status-bar"
-    self.chat_input = ChatInput(
-        on_send=self._handle_send,
-        on_cancel=self._handle_cancel,
+    ext.status_bar.id = "agent-status-bar"
+    ext.chat_input = ChatInput(
+        on_send=ext.handle_send,
+        on_cancel=ext.handle_cancel,
     )
-    self.chat_input.id = "chat-input"
-    self.chat_input.conversation = self
+    ext.chat_input.id = "chat-input"
+    ext.chat_input.conversation = self
     self.refresh_models = partial(_refresh_models_from_config, self)
     # SettingsPage：注入两个 request 回调，由它请求 Conversation 切换路由
-    self.settings_page = SettingsPage(
+    ext.settings_page = SettingsPage(
         app=app,
         agent=agent,
         on_models_changed=self.refresh_models,
         on_request_close=partial(_on_settings_request_close, self),
         on_request_navigate=partial(_on_settings_request_navigate, self),
     )
-    self.toolbar = ActionToolbar(
+    ext.toolbar = ActionToolbar(
         id="conversation-toolbar",
         categories=["mutagent.conversation.toolbar"],
         context=ActionContext(
@@ -121,7 +156,10 @@ def __init__(self: Conversation, *, agent: Any, app: Any = None) -> None:
         ),
         label_mode="auto",
     )
-    self._subscription = agent.subscribe(self._handle_agent_event)
+    ext.subscription = agent.subscribe(ext.handle_agent_event)
+
+
+# ── 回调 helpers ────────────────────────────────────────────────
 
 
 async def _on_settings_request_close(self: Conversation) -> None:
@@ -134,41 +172,48 @@ async def _on_settings_request_navigate(self: Conversation, route: str) -> None:
     await self.navigate_to(route)
 
 
+# ── 内部 helper 函数 ────────────────────────────────────────────
+
+
 def _refresh_shell(self: Conversation) -> None:
-    self.status_bar.status = self.status
-    self.status_bar.input_tokens = self._turn_input_tokens
-    self.status_bar.output_tokens = self._turn_output_tokens
-    self.status_bar.total_cost = self._total_cost
+    ext = _cext(self)
+    ext.status_bar.status = self.status
+    ext.status_bar.input_tokens = ext.turn_input_tokens
+    ext.status_bar.output_tokens = ext.turn_output_tokens
+    ext.status_bar.total_cost = ext.total_cost
     # context + cache — synced from AgentContext (defensive: may be absent in tests)
     ctx = getattr(self.agent, "context", None)
     if ctx is not None:
-        self.status_bar.context_used = ctx.get_context_used()
+        ext.status_bar.context_used = ctx.get_context_used()
         ctx_pct = ctx.get_context_percent()
-        self.status_bar.context_percent = ctx_pct if ctx_pct is not None else 0.0
-        self.status_bar.context_total = ctx.context_window
-        self.status_bar.cache_read_tokens = ctx.get_cache_read_tokens()
-        self.status_bar.cache_write_tokens = ctx.get_cache_write_tokens()
-    self.chat_input.disabled = False
-    self.chat_input.is_busy = self.is_busy
-    self.toolbar.context = ActionContext(
+        ext.status_bar.context_percent = ctx_pct if ctx_pct is not None else 0.0
+        ext.status_bar.context_total = ctx.context_window
+        ext.status_bar.cache_read_tokens = ctx.get_cache_read_tokens()
+        ext.status_bar.cache_write_tokens = ctx.get_cache_write_tokens()
+    ext.chat_input.disabled = False
+    ext.chat_input.is_busy = self.is_busy
+    ext.toolbar.context = ActionContext(
         data={"conversation": self},
     )
-    self.status_bar.invalidate()
-    self.chat_input.invalidate()
-    self.toolbar.invalidate()
+    ext.status_bar.invalidate()
+    ext.chat_input.invalidate()
+    ext.toolbar.invalidate()
 
 
 def _append_item(self: Conversation, item: Any) -> None:
-    self.items.append(item)
-    self.message_list.refresh()
+    ext = _cext(self)
+    ext.items.append(item)
+    ext.message_list.refresh()
 
 
 def _touch_item(self: Conversation, item_id: str) -> None:
-    self.message_list.invalidate_item(item_id)
+    ext = _cext(self)
+    ext.message_list.invalidate_item(item_id)
 
 
 def _find_item(self: Conversation, item_id: str) -> Any | None:
-    for item in self.items:
+    ext = _cext(self)
+    for item in ext.items:
         if getattr(item, "id", "") == item_id:
             return item
     return None
@@ -201,7 +246,8 @@ async def _refresh_models_from_config(self: Conversation, preferred_model: str =
     self.invalidate()
 
 
-async def _handle_send(self: Conversation, text: str) -> None:
+async def handle_send(self: Conversation, text: str) -> None:
+    ext = _cext(self)
     if self.is_busy:
         logger.info("Conversation send ignored while busy")
         return
@@ -217,12 +263,12 @@ async def _handle_send(self: Conversation, text: str) -> None:
     )
     self.is_busy = True
     self.status = "thinking"
-    self._cancel_requested = False
-    self._current_assistant_id = ""
-    self._tool_item_ids = {}
-    self._turn_input_tokens = 0
-    self._turn_output_tokens = 0
-    self._turn_started_at = time.time()
+    ext.cancel_requested = False
+    ext.current_assistant_id = ""
+    ext.tool_item_ids = {}
+    ext.turn_input_tokens = 0
+    ext.turn_output_tokens = 0
+    ext.turn_started_at = time.time()
     _refresh_shell(self)
     self.invalidate()
     try:
@@ -244,16 +290,17 @@ async def _handle_send(self: Conversation, text: str) -> None:
         self.invalidate()
 
 
-async def _handle_cancel(self: Conversation) -> None:
+async def handle_cancel(self: Conversation) -> None:
+    ext = _cext(self)
     if self.agent.cancel():
         logger.info("Conversation cancel requested")
-        self._cancel_requested = True
+        ext.cancel_requested = True
         self.status = "cancelling"
         _refresh_shell(self)
         self.invalidate()
 
 
-async def _handle_model_change(self: Conversation, name: str) -> None:
+async def handle_model_change(self: Conversation, name: str) -> None:
     logger.info("Conversation model change requested: %s", name)
     try:
         self.agent.select_model(name)
@@ -275,9 +322,10 @@ async def _handle_model_change(self: Conversation, name: str) -> None:
 
 
 def _ensure_current_assistant(self: Conversation, event: StreamEvent) -> AssistantTextItem:
+    ext = _cext(self)
     item = None
-    if self._current_assistant_id:
-        found = _find_item(self, self._current_assistant_id)
+    if ext.current_assistant_id:
+        found = _find_item(self, ext.current_assistant_id)
         if isinstance(found, AssistantTextItem):
             item = found
     if item is None:
@@ -289,12 +337,13 @@ def _ensure_current_assistant(self: Conversation, event: StreamEvent) -> Assista
             model=(response.model if response else ""),
             timestamp=(response.timestamp if response else time.time()),
         )
-        self._current_assistant_id = item.id
+        ext.current_assistant_id = item.id
         _append_item(self, item)
     return item
 
 
-async def _handle_agent_event(self: Conversation, event: StreamEvent) -> None:
+async def handle_agent_event(self: Conversation, event: StreamEvent) -> None:
+    ext = _cext(self)
     logger.debug("Conversation received event: %s", event.type)
     if event.type == "response_start":
         logger.info("Assistant response started")
@@ -306,7 +355,7 @@ async def _handle_agent_event(self: Conversation, event: StreamEvent) -> None:
             model=(response.model if response else ""),
             timestamp=(response.timestamp if response else time.time()),
         )
-        self._current_assistant_id = item.id
+        ext.current_assistant_id = item.id
         _append_item(self, item)
         self.status = "thinking"
     elif event.type == "text_delta" and event.text:
@@ -316,10 +365,10 @@ async def _handle_agent_event(self: Conversation, event: StreamEvent) -> None:
     elif event.type == "tool_exec_start" and event.tool_call is not None:
         logger.info("Tool execution started: %s", event.tool_call.name)
         tool_call = event.tool_call
-        item_id = self._tool_item_ids.get(tool_call.id)
+        item_id = ext.tool_item_ids.get(tool_call.id)
         if item_id is None:
             item_id = f"tool-{tool_call.id or time.time_ns()}"
-            self._tool_item_ids[tool_call.id] = item_id
+            ext.tool_item_ids[tool_call.id] = item_id
             _append_item(
                 self,
                 ToolCallItem(
@@ -340,7 +389,7 @@ async def _handle_agent_event(self: Conversation, event: StreamEvent) -> None:
     elif event.type == "tool_exec_end" and event.tool_call is not None:
         logger.info("Tool execution finished: %s", event.tool_call.name)
         tool_call = event.tool_call
-        item_id = self._tool_item_ids.get(tool_call.id)
+        item_id = ext.tool_item_ids.get(tool_call.id)
         tool_item = _find_item(self, item_id) if item_id else None
         if isinstance(tool_item, ToolCallItem):
             tool_item.status = "error" if tool_call.is_error else "success"
@@ -359,8 +408,8 @@ async def _handle_agent_event(self: Conversation, event: StreamEvent) -> None:
         assistant_item.duration += response.message.duration
         assistant_item.input_tokens += response.message.input_tokens
         assistant_item.output_tokens += response.message.output_tokens
-        self._turn_input_tokens += response.message.input_tokens
-        self._turn_output_tokens += response.message.output_tokens
+        ext.turn_input_tokens += response.message.input_tokens
+        ext.turn_output_tokens += response.message.output_tokens
         _touch_item(self, assistant_item.id)
     elif event.type == "error":
         logger.error("Conversation received error event: %s", event.error or "Unknown error")
@@ -377,15 +426,15 @@ async def _handle_agent_event(self: Conversation, event: StreamEvent) -> None:
         self.is_busy = False
     elif event.type == "turn_done":
         logger.info("Conversation turn finished")
-        if self._cancel_requested:
-            assistant_item = _find_item(self, self._current_assistant_id)
+        if ext.cancel_requested:
+            assistant_item = _find_item(self, ext.current_assistant_id)
             if isinstance(assistant_item, AssistantTextItem):
                 if "[interrupted]" not in assistant_item.text:
                     assistant_item.text = (
                         assistant_item.text.rstrip() + "\n\n[interrupted]"
                     ).strip()
                     _touch_item(self, assistant_item.id)
-        duration = max(0.0, time.time() - self._turn_started_at) if self._turn_started_at else 0.0
+        duration = max(0.0, time.time() - ext.turn_started_at) if ext.turn_started_at else 0.0
         _append_item(
             self,
             TurnSeparatorItem(
@@ -393,15 +442,15 @@ async def _handle_agent_event(self: Conversation, event: StreamEvent) -> None:
                 kind="turn_done",
                 turn_id=event.turn_id,
                 duration=duration,
-                input_tokens=self._turn_input_tokens,
-                output_tokens=self._turn_output_tokens,
+                input_tokens=ext.turn_input_tokens,
+                output_tokens=ext.turn_output_tokens,
             ),
         )
         self.is_busy = False
         self.status = "idle"
-        self._cancel_requested = False
-        self._current_assistant_id = ""
-        self._tool_item_ids = {}
+        ext.cancel_requested = False
+        ext.current_assistant_id = ""
+        ext.tool_item_ids = {}
     _refresh_shell(self)
     self.invalidate()
 
@@ -414,6 +463,7 @@ async def _apply_route(self: Conversation, route: str) -> None:
 
     最后写入 ``self.current_route``。``invalidate`` 由调用方负责。
     """
+    ext = _cext(self)
     prev = self.current_route
     prev_in_settings = prev.startswith("settings")
     new_in_settings = route.startswith("settings")
@@ -424,10 +474,10 @@ async def _apply_route(self: Conversation, route: str) -> None:
         if route.startswith("settings/"):
             new_panel_id = route[len("settings/"):]
         # 从 settings → settings 同模式切换：activate 内部已处理 close 旧 panel
-        await self.settings_page.activate(new_panel_id)
+        await ext.settings_page.activate(new_panel_id)
     elif prev_in_settings:
         # 离开 settings → close 当前 panel
-        await self.settings_page.deactivate()
+        await ext.settings_page.deactivate()
     # 其他象限（conversation → conversation）无需做 panel 生命周期处理
 
     self.current_route = route
@@ -478,17 +528,18 @@ async def on_event(self: Conversation, event: Event) -> bool:
 
 @mutagent.impl(Conversation.render)
 def render(self: Conversation) -> ViewBlock:
+    ext = _cext(self)
     _refresh_shell(self)
     in_settings = self.current_route.startswith("settings")
     if in_settings:
-        children: list[Any] = [self.settings_page]
+        children: list[Any] = [ext.settings_page]
     else:
         children = [
             {
                 "$component": "div",
                 "$id": "toolbar-shell",
                 "style": {"padding": "8px 12px"},
-                "$children": [self.toolbar],
+                "$children": [ext.toolbar],
             },
             {
                 "$component": "div",
@@ -500,9 +551,9 @@ def render(self: Conversation) -> ViewBlock:
                     "flexDirection": "column",
                     "overflow": "hidden",
                 },
-                "$children": [self.message_list],
+                "$children": [ext.message_list],
             },
-            self.chat_input,
+            ext.chat_input,
         ]
     return ViewBlock([
         {

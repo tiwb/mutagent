@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import mutobj
+
 import inspect
 import logging
 from functools import partial
@@ -14,6 +16,21 @@ from mutgui import Action, ActionContext, ActionRef, ActionToolbar, Bind, Callba
 logger = logging.getLogger(__name__)
 
 
+# ── Extension ──────────────────────────────────────────────
+
+class ChatInputExt(mutobj.Extension[ChatInput]):
+    """ChatInput 的运行时私有状态。"""
+    on_send: Any = None
+    on_cancel: Any = None
+    submit_action: Any = None
+    cancel_action: Any = None
+    set_send_mode_action: Any = None
+
+
+def _ciext(self: ChatInput) -> ChatInputExt:
+    return ChatInputExt.get_or_create(self)
+
+
 @mutagent.impl(ChatInput.__init__)
 def __init__(
     self: ChatInput,
@@ -21,6 +38,7 @@ def __init__(
     on_send: Callable[[str], Any],
     on_cancel: Callable[[], Any] | None = None,
 ) -> None:
+    ext = _ciext(self)
     super(ChatInput, self).__init__()
     self.id = "chat-input"
     self.text = ""
@@ -34,11 +52,11 @@ def __init__(
         label_mode="auto",
     )
     self.conversation = None
-    self._on_send = on_send
-    self._on_cancel = on_cancel
-    self._submit_action = partial(_submit, view=self)
-    self._cancel_action = partial(_cancel, view=self)
-    self._set_send_mode_action = partial(_set_send_mode, view=self)
+    ext.on_send = on_send
+    ext.on_cancel = on_cancel
+    ext.submit_action = partial(_submit, view=self)
+    ext.cancel_action = partial(_cancel, view=self)
+    ext.set_send_mode_action = partial(_set_send_mode, view=self)
 
 
 async def _submit(*, view: ChatInput) -> None:
@@ -50,7 +68,8 @@ async def _submit(*, view: ChatInput) -> None:
         logger.info("ChatInput submit ignored: empty text")
         return
     logger.info("ChatInput submit triggered (%d chars)", len(text))
-    result = view._on_send(text)
+    ext = _ciext(view)
+    result = ext.on_send(text)
     if hasattr(result, "__await__"):
         await result
     view.text = ""
@@ -58,10 +77,11 @@ async def _submit(*, view: ChatInput) -> None:
 
 
 async def _cancel(*, view: ChatInput) -> None:
-    if view._on_cancel is None:
+    ext = _ciext(view)
+    if ext.on_cancel is None:
         return
     logger.info("ChatInput cancel triggered")
-    result = view._on_cancel()
+    result = ext.on_cancel()
     if hasattr(result, "__await__"):
         await result
 
@@ -133,7 +153,10 @@ class SendMessageAction(Action):
 
     async def execute(self, context: ActionContext) -> None:
         chat_input = _chat_input(context)
-        await _call_action(getattr(chat_input, "_submit_action", None))
+        if chat_input is None:
+            return
+        ext = _ciext(chat_input)
+        await _call_action(ext.submit_action)
 
     def menu_actions(self, context: ActionContext) -> list[ActionRef]:
         return [
@@ -155,7 +178,10 @@ class CancelMessageAction(Action):
 
     async def execute(self, context: ActionContext) -> None:
         chat_input = _chat_input(context)
-        await _call_action(getattr(chat_input, "_cancel_action", None))
+        if chat_input is None:
+            return
+        ext = _ciext(chat_input)
+        await _call_action(ext.cancel_action)
 
 
 class SetSendModeChoiceAction(Action):
@@ -175,4 +201,7 @@ class SetSendModeChoiceAction(Action):
 
     async def execute(self, context: ActionContext) -> None:
         chat_input = _chat_input(context)
-        await _call_action(getattr(chat_input, "_set_send_mode_action", None), self.mode)
+        if chat_input is None:
+            return
+        ext = _ciext(chat_input)
+        await _call_action(ext.set_send_mode_action, self.mode)

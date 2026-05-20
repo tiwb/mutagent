@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar
+from typing import Any, TYPE_CHECKING, ClassVar
 
 from mutgui import View, ViewBlock
 
@@ -25,9 +25,7 @@ class SettingsPage(View):
     - ``on_request_navigate(route)`` — 左侧菜单切换 panel，等价于
       ``Conversation.navigate_to(f"settings/{panel_id}")``。
 
-    ``close()`` 兼容方法保留，转发给 ``on_request_close``，让既有的
-    ``LLMSettingsPanel._save_all_settings`` 等代码（``await view.drawer.close()``）
-    无感切换到新结构。
+
     """
 
     active_panel_id: str
@@ -63,6 +61,7 @@ class SettingsPanel(View):
     panel_title: ClassVar[str] = ""
     panel_placement: ClassVar[str] = ""
     panel_width: ClassVar[int] = 560
+    page: Any  # SettingsPage 实例，由 SettingsPage.__init__ 注入
 
     def render(self) -> ViewBlock: ...
 

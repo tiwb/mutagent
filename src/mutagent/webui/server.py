@@ -27,4 +27,4 @@ class WebUIServer(Server):
     ) -> None: ...
 
 
-from . import _server_impl  # noqa: E402,F401
+from . import _server_impl as _server_impl  # noqa: E402,F401

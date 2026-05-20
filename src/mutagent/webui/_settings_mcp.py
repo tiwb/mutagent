@@ -26,6 +26,7 @@ from mutagent.sandbox._namespace import connection_status
 from mutagent.sandbox._signature import format_callable_signature
 from mutagent.webui.settings import SettingsPanel
 from mutgui import Bind, Callback, ViewBlock
+from mutobj import field
 
 logger = logging.getLogger(__name__)
 
@@ -60,31 +61,51 @@ class MCPSettingsPanel(SettingsPanel):
     panel_placement: ClassVar[str] = "settings:10/20"
     panel_width: ClassVar[int] = 640
 
+    _app: Any = None
+    _agent: Any = None
+    _drafts: dict[str, dict[str, Any]] = field(default_factory=dict[str, Any])
+    _conns: dict[str, MCPConnection] = field(default_factory=dict[str, MCPConnection])
+    _async_error: str = ""
+
+    id: str = "mcp-settings-panel"
+
     # ── State fields ─────────────────────────────
-    current_step: str
-    editing_key: str
-    editing_is_new: bool
-    form_name: str
-    form_transport: str
-    form_command: str
-    form_args_text: str
-    form_shell: bool
-    form_env_text: str
-    form_url: str
-    form_timeout: float
-    form_autostart: bool
-    form_retry_cooldown: float
-    error: str
-    notice: str
-    pending_button: str  # "<key>:connect" / "<key>:disconnect" / "<key>:reconnect" / "<key>:reload"
-    expanded_ns: set
-    expanded_fn: set
+    current_step: str = "list"
+    editing_key: str = ""
+    editing_is_new: bool = False
+    form_name: str = ""
+    form_transport: str = "stdio"
+    form_command: str = ""
+    form_args_text: str = ""
+    form_shell: bool = False
+    form_env_text: str = ""
+    form_url: str = ""
+    form_timeout: float = 30.0
+    form_autostart: bool = True
+    form_retry_cooldown: float = 5.0
+    error: str = ""
+    notice: str = ""
+    pending_button: str = ""  # "<key>:connect" / "<key>:disconnect" / "<key>:reconnect" / "<key>:reload"
+    expanded_ns: set = field(default_factory=set)
+    expanded_fn: set = field(default_factory=set)
 
-    def __init__(self, *, app: Any, agent: Any) -> None: ...
+    def __init__(self: MCPSettingsPanel, *, app: Any, agent: Any) -> None:
+        super(MCPSettingsPanel, self).__init__()
+        self._app = app
+        self._agent = agent
+        _load_from_config(self)
 
-    def render(self) -> ViewBlock: ...
-
-    def on_open(self) -> None: ...
+    def render(self: MCPSettingsPanel) -> ViewBlock:
+        if self.current_step == "edit":
+            children = _render_edit(self)
+        else:
+            children = _render_list(self)
+        return ViewBlock([{
+            "$component": "div",
+            "$id": "mcp-settings-body",
+            "style": {"paddingBottom": 12},
+            "$children": children,
+        }])
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -682,7 +703,7 @@ def _delete_source(*, view: MCPSettingsPanel) -> None:
 
 
 async def _close_panel(*, view: MCPSettingsPanel) -> None:
-    await view.drawer.close()
+    await view.page.close()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1503,57 +1524,3 @@ def _render_edit(self: MCPSettingsPanel) -> list[dict[str, Any]]:
     })
 
     return items
-
-
-# ═══════════════════════════════════════════════════════════════
-#  @impl
-# ═══════════════════════════════════════════════════════════════
-
-
-@mutagent.impl(MCPSettingsPanel.__init__)
-def __init__(self: MCPSettingsPanel, *, app: Any, agent: Any) -> None:
-    super(MCPSettingsPanel, self).__init__()
-    self.id = "mcp-settings-panel"
-    self._app = app
-    self._agent = agent
-    self._drafts: dict[str, dict[str, Any]] = {}
-    self._conns: dict[str, MCPConnection] = {}
-    self._async_error: str = ""
-    self.current_step = "list"
-    self.editing_key = ""
-    self.editing_is_new = False
-    self.form_name = ""
-    self.form_transport = "stdio"
-    self.form_command = ""
-    self.form_args_text = ""
-    self.form_shell = False
-    self.form_env_text = ""
-    self.form_url = ""
-    self.form_timeout = 30.0
-    self.form_autostart = True
-    self.form_retry_cooldown = 5.0
-    self.error = ""
-    self.notice = ""
-    self.pending_button = ""
-    self.expanded_ns: set[str] = set()
-    self.expanded_fn: set[str] = set()
-    _load_from_config(self)
-
-
-@mutagent.impl(MCPSettingsPanel.on_open)
-def _on_open(self: MCPSettingsPanel) -> None:
-    _load_from_config(self)
-
-
-@mutagent.impl(MCPSettingsPanel.render)
-def render(self: MCPSettingsPanel) -> ViewBlock:
-    if self.current_step == "edit":
-        children = _render_edit(self)
-    else:
-        children = _render_list(self)
-    return ViewBlock([{
-        "$component": "div",
-        "$id": "mcp-settings-body",
-        "style": {"paddingBottom": 12},
-        "$children": children,
-    }])

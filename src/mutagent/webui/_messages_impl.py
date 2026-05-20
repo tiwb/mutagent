@@ -27,6 +27,30 @@ from mutagent.webui.messages import (
 from mutgui import Callback, View, ViewBlock, VirtualList, VirtualListItemAdapter
 
 
+# ── Extensions ─────────────────────────────────────────────────
+
+class MessageListExt(mutobj.Extension[MessageList]):
+    """MessageList 的运行时私有状态。"""
+    adapter: Any = None
+    virtual_list: Any = None
+
+
+class AssistantMessageExt(mutobj.Extension[AssistantMessage]):
+    """AssistantMessage 的运行时私有状态。"""
+    renderer: Any = None
+
+
+def _mext(self: MessageList) -> MessageListExt:
+    return MessageListExt.get_or_create(self)
+
+
+def _aext(self: AssistantMessage) -> AssistantMessageExt:
+    return AssistantMessageExt.get_or_create(self)
+
+
+# ── 工具函数 ──────────────────────────────────────────────────
+
+
 def _format_clock(timestamp: float) -> str:
     if not timestamp:
         return ""
@@ -110,7 +134,7 @@ class _MessageListAdapter(VirtualListItemAdapter):
 
     def invalidate_existing_item(self, item_id: str) -> None:
         for virtual_list in self.virtual_lists:
-            item_view = virtual_list.item_views.get(item_id)
+            item_view = virtual_list.item_views.get(item_id)  # type: ignore[attr-defined]
             if item_view is not None:
                 item_view.invalidate()
                 return
@@ -122,12 +146,13 @@ def message_list_init(
     self: MessageList, *, items: list[Any] | None = None
 ) -> None:
     super(MessageList, self).__init__()
+    ext = _mext(self)
     self.id = "message-list"
     self.items = items if items is not None else []
-    self._adapter = _MessageListAdapter(items=self.items)
-    self._virtual_list = VirtualList(
+    ext.adapter = _MessageListAdapter(items=self.items)
+    ext.virtual_list = VirtualList(
         id="chat-list",
-        adapter=self._adapter,
+        adapter=ext.adapter,
         stick_to_bottom=True,
         estimated_item_height=128,
     )
@@ -135,18 +160,21 @@ def message_list_init(
 
 @mutagent.impl(MessageList.refresh)
 def refresh(self: MessageList) -> None:
-    self._adapter.invalidate()
+    ext = _mext(self)
+    ext.adapter.invalidate()
     self.invalidate()
 
 
 @mutagent.impl(MessageList.invalidate_item)
 def invalidate_item(self: MessageList, item_id: str) -> None:
-    self._adapter.invalidate_existing_item(item_id)
+    ext = _mext(self)
+    ext.adapter.invalidate_existing_item(item_id)
 
 
 @mutagent.impl(MessageList.render)
 def message_list_render(self: MessageList) -> ViewBlock:
-    self._adapter.items = self.items
+    ext = _mext(self)
+    ext.adapter.items = self.items
     return ViewBlock([
         {
             "$component": "div",
@@ -158,7 +186,7 @@ def message_list_render(self: MessageList) -> ViewBlock:
                 "flexDirection": "column",
                 "overflow": "hidden",
             },
-            "$children": [self._virtual_list],
+            "$children": [ext.virtual_list],
         }
     ])
 
@@ -253,15 +281,17 @@ def assistant_message_init(
     self: AssistantMessage, *, item: AssistantTextItem
 ) -> None:
     super(AssistantMessage, self).__init__(item=item)
-    self._renderer = BlockRenderer(text=item.text)
-    self._renderer.id = f"block-renderer-{item.id}"
+    ext = _aext(self)
+    ext.renderer = BlockRenderer(text=item.text)
+    ext.renderer.id = f"block-renderer-{item.id}"
 
 
 @mutagent.impl(AssistantMessage.render)
 def assistant_message_render(self: AssistantMessage) -> ViewBlock:
-    if self._renderer.text != self.item.text:
-        self._renderer = BlockRenderer(text=self.item.text)
-        self._renderer.id = f"block-renderer-{self.item.id}"
+    ext = _aext(self)
+    if ext.renderer.text != self.item.text:
+        ext.renderer = BlockRenderer(text=self.item.text)
+        ext.renderer.id = f"block-renderer-{self.item.id}"
     return ViewBlock([
         {
             "$component": "div",
@@ -283,7 +313,7 @@ def assistant_message_render(self: AssistantMessage) -> ViewBlock:
                                 timestamp=self.item.timestamp,
                             ),
                         },
-                        self._renderer,
+                        ext.renderer,
                     ],
                 }
             ],

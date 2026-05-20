@@ -585,11 +585,7 @@ async def _serve(config: Any, host: str, port: int) -> None:
         name = "mutagent-pysandbox"
         version = mutagent.__version__
 
-    # 4. 定义 Server 子类，限制 views 仅本进程的，避免与潜在第三方 View 冲突
-    class PySandboxServer(Server):
-        views = (PySandboxMCPView,)
-
-    # 5. 监听 socket（统一 IPv4，避免 host="" 造成的 v4/v6 歧义）
+    # 4. 监听 socket（统一 IPv4，避免 host="" 造成的 v4/v6 歧义）
     listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
@@ -603,7 +599,7 @@ async def _serve(config: Any, host: str, port: int) -> None:
     # 曝光端口给子进程（pi agent / mutagent pysandbox client 可自动发现）
     os.environ["MUTAGENT_PORT"] = str(actual_port)
 
-    server = PySandboxServer(host=actual_host, port=actual_port)
+    server = Server(host=actual_host, port=actual_port)
     print(f"mutagent sandbox server: {url}")
     logger.info("Starting pysandbox MCP server at %s", url)
 

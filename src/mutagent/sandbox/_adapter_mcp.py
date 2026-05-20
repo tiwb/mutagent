@@ -882,7 +882,7 @@ def _make_tool_func(conn: MCPConnection, tool_name: str,
     if sig is not None:
         _bind_sig = sig
 
-        def tool_func(*args: Any, **kwargs: Any) -> Any:
+        def tool_func(*args: Any, **kwargs: Any) -> Any:  # type: ignore[reportRedeclaration]
             bound = _bind_sig.bind(*args, **kwargs)
             bound.apply_defaults()
             future = asyncio.run_coroutine_threadsafe(
@@ -891,7 +891,7 @@ def _make_tool_func(conn: MCPConnection, tool_name: str,
 
         tool_func.__signature__ = sig  # type: ignore[attr-defined]
     else:
-        def tool_func(**kwargs: Any) -> Any:  # type: ignore[misc]
+        def tool_func(**kwargs: Any) -> Any:  # type: ignore[misc, reportRedeclaration]
             future = asyncio.run_coroutine_threadsafe(
                 call_with_retry(kwargs), conn.main_loop)
             return future.result(timeout=120)

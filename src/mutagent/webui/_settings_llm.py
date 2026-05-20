@@ -55,26 +55,45 @@ class LLMSettingsPanel(SettingsPanel):
     panel_title: ClassVar[str] = "LLM API 设置"
     panel_placement: ClassVar[str] = "settings:10/10"
 
+    _app: Any = None
+    _agent: Any = None
+    _drafts: dict[str, dict[str, Any]] = mutobj.field(default_factory=dict)
+
+    id: str | int = "llm-settings-panel"
+
     # ── State fields ──────────────────────────────
-    current_step: str
-    editing_key: str
-    editing_is_new: bool
-    provider_name: str
-    provider_type: str
-    provider_type_label: str
-    base_url: str
-    auth_token: str
-    models: list[str]
-    discovered_models: list[str]
-    default_model: str
-    error: str
-    notice: str
+    current_step: str = "list"
+    editing_key: str = ""
+    editing_is_new: bool = False
+    provider_name: str = ""
+    provider_type: str = _ANTHROPIC_PROVIDER
+    provider_type_label: str = "Anthropic"
+    base_url: str = ""
+    auth_token: str = ""
+    models: list[str] = mutobj.field(default_factory=list)
+    discovered_models: list[str] = mutobj.field(default_factory=list)
+    default_model: str = ""
+    error: str = ""
+    notice: str = ""
 
-    def __init__(self, *, app: Any, agent: Any) -> None: ...
+    def __init__(self, *, app: Any, agent: Any) -> None:
+        super(LLMSettingsPanel, self).__init__()
+        self._app = app
+        self._agent = agent
+        _load_from_config(self)
 
-    def render(self) -> ViewBlock: ...
-
-    def on_open(self) -> None: ...
+    def render(self: LLMSettingsPanel) -> ViewBlock:
+        _sync_default_model(self)
+        if self.current_step == "edit":
+            children = _render_edit(self)
+        else:
+            children = _render_list(self)
+        return ViewBlock([{
+            "$component": "div",
+            "$id": "llm-settings-body",
+            "style": {"paddingBottom": 12},
+            "$children": children,
+        }])
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -560,15 +579,11 @@ async def _save_all_settings(*, view: LLMSettingsPanel) -> None:
     default_model = view.default_model if view.default_model in all_models else all_models[0]
     try:
         _write_config(view, providers, default_model)
-        await view.drawer.notify_models_changed(default_model)
-        await view.drawer.close()
+        await view.page.notify_models_changed(default_model)
+        await view.page.close()
     except Exception as exc:
         _set_message(view, error=str(exc))
         view.invalidate()
-
-
-async def _cancel_settings(*, view: LLMSettingsPanel) -> None:
-    await view.drawer.close()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -891,56 +906,3 @@ def _render_edit(self: LLMSettingsPanel) -> list[dict[str, Any]]:
         },
     ])
     return items
-
-
-# ═══════════════════════════════════════════════════════════════
-#  @impl hooks
-# ═══════════════════════════════════════════════════════════════
-
-
-@mutagent.impl(LLMSettingsPanel.__init__)
-def __init__(
-    self: LLMSettingsPanel,
-    *,
-    app: Any,
-    agent: Any,
-) -> None:
-    super(LLMSettingsPanel, self).__init__()
-    self.id = "llm-settings-panel"
-    self._app = app
-    self._agent = agent
-    self._drafts: dict[str, dict[str, Any]] = {}
-    self.current_step = "list"
-    self.editing_key = ""
-    self.editing_is_new = False
-    self.provider_name = ""
-    self.provider_type = _ANTHROPIC_PROVIDER
-    self.provider_type_label = "Anthropic"
-    self.base_url = ""
-    self.auth_token = ""
-    self.models = []
-    self.discovered_models = []
-    self.default_model = ""
-    self.error = ""
-    self.notice = ""
-    _load_from_config(self)
-
-
-@mutagent.impl(LLMSettingsPanel.on_open)
-def _on_open(self: LLMSettingsPanel) -> None:
-    _load_from_config(self)
-
-
-@mutagent.impl(LLMSettingsPanel.render)
-def render(self: LLMSettingsPanel) -> ViewBlock:
-    _sync_default_model(self)
-    if self.current_step == "edit":
-        children = _render_edit(self)
-    else:
-        children = _render_list(self)
-    return ViewBlock([{
-        "$component": "div",
-        "$id": "llm-settings-body",
-        "style": {"paddingBottom": 12},
-        "$children": children,
-    }])

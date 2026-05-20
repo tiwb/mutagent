@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Generic, TypeVar
 
 from mutgui import View, ViewBlock
+
+_T = TypeVar("_T", bound="ChatItem")
 
 
 @dataclass(slots=True)
@@ -57,24 +59,27 @@ class ToolCallItem(ChatItem):
 
 
 
-class ChatItemView(View):
+class ChatItemView(View, Generic[_T]):
     """所有 ChatItem 渲染器的统一基类。
 
-    子类声明 ``item_type`` 绑定到具体 ChatItem 数据类，
+    泛型参数 ``_T`` 绑定具体 ChatItem 子类，子类继承时指定：
+    ``UserMessage(ChatItemView[UserTextItem])``。
+
+    ``item_type`` ClassVar 用于运行时自动发现，
     ``ChatItemView.for_item()`` 据此自动分派 View 类。
     上层项目新增 ChatItem + ChatItemView 子类即可扩展消息类型，
     无需修改 mutagent 本身。
     """
 
-    item: ChatItem
+    item: _T
     item_type: ClassVar[type[ChatItem]] = ChatItem  # 子类必须覆盖
 
-    def __init__(self, *, item: ChatItem) -> None: ...
+    def __init__(self, *, item: _T) -> None: ...
 
     def render(self) -> ViewBlock: ...
 
     @classmethod
-    def for_item(cls, item: ChatItem) -> "ChatItemView": ...
+    def for_item(cls, item: ChatItem) -> "ChatItemView[ChatItem]": ...
 
 
 class MessageList(View):
@@ -89,7 +94,7 @@ class MessageList(View):
     def render(self) -> ViewBlock: ...
 
 
-class UserMessage(ChatItemView):
+class UserMessage(ChatItemView[UserTextItem]):
     item_type: ClassVar[type[ChatItem]] = UserTextItem
     item: UserTextItem
 
@@ -98,7 +103,7 @@ class UserMessage(ChatItemView):
     def render(self) -> ViewBlock: ...
 
 
-class AssistantMessage(ChatItemView):
+class AssistantMessage(ChatItemView[AssistantTextItem]):
     item_type: ClassVar[type[ChatItem]] = AssistantTextItem
     item: AssistantTextItem
 
@@ -107,7 +112,7 @@ class AssistantMessage(ChatItemView):
     def render(self) -> ViewBlock: ...
 
 
-class AssistantError(ChatItemView):
+class AssistantError(ChatItemView[AssistantErrorItem]):
     item_type: ClassVar[type[ChatItem]] = AssistantErrorItem
     item: AssistantErrorItem
 
@@ -116,7 +121,7 @@ class AssistantError(ChatItemView):
     def render(self) -> ViewBlock: ...
 
 
-class TurnSeparator(ChatItemView):
+class TurnSeparator(ChatItemView[TurnSeparatorItem]):
     item_type: ClassVar[type[ChatItem]] = TurnSeparatorItem
     item: TurnSeparatorItem
 
@@ -125,7 +130,7 @@ class TurnSeparator(ChatItemView):
     def render(self) -> ViewBlock: ...
 
 
-class ToolCallCard(ChatItemView):
+class ToolCallCard(ChatItemView[ToolCallItem]):
     item_type: ClassVar[type[ChatItem]] = ToolCallItem
     item: ToolCallItem
 
@@ -134,4 +139,4 @@ class ToolCallCard(ChatItemView):
     def render(self) -> ViewBlock: ...
 
 
-from . import _messages_impl  # noqa: E402,F401
+from . import _messages_impl as _messages_impl  # noqa: E402,F401

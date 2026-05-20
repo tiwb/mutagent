@@ -128,7 +128,7 @@ def _make_namespace_func(
     if sig is not None:
         _bind_sig = sig
 
-        def ns_func(*args: Any, **kwargs: Any) -> Any:
+        def ns_func(*args: Any, **kwargs: Any) -> Any:  # type: ignore[reportRedeclaration]
             bound = _bind_sig.bind(*args, **kwargs)
             bound.apply_defaults()
             future = asyncio.run_coroutine_threadsafe(
@@ -137,7 +137,7 @@ def _make_namespace_func(
 
         ns_func.__signature__ = sig  # type: ignore[attr-defined]
     else:
-        def ns_func(**kwargs: Any) -> Any:  # type: ignore[misc]
+        def ns_func(**kwargs: Any) -> Any:  # type: ignore[misc, reportRedeclaration]
             future = asyncio.run_coroutine_threadsafe(
                 call_with_retry(kwargs), conn.main_loop)
             return future.result(timeout=120)

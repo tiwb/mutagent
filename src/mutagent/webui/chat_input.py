@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from mutgui import View, ViewBlock
+from mutgui import ActionToolbar, View, ViewBlock
 
 
 class ChatInput(View):
@@ -12,7 +12,7 @@ class ChatInput(View):
     send_mode: str
     disabled: bool
     is_busy: bool
-    toolbar: View | None
+    toolbar: ActionToolbar
     conversation: Any | None
 
     def __init__(
@@ -25,4 +25,4 @@ class ChatInput(View):
     def render(self) -> ViewBlock: ...
 
 
-from . import _chat_input_impl  # noqa: E402,F401
+from . import _chat_input_impl as _chat_input_impl  # noqa: E402,F401

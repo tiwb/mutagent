@@ -172,4 +172,4 @@ def __init__(
         name = "mutagent-webui"
         version = mutagent.__version__
 
-    self.views = (_HTTPRoot, _WSView, _MCPView, *static_views)
+

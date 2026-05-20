@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from mutgui import View, ViewBlock
 
@@ -28,6 +28,13 @@ class Conversation(View):
     """
 
     current_route: str
+    agent: Agent
+    app: App | None
+    models: list[dict[str, Any]]
+    current_model: str
+    status: str
+    is_busy: bool
+    refresh_models: Any
 
     def __init__(self, *, agent: Agent, app: App | None = None) -> None: ...
 
@@ -38,4 +45,4 @@ class Conversation(View):
     async def on_event(self, event: Event) -> bool: ...
 
 
-from . import _conversation_impl  # noqa: E402,F401
+from . import _conversation_impl as _conversation_impl  # noqa: E402,F401

@@ -119,6 +119,13 @@ class SandboxApp(mutagent.Declaration):
         """
         ...
 
+    def bind_main_loop(self) -> None:
+        """注入当前 event loop，供 async NamespaceTools 跨线程投递。
+
+        必须在主 loop 线程调用，重复调用幂等。
+        """
+        ...
+
     def register_mcp_connection(self, name: str, conn: Any) -> None:
         """登记一个 MCPConnection 供 panel 反查。
 
@@ -171,5 +178,4 @@ class SandboxApp(mutagent.Declaration):
         ...
 
 
-from mutagent.sandbox import _app_impl  # noqa: E402
-mutagent.register_module_impls(_app_impl)
+from . import _app_impl as _app_impl  # noqa: E402,F401

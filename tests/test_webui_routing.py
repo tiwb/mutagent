@@ -294,13 +294,11 @@ def test_on_hash_change_same_route_still_noop() -> None:
     assert events == []
 
 
-# ── 兼容方法：SettingsPage.close() → on_request_close ────────────
+# ── SettingsPage.close() → on_request_close ────────────
 
 
 def test_settings_page_close_routes_back_to_conversation() -> None:
-    """LLMSettingsPanel/_save_all_settings 仍调 ``await view.drawer.close()``，
-
-    新结构下应转发为 Conversation.navigate_to("") 路径，URL 同步回 #/。
+    """SettingsPage.close() 转发为 Conversation.navigate_to("") 路径，URL 同步回 #/。
     """
     conv = _make_conversation()
     calls = _patch_commands(conv)
