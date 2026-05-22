@@ -131,13 +131,13 @@ def _create_llm_client(
 
 def _ensure_console_logging(config: Config) -> None:
     """Attach a stdout handler for WebUI debugging when not already present."""
-    root_logger = logging.getLogger("mutagent")
+    root_logger = logging.getLogger()
     for handler in root_logger.handlers:
         if getattr(handler, "_mutagent_console_handler", False):
             return
 
-    level_name = str(config.get("logging.console_level", default="INFO")).upper()
-    level = getattr(logging, level_name, logging.INFO)
+    level_name = str(config.get("logging.console_level", default="WARNING")).upper()
+    level = getattr(logging, level_name, logging.WARNING)
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler._mutagent_console_handler = True  # type: ignore[attr-defined]
     console_handler.setLevel(level)

@@ -519,8 +519,8 @@ async def on_event(self: Conversation, event: Event) -> bool:
     """
     if event.component_id == "" and event.name == "$hashchange":
         new_hash = ""
-        if isinstance(event.data, dict):
-            new_hash = str(event.data.get("hash", "") or "")
+        if isinstance(event.kwargs, dict):
+            new_hash = str(event.kwargs.get("hash", "") or "")
         await on_hash_change(self, new_hash)
         return True
     return await super(Conversation, self).on_event(event)
