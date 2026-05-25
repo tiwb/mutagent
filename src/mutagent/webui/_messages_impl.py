@@ -134,7 +134,7 @@ class _MessageListAdapter(VirtualListItemAdapter):
 
     def invalidate_existing_item(self, item_id: str) -> None:
         for virtual_list in self.virtual_lists:
-            item_view = virtual_list.item_views.get(item_id)  # type: ignore[attr-defined]
+            item_view = virtual_list.get_item_view(item_id)
             if item_view is not None:
                 item_view.invalidate()
                 return

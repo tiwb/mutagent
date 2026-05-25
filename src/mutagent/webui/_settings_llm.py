@@ -19,6 +19,7 @@ import mutobj
 from mutagent.provider import LLMProvider
 from mutagent.webui.settings import SettingsPanel
 from mutgui import Bind, Callback, ViewBlock
+from mutgui.view import ViewId
 
 _CHAT_MODEL_PREFIXES = ("gpt-", "o1", "o3", "o4", "chatgpt-")
 _VARIANT_SUFFIXES = ("-mini", "-nano", "-turbo", "-latest", "-preview", "-realtime")
@@ -59,7 +60,7 @@ class LLMSettingsPanel(SettingsPanel):
     _agent: Any = None
     _drafts: dict[str, dict[str, Any]] = mutobj.field(default_factory=dict)
 
-    id: str | int = "llm-settings-panel"
+    id: ViewId = "llm-settings-panel"
 
     # ── State fields ──────────────────────────────
     current_step: str = "list"

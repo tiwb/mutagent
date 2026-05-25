@@ -26,6 +26,7 @@ from mutagent.sandbox._namespace import connection_status
 from mutagent.sandbox._signature import format_callable_signature
 from mutagent.webui.settings import SettingsPanel
 from mutgui import Bind, Callback, ViewBlock
+from mutgui.view import ViewId
 from mutobj import field
 
 logger = logging.getLogger(__name__)
@@ -67,7 +68,7 @@ class MCPSettingsPanel(SettingsPanel):
     _conns: dict[str, MCPConnection] = field(default_factory=dict[str, MCPConnection])
     _async_error: str = ""
 
-    id: str = "mcp-settings-panel"
+    id: ViewId = "mcp-settings-panel"
 
     # ── State fields ─────────────────────────────
     current_step: str = "list"
