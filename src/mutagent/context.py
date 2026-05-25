@@ -23,7 +23,6 @@ class AgentContext(mutagent.Declaration):
     """
 
     context_window: int = 0
-    message_metadata: bool = True
     prompts: list = field(default_factory=list)
     messages: list = field(default_factory=list)
 

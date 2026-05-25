@@ -2,59 +2,9 @@
 
 from __future__ import annotations
 
-import copy
-from datetime import datetime, timezone
-
 import mutagent
 from mutagent.context import AgentContext
-from mutagent.messages import Message, TextBlock
-
-
-def _format_timestamp(ts: float) -> str:
-    """Unix timestamp → 'YYYY-MM-DD HH:MM' (本地时间)。"""
-    if not ts:
-        return ""
-    dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone()
-    return dt.strftime("%Y-%m-%d %H:%M")
-
-
-def _inject_metadata(msg: Message) -> Message:
-    """为消息添加 [sender · timestamp] 元信息前缀行。
-
-    系统消息不处理。生成 Message 副本，不修改原始消息。
-    """
-    if msg.role == "system":
-        return msg
-
-    # 确定显示名称
-    if msg.role == "user":
-        name = msg.sender or "User"
-    else:
-        name = msg.model or "Assistant"
-
-    time_str = _format_timestamp(msg.timestamp)
-    if time_str:
-        prefix = f"[{name} · {time_str}]"
-    else:
-        prefix = f"[{name}]"
-
-    # 找到首个 TextBlock 并注入前缀行
-    new_blocks = list(msg.blocks)
-    injected = False
-    for i, block in enumerate(new_blocks):
-        if isinstance(block, TextBlock):
-            new_blocks[i] = TextBlock(text=f"{prefix}\n{block.text}")
-            injected = True
-            break
-
-    if not injected:
-        # 没有 TextBlock，在开头插入
-        new_blocks.insert(0, TextBlock(text=prefix))
-
-    # 浅拷贝 Message，替换 blocks
-    new_msg = copy.copy(msg)
-    object.__setattr__(new_msg, 'blocks', new_blocks)
-    return new_msg
+from mutagent.messages import Message
 
 
 @mutagent.impl(AgentContext.prepare_prompts)
@@ -65,11 +15,8 @@ def prepare_prompts(self: AgentContext) -> list[Message]:
 
 @mutagent.impl(AgentContext.prepare_messages)
 def prepare_messages(self: AgentContext) -> list[Message]:
-    """整理对话历史。启用 message_metadata 时注入发送者和时间前缀。"""
-    messages = list(self.messages)
-    if self.message_metadata:
-        messages = [_inject_metadata(m) for m in messages]
-    return messages
+    """整理对话历史。"""
+    return list(self.messages)
 
 
 @mutagent.impl(AgentContext.update_usage)
