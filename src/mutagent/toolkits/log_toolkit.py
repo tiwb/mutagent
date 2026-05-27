@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mutagent.tools import Toolkit
+from mutagent.core.tools import Toolkit
 
 if TYPE_CHECKING:
-    from mutagent.runtime.log_store import LogStore
+    from mutagent.app.log_store import LogStore
 
 
 class LogToolkit(Toolkit):
@@ -38,9 +38,7 @@ class LogToolkit(Toolkit):
         Returns:
             Formatted log entries, newest first.
         """
-        return query_logs_impl.query(self, pattern, level, limit, tool_capture)
+        ...
 
 
-from mutagent.builtins import query_logs_impl
-import mutagent
-mutagent.register_module_impls(query_logs_impl)
+from . import _log_toolkit_impl as _log_toolkit_impl  # noqa: F401, E402

@@ -8,8 +8,8 @@ from mutgui import View, ViewBlock
 
 if TYPE_CHECKING:
     from mutgui.events import Event
-    from mutagent.agent import Agent
-    from mutagent.main import App
+    from mutagent.core.agent import Agent
+    from mutagent.app.app import App
 
 
 class Conversation(View):

@@ -383,10 +383,9 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "mutgui", extras = ["test"], marker = "extra == 'dev'" },
-    { name = "mutio", marker = "extra == 'demo'" },
-    { name = "mutio", marker = "extra == 'test'" },
+    { name = "mutio", marker = "extra == 'demo'", editable = "../mutio" },
+    { name = "mutio", marker = "extra == 'test'", editable = "../mutio" },
     { name = "mutobj", editable = "../mutobj" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0" },
     { name = "playwright", marker = "extra == 'test'", specifier = ">=1.40" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.23" },
@@ -422,7 +421,6 @@ source = { editable = "../mutobj" }
 
 [package.metadata]
 requires-dist = [
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0" },
     { name = "pyright", marker = "extra == 'dev'", specifier = ">=1.1" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0" },

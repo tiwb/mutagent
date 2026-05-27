@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Awaitable, Callable, Iterator, TYPE_CHECKING
 
-import mutagent
+import mutobj
 
 if TYPE_CHECKING:
     from mutagent.sandbox._namespace import (
@@ -53,7 +53,7 @@ Multi-step example:
 """
 
 
-class SandboxApp(mutagent.Declaration):
+class SandboxApp(mutobj.Declaration):
     """Python 沙箱 — namespace registry + 受限代码执行环境。
 
     职责边界：

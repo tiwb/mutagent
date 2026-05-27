@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING
 from mutio.net.server import Server
 
 if TYPE_CHECKING:
-    from mutagent.agent import Agent
-    from mutagent.main import App
+    from mutagent.core.agent import Agent
+    from mutagent.app.app import App
     from mutagent.webui.conversation import Conversation
 
 

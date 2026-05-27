@@ -4,19 +4,19 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import mutagent
-from mutagent.tools import Toolkit
+import mutobj
+from mutagent.core.tools import Toolkit
 
 if TYPE_CHECKING:
-    from mutagent.config import Config
-    from mutagent.messages import ToolSchema
+    from mutagent.app.config import Config
+    from mutagent.core.messages import ToolSchema
 
 
 # ---------------------------------------------------------------------------
 # Provider 抽象基类
 # ---------------------------------------------------------------------------
 
-class SearchImpl(mutagent.Declaration):
+class SearchImpl(mutobj.Declaration):
     """搜索实现基类。
 
     子类通过 mutobj 子类发现机制自动注册。
@@ -38,7 +38,7 @@ class SearchImpl(mutagent.Declaration):
         ...
 
 
-class FetchImpl(mutagent.Declaration):
+class FetchImpl(mutobj.Declaration):
     """网页内容提取实现基类。
 
     负责将原始 HTML 转换为 clean HTML 或 Markdown。
@@ -98,10 +98,4 @@ class WebToolkit(Toolkit):
         ...
 
 
-# ---------------------------------------------------------------------------
-# 模块注册
-# ---------------------------------------------------------------------------
-
-from mutagent.builtins import web_toolkit_impl, web_jina  # noqa: E402
-mutagent.register_module_impls(web_toolkit_impl)
-mutagent.register_module_impls(web_jina)
+from . import _web_toolkit_impl as _web_toolkit_impl, _web_toolkit_impl_jina as _web_toolkit_impl_jina  # noqa: F401, E402

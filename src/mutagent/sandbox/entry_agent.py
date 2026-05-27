@@ -12,8 +12,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-import mutagent
-from mutagent.tools import Toolkit
+from mutagent.core.tools import Toolkit
 from mutagent.sandbox.app import SandboxApp, PYSANDBOX_DOC
 
 

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mutagent.tools import Toolkit
+from mutagent.core.tools import Toolkit
 
 if TYPE_CHECKING:
-    from mutagent.agent import Agent
+    from mutagent.core.agent import Agent
 
 
 class AgentToolkit(Toolkit):
@@ -36,9 +36,7 @@ class AgentToolkit(Toolkit):
         Returns:
             The Sub-Agent's execution result as text.
         """
-        return delegate_impl.delegate(self, agent_name, task)
+        ...
 
 
-from mutagent.builtins import delegate_impl
-import mutagent
-mutagent.register_module_impls(delegate_impl)
+from . import _agent_toolkit_impl as _agent_toolkit_impl  # noqa: F401, E402

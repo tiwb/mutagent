@@ -29,15 +29,12 @@ dependencies = [
 ]
 
 [project.scripts]
-mutagent = "mutagent.main:main"
+mutagent = "mutagent.cli.main:main"
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.23",
-]
-tui = [
-    "textual>=0.40",
 ]
 webui = [
     "mutgui~=0.9.0",

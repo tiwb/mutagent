@@ -4,21 +4,21 @@ from __future__ import annotations
 
 import re
 
-import mutagent
+import mutobj
 from mutagent.webui.blocks import BlockRenderer, ThinkingBlock
 from mutgui import Callback, ViewBlock
 
 _FENCE_RE = re.compile(r"^```([^\n]*)$")
 
 
-@mutagent.impl(BlockRenderer.__init__)
+@mutobj.impl(BlockRenderer.__init__)
 def block_renderer_init(self: BlockRenderer, *, text: str = "") -> None:
     super(BlockRenderer, self).__init__()
     self.id = f"block-renderer-{id(self)}"
     self.text = text
 
 
-@mutagent.impl(ThinkingBlock.__init__)
+@mutobj.impl(ThinkingBlock.__init__)
 def thinking_block_init(
     self: ThinkingBlock, *, body: str = "", expanded: bool = False
 ) -> None:
@@ -198,7 +198,7 @@ def _render_segments(text: str) -> list[dict | ThinkingBlock]:
     return parts
 
 
-@mutagent.impl(BlockRenderer.render)
+@mutobj.impl(BlockRenderer.render)
 def block_renderer_render(self: BlockRenderer) -> ViewBlock:
     parts = _render_segments(self.text)
     return ViewBlock([
@@ -211,7 +211,7 @@ def block_renderer_render(self: BlockRenderer) -> ViewBlock:
     ])
 
 
-@mutagent.impl(ThinkingBlock.render)
+@mutobj.impl(ThinkingBlock.render)
 def thinking_block_render(self: ThinkingBlock) -> ViewBlock:
     children: list[dict] = [
         {

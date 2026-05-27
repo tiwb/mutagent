@@ -9,7 +9,6 @@ import logging
 from functools import partial
 from typing import Any, Callable
 
-import mutagent
 from mutagent.webui.chat_input import ChatInput
 from mutgui import Action, ActionContext, ActionRef, ActionToolbar, Bind, Callback, ViewBlock
 
@@ -31,8 +30,8 @@ def _ciext(self: ChatInput) -> ChatInputExt:
     return ChatInputExt.get_or_create(self)
 
 
-@mutagent.impl(ChatInput.__init__)
-def __init__(
+@mutobj.impl(ChatInput.__init__)
+def chat_input_init__(
     self: ChatInput,
     *,
     on_send: Callable[[str], Any],
@@ -91,8 +90,8 @@ def _set_send_mode(value: str, *, view: ChatInput) -> None:
     view.invalidate()
 
 
-@mutagent.impl(ChatInput.render)
-def render(self: ChatInput) -> ViewBlock:
+@mutobj.impl(ChatInput.render)
+def chat_input_render(self: ChatInput) -> ViewBlock:
     placeholder = (
         "Type a message… (Shift+Enter for newline)"
         if self.send_mode == "enter"

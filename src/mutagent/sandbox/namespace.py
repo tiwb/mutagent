@@ -7,10 +7,10 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-import mutagent
+import mutobj
 
 
-class NamespaceTools(mutagent.Declaration):
+class NamespaceTools(mutobj.Declaration):
     """声明一组注入 sandbox 命名空间的函数。
 
     namespace 名从类名推导（去掉 ``Tools`` 后缀），或用 ``_namespace`` 显式指定。

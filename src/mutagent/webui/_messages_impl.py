@@ -6,7 +6,6 @@ import json
 import time
 from typing import Any
 
-import mutagent
 import mutobj
 from mutagent.webui.blocks import BlockRenderer
 from mutagent.webui.messages import (
@@ -102,13 +101,13 @@ def _resolve_view_class(item_type: type[ChatItem]) -> type[ChatItemView]:
         ) from None
 
 
-@mutagent.impl(ChatItemView.__init__)
+@mutobj.impl(ChatItemView.__init__)
 def chat_item_view_init(self: ChatItemView, *, item: ChatItem) -> None:
     super(ChatItemView, self).__init__()
     self.item = item
 
 
-@mutagent.impl(ChatItemView.for_item)
+@mutobj.impl(ChatItemView.for_item)
 def chat_item_view_for_item(cls: type[ChatItemView], item: ChatItem) -> ChatItemView:
     view_cls = _resolve_view_class(type(item))
     return view_cls(item=item)
@@ -141,7 +140,7 @@ class _MessageListAdapter(VirtualListItemAdapter):
         self.invalidate()
 
 
-@mutagent.impl(MessageList.__init__)
+@mutobj.impl(MessageList.__init__)
 def message_list_init(
     self: MessageList, *, items: list[Any] | None = None
 ) -> None:
@@ -158,20 +157,20 @@ def message_list_init(
     )
 
 
-@mutagent.impl(MessageList.refresh)
-def refresh(self: MessageList) -> None:
+@mutobj.impl(MessageList.refresh)
+def message_list_refresh(self: MessageList) -> None:
     ext = _mext(self)
     ext.adapter.invalidate()
     self.invalidate()
 
 
-@mutagent.impl(MessageList.invalidate_item)
-def invalidate_item(self: MessageList, item_id: str) -> None:
+@mutobj.impl(MessageList.invalidate_item)
+def message_list_invalidate_item(self: MessageList, item_id: str) -> None:
     ext = _mext(self)
     ext.adapter.invalidate_existing_item(item_id)
 
 
-@mutagent.impl(MessageList.render)
+@mutobj.impl(MessageList.render)
 def message_list_render(self: MessageList) -> ViewBlock:
     ext = _mext(self)
     ext.adapter.items = self.items
@@ -229,12 +228,12 @@ def _meta_style() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@mutagent.impl(UserMessage.__init__)
+@mutobj.impl(UserMessage.__init__)
 def user_message_init(self: UserMessage, *, item: UserTextItem) -> None:
     super(UserMessage, self).__init__(item=item)
 
 
-@mutagent.impl(UserMessage.render)
+@mutobj.impl(UserMessage.render)
 def user_message_render(self: UserMessage) -> ViewBlock:
     return ViewBlock([
         {
@@ -276,7 +275,7 @@ def user_message_render(self: UserMessage) -> ViewBlock:
 # ---------------------------------------------------------------------------
 
 
-@mutagent.impl(AssistantMessage.__init__)
+@mutobj.impl(AssistantMessage.__init__)
 def assistant_message_init(
     self: AssistantMessage, *, item: AssistantTextItem
 ) -> None:
@@ -286,7 +285,7 @@ def assistant_message_init(
     ext.renderer.id = f"block-renderer-{item.id}"
 
 
-@mutagent.impl(AssistantMessage.render)
+@mutobj.impl(AssistantMessage.render)
 def assistant_message_render(self: AssistantMessage) -> ViewBlock:
     ext = _aext(self)
     if ext.renderer.text != self.item.text:
@@ -326,14 +325,14 @@ def assistant_message_render(self: AssistantMessage) -> ViewBlock:
 # ---------------------------------------------------------------------------
 
 
-@mutagent.impl(AssistantError.__init__)
+@mutobj.impl(AssistantError.__init__)
 def assistant_error_init(
     self: AssistantError, *, item: AssistantErrorItem
 ) -> None:
     super(AssistantError, self).__init__(item=item)
 
 
-@mutagent.impl(AssistantError.render)
+@mutobj.impl(AssistantError.render)
 def assistant_error_render(self: AssistantError) -> ViewBlock:
     return ViewBlock([
         {
@@ -380,14 +379,14 @@ def assistant_error_render(self: AssistantError) -> ViewBlock:
 # ---------------------------------------------------------------------------
 
 
-@mutagent.impl(TurnSeparator.__init__)
+@mutobj.impl(TurnSeparator.__init__)
 def turn_separator_init(
     self: TurnSeparator, *, item: TurnSeparatorItem
 ) -> None:
     super(TurnSeparator, self).__init__(item=item)
 
 
-@mutagent.impl(TurnSeparator.render)
+@mutobj.impl(TurnSeparator.render)
 def turn_separator_render(self: TurnSeparator) -> ViewBlock:
     detail = (
         f"{self.item.duration:.1f}s · in {self.item.input_tokens} · out {self.item.output_tokens}"
@@ -456,12 +455,12 @@ def _pretty_json(text: str) -> str:
         return text
 
 
-@mutagent.impl(ToolCallCard.__init__)
+@mutobj.impl(ToolCallCard.__init__)
 def tool_call_card_init(self: ToolCallCard, *, item: ToolCallItem) -> None:
     super(ToolCallCard, self).__init__(item=item)
 
 
-@mutagent.impl(ToolCallCard.render)
+@mutobj.impl(ToolCallCard.render)
 def tool_call_card_render(self: ToolCallCard) -> ViewBlock:
     status = self.item.status
     status_text = {

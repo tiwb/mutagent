@@ -7,9 +7,9 @@ from functools import partial
 import logging
 from typing import Any
 
-import mutagent
 import mutobj
-from mutagent.messages import Message, StreamEvent, TextBlock
+from mutagent.core.messages import Message, StreamEvent, TextBlock
+from mutagent.core.llm import LLMApiClient
 from mutagent.webui.chat_input import ChatInput
 from mutagent.webui.conversation import Conversation
 from mutagent.webui.messages import (
@@ -102,8 +102,8 @@ def _hash_for_route(route: str) -> str:
 # ── @impl: __init__ ──────────────────────────────────────────────
 
 
-@mutagent.impl(Conversation.__init__)
-def __init__(self: Conversation, *, agent: Any, app: Any = None) -> None:
+@mutobj.impl(Conversation.__init__)
+def conversation_init__(self: Conversation, *, agent: Any, app: Any = None) -> None:
     super(Conversation, self).__init__()
     ext = _cext(self)
     self.app = app
@@ -111,7 +111,7 @@ def __init__(self: Conversation, *, agent: Any, app: Any = None) -> None:
     ext.items = []
     ext.message_list = MessageList(items=ext.items)
     ext.message_list.id = "message-list"
-    self.models = agent.list_models()
+    self.models = app.config.list_models()
     self.current_model = _resolve_current_model_name(agent, self.models)
     self.status = "idle"
     self.is_busy = False
@@ -220,14 +220,20 @@ def _find_item(self: Conversation, item_id: str) -> Any | None:
 
 
 async def _refresh_models_from_config(self: Conversation, preferred_model: str = "") -> None:
-    self.models = self.agent.list_models()
+    if self.app is None:
+        return
+    self.models = self.app.config.list_models()
     available = [str(model.get("name", "")) for model in self.models if model.get("name")]
-    desired = preferred_model or str(self.agent.config.get("default_model", default="") or "")
+    desired = preferred_model or str(self.app.config.get("default_model", default="") or "")
     if not desired or desired not in available:
         desired = available[0] if available else ""
     if desired and not self.is_busy:
         try:
-            self.agent.select_model(desired)
+            spec = self.app.config.resolve_model(desired)
+            if spec:
+                llm = LLMApiClient.from_spec(spec)
+                self.agent.llm = llm
+                self.agent.model = llm.model_id
         except Exception as exc:
             _append_item(
                 self,
@@ -302,8 +308,14 @@ async def handle_cancel(self: Conversation) -> None:
 
 async def handle_model_change(self: Conversation, name: str) -> None:
     logger.info("Conversation model change requested: %s", name)
+    if self.app is None:
+        return
     try:
-        self.agent.select_model(name)
+        spec = self.app.config.resolve_model(name)
+        if spec:
+            llm = LLMApiClient.from_spec(spec)
+            self.agent.llm = llm
+            self.agent.model = llm.model_id
     except Exception as exc:
         _append_item(
             self,
@@ -315,7 +327,7 @@ async def handle_model_change(self: Conversation, name: str) -> None:
             ),
         )
     else:
-        self.models = self.agent.list_models()
+        self.models = self.app.config.list_models()
         self.current_model = name
     _refresh_shell(self)
     self.invalidate()
@@ -483,8 +495,8 @@ async def _apply_route(self: Conversation, route: str) -> None:
     self.current_route = route
 
 
-@mutagent.impl(Conversation.navigate_to)
-async def navigate_to(self: Conversation, route: str) -> None:
+@mutobj.impl(Conversation.navigate_to)
+async def conversation_navigate_to(self: Conversation, route: str) -> None:
     """编程式导航 — 后端主动改路由 + 同步 URL hash。
 
     防循环：``mutgui.setHash`` 走 ``pushState/replaceState``，W3C 规定
@@ -497,8 +509,8 @@ async def navigate_to(self: Conversation, route: str) -> None:
     self.invalidate()
 
 
-@mutagent.impl(Conversation.on_hash_change)
-async def on_hash_change(self: Conversation, hash_value: str) -> None:
+@mutobj.impl(Conversation.on_hash_change)
+async def conversation_on_hash_change(self: Conversation, hash_value: str) -> None:
     """浏览器侧 hash 变化（back / forward / 手输 / 初始握手）→ 同步状态。
 
     **不**回发 setHash —— URL 已经在前端是新值。
@@ -511,8 +523,8 @@ async def on_hash_change(self: Conversation, hash_value: str) -> None:
     self.invalidate()
 
 
-@mutagent.impl(Conversation.on_event)
-async def on_event(self: Conversation, event: Event) -> bool:
+@mutobj.impl(Conversation.on_event)
+async def conversation_on_event(self: Conversation, event: Event) -> bool:
     """拦截 root 级 ``$hashchange`` 系统事件，其他事件走默认子组件分发。
 
     ``source: []`` 才到得了 root View 的 ``on_event``（``component_id == ""``）。
@@ -521,13 +533,13 @@ async def on_event(self: Conversation, event: Event) -> bool:
         new_hash = ""
         if isinstance(event.kwargs, dict):
             new_hash = str(event.kwargs.get("hash", "") or "")
-        await on_hash_change(self, new_hash)
+        await conversation_on_hash_change(self, new_hash)
         return True
     return await super(Conversation, self).on_event(event)
 
 
-@mutagent.impl(Conversation.render)
-def render(self: Conversation) -> ViewBlock:
+@mutobj.impl(Conversation.render)
+def conversation_render(self: Conversation) -> ViewBlock:
     ext = _cext(self)
     _refresh_shell(self)
     in_settings = self.current_route.startswith("settings")

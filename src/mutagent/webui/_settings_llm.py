@@ -7,36 +7,34 @@ LLMSettingsPanel now extends SettingsPanel from webui.settings.
 from __future__ import annotations
 
 import inspect
-import json
 import re
 from copy import deepcopy
-from pathlib import Path
 from typing import Any, ClassVar
 
 import httpx
-import mutagent
 import mutobj
-from mutagent.provider import LLMProvider
+from mutagent.core.llm import LLMApiClient
 from mutagent.webui.settings import SettingsPanel
-from mutgui import Bind, Callback, ViewBlock
+from mutgui import Bind, Callback, Expr, ViewBlock
 from mutgui.view import ViewId
 
 _CHAT_MODEL_PREFIXES = ("gpt-", "o1", "o3", "o4", "chatgpt-")
 _VARIANT_SUFFIXES = ("-mini", "-nano", "-turbo", "-latest", "-preview", "-realtime")
 _FEATURED_FAMILIES_PER_PREFIX = 2
 
-_ANTHROPIC_PROVIDER = "mutagent.builtins.anthropic_provider.AnthropicProvider"
-_OPENAI_PROVIDER = "mutagent.builtins.openai_provider.OpenAIProvider"
+_ANTHROPIC_API_TYPE = "Anthropic"
+_OPENAI_API_TYPE = "OpenAI"
 
+# 按 api_type 索引的预设信息
 _PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
-    _ANTHROPIC_PROVIDER: {
+    "Anthropic": {
         "label": "Anthropic",
         "name_seed": "anthropic",
         "base_url": "https://api.anthropic.com",
         "models": ["claude-sonnet-4", "claude-haiku-4.5", "claude-opus-4"],
         "tag_color": "purple",
     },
-    _OPENAI_PROVIDER: {
+    "OpenAI": {
         "label": "OpenAI",
         "name_seed": "openai",
         "base_url": "https://api.openai.com/v1",
@@ -67,7 +65,7 @@ class LLMSettingsPanel(SettingsPanel):
     editing_key: str = ""
     editing_is_new: bool = False
     provider_name: str = ""
-    provider_type: str = _ANTHROPIC_PROVIDER
+    provider_type: str = _ANTHROPIC_API_TYPE
     provider_type_label: str = "Anthropic"
     base_url: str = ""
     auth_token: str = ""
@@ -120,16 +118,41 @@ def _normalize_models(value: Any) -> list[str]:
     return []
 
 
+def _resolve_api_type(provider_path: str) -> str:
+    """将任意 provider 标识规范化为 api_type 短名。
+
+    支持：api_type 直传（大小写不敏感）、旧类名（如 AnthropicProvider）、完整路径。
+    匹配不到返回空字符串。
+    """
+    key = provider_path.lower()
+    # 1. Direct api_type match
+    for api_type in _PROVIDER_PRESETS:
+        if api_type.lower() == key:
+            return api_type
+    # 2. Try stripping common suffixes from class names / paths
+    short = provider_path.rsplit(".", 1)[-1]
+    for suffix in ("ApiClient", "Client", "Provider"):
+        if short.endswith(suffix):
+            short = short[:-len(suffix)]
+            break
+    for api_type in _PROVIDER_PRESETS:
+        if api_type.lower() == short.lower():
+            return api_type
+    return ""
+
+
 def _provider_label_from_path(provider_path: str) -> str:
-    preset = _PROVIDER_PRESETS.get(provider_path)
+    api_type = _resolve_api_type(provider_path)
+    preset = _PROVIDER_PRESETS.get(api_type)
     if preset is not None:
         return str(preset["label"])
-    class_name = provider_path.rsplit(".", 1)[-1].strip() or "Provider"
-    return class_name.removesuffix("Provider") or class_name
+    class_name = provider_path.rsplit(".", 1)[-1].strip()
+    return class_name.removesuffix("ApiClient").removesuffix("Client") or class_name
 
 
 def _provider_name_seed(provider_path: str) -> str:
-    preset = _PROVIDER_PRESETS.get(provider_path)
+    api_type = _resolve_api_type(provider_path)
+    preset = _PROVIDER_PRESETS.get(api_type)
     if preset is not None:
         return str(preset["name_seed"])
     label = _provider_label_from_path(provider_path)
@@ -138,26 +161,23 @@ def _provider_name_seed(provider_path: str) -> str:
 
 
 def _provider_protocol(provider_path: str) -> str:
-    import mutagent.builtins.anthropic_provider  # noqa: F401
-    import mutagent.builtins.openai_provider  # noqa: F401
-    from mutagent.builtins.anthropic_provider import AnthropicProvider
-    from mutagent.builtins.openai_provider import OpenAIProvider
-
     try:
-        provider_cls = mutobj.resolve_class(provider_path, base_cls=LLMProvider)
+        provider_cls = mutobj.resolve_class(provider_path, base_cls=LLMApiClient)
     except Exception:
         return "generic"
-    if issubclass(provider_cls, AnthropicProvider):
+    api_type = provider_cls.api_type
+    if api_type == "Anthropic":
         return "anthropic"
-    if issubclass(provider_cls, OpenAIProvider):
+    if api_type == "OpenAI":
         return "openai"
     return "generic"
 
 
 def _provider_tag_color(provider_path: str) -> str:
-    preset = _PROVIDER_PRESETS.get(provider_path)
+    api_type = _resolve_api_type(provider_path)
+    preset = _PROVIDER_PRESETS.get(api_type)
     if preset is not None:
-        return str(preset["tag_color"])
+        return str(preset.get("tag_color", "default"))
     protocol = _provider_protocol(provider_path)
     if protocol == "anthropic":
         return "purple"
@@ -167,14 +187,16 @@ def _provider_tag_color(provider_path: str) -> str:
 
 
 def _provider_base_url_default(provider_path: str) -> str:
-    preset = _PROVIDER_PRESETS.get(provider_path)
+    api_type = _resolve_api_type(provider_path)
+    preset = _PROVIDER_PRESETS.get(api_type)
     if preset is None:
         return ""
     return str(preset["base_url"])
 
 
 def _provider_default_models(provider_path: str) -> list[str]:
-    preset = _PROVIDER_PRESETS.get(provider_path)
+    api_type = _resolve_api_type(provider_path)
+    preset = _PROVIDER_PRESETS.get(api_type)
     if preset is None:
         return []
     return list(preset["models"])
@@ -185,29 +207,30 @@ def _provider_add_button_id(provider_path: str) -> str:
 
 
 def _available_provider_types() -> list[str]:
-    import mutagent.builtins.anthropic_provider  # noqa: F401
-    import mutagent.builtins.openai_provider  # noqa: F401
+    """返回所有可用 provider 的 api_type，预设类型排在前面。"""
+    from mutagent.core import _llm_impl_anthropic  # noqa: F401
+    from mutagent.core import _llm_impl_openai  # noqa: F401
 
-    discovered = {
-        f"{cls.__module__}.{cls.__name__}"
-        for cls in mutobj.discover_subclasses(LLMProvider)
-    }
-    discovered.update(_PROVIDER_PRESETS)
-    preferred = [_ANTHROPIC_PROVIDER, _OPENAI_PROVIDER]
-    ordered = [path for path in preferred if path in discovered]
-    ordered.extend(sorted(
-        (path for path in discovered if path not in preferred),
-        key=lambda path: _provider_label_from_path(path).lower(),
-    ))
-    return ordered
+    types: list[str] = []
+    for cls in mutobj.discover_subclasses(LLMApiClient):
+        if cls is LLMApiClient:
+            continue
+        if cls.api_type and cls.api_type not in types:
+            types.append(cls.api_type)
+    # 预设类型放前面，其余按字母排序
+    preset_types = {"Anthropic", "OpenAI"}
+    preferred = sorted([t for t in types if t in preset_types])
+    rest = sorted([t for t in types if t not in preferred])
+    return preferred + rest
 
 
 def _make_provider_draft(name: str, provider_path: str) -> dict[str, Any]:
-    models = _provider_default_models(provider_path)
+    api_type = _resolve_api_type(provider_path) or _ANTHROPIC_API_TYPE
+    models = _provider_default_models(api_type)
     return {
         "name": name,
-        "provider": provider_path,
-        "base_url": _provider_base_url_default(provider_path),
+        "type": api_type,
+        "base_url": _provider_base_url_default(api_type),
         "auth_token": "",
         "models": list(models),
         "discovered_models": list(models),
@@ -215,16 +238,20 @@ def _make_provider_draft(name: str, provider_path: str) -> dict[str, Any]:
 
 
 def _draft_from_config(key: str, config: dict[str, Any]) -> dict[str, Any]:
-    provider_path = str(config.get("provider", _ANTHROPIC_PROVIDER)).strip() or _ANTHROPIC_PROVIDER
+    provider_path = str(config.get("type", "")).strip()
+    if not provider_path:
+        api_type = _ANTHROPIC_API_TYPE
+    else:
+        api_type = _resolve_api_type(provider_path) or _ANTHROPIC_API_TYPE
     models = _normalize_models(config.get("models", []))
-    discovered = _provider_default_models(provider_path)
+    discovered = _provider_default_models(api_type)
     for model in models:
         if model not in discovered:
             discovered.append(model)
     return {
         "name": key,
-        "provider": provider_path,
-        "base_url": str(config.get("base_url", _provider_base_url_default(provider_path))),
+        "type": api_type,
+        "base_url": str(config.get("base_url", _provider_base_url_default(api_type))),
         "auth_token": str(config.get("auth_token", "")),
         "models": models,
         "discovered_models": discovered,
@@ -249,7 +276,7 @@ def _sync_default_model(self: LLMSettingsPanel) -> None:
 
 def _apply_draft(self: LLMSettingsPanel, draft: dict[str, Any]) -> None:
     self.provider_name = str(draft["name"])
-    self.provider_type = str(draft["provider"])
+    self.provider_type = str(draft["type"])
     self.provider_type_label = _provider_label_from_path(self.provider_type)
     self.base_url = str(draft["base_url"])
     self.auth_token = str(draft["auth_token"])
@@ -260,7 +287,7 @@ def _apply_draft(self: LLMSettingsPanel, draft: dict[str, Any]) -> None:
 def _persist_current_draft(self: LLMSettingsPanel) -> dict[str, Any]:
     return {
         "name": self.provider_name.strip(),
-        "provider": self.provider_type.strip() or _ANTHROPIC_PROVIDER,
+        "type": self.provider_type.strip() or _ANTHROPIC_API_TYPE,
         "base_url": self.base_url.strip(),
         "auth_token": self.auth_token.strip(),
         "models": _normalize_models(self.models),
@@ -275,13 +302,6 @@ def _unique_provider_name(self: LLMSettingsPanel, base: str) -> str:
         candidate = f"{base}-{index}"
         index += 1
     return candidate
-
-
-def _config_path(self: LLMSettingsPanel) -> Path:
-    path = getattr(self._app, "config_path", None)
-    if isinstance(path, Path):
-        return path
-    return (Path.cwd() / ".mutagent" / "config.json").resolve()
 
 
 def _model_family(name: str) -> str:
@@ -367,15 +387,10 @@ async def _discover_remote_models(
 
 
 def _write_config(self: LLMSettingsPanel, providers: dict[str, dict[str, Any]], default_model: str) -> None:
-    config = self._agent.config
-    data = getattr(config, "_data", None)
-    if not isinstance(data, dict):
-        raise RuntimeError("Current Config implementation cannot be saved from WebUI")
+    config = self._app.config
     config.set("providers", providers, source="webui")
     config.set("default_model", default_model, source="webui")
-    path = _config_path(self)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    config.save()
 
 
 def _set_message(self: LLMSettingsPanel, *, error: str = "", notice: str = "") -> None:
@@ -384,13 +399,13 @@ def _set_message(self: LLMSettingsPanel, *, error: str = "", notice: str = "") -
 
 
 def _load_from_config(self: LLMSettingsPanel) -> None:
-    providers = self._agent.config.get("providers", default={}) or {}
+    providers = self._app.config.get("providers", default={}) or {}
     self._drafts = {
         key: _draft_from_config(key, deepcopy(config))
         for key, config in providers.items()
         if isinstance(config, dict)
     }
-    self.default_model = str(self._agent.config.get("default_model", default="") or "")
+    self.default_model = str(self._app.config.get("default_model", default="") or "")
     self.current_step = "list"
     self.editing_key = ""
     self.editing_is_new = False
@@ -399,7 +414,7 @@ def _load_from_config(self: LLMSettingsPanel) -> None:
         _apply_draft(self, self._drafts[first_key])
         self.editing_key = first_key
     else:
-        draft = _make_provider_draft("anthropic", _ANTHROPIC_PROVIDER)
+        draft = _make_provider_draft("anthropic", _ANTHROPIC_API_TYPE)
         _apply_draft(self, draft)
     _sync_default_model(self)
     _set_message(self)
@@ -441,15 +456,30 @@ def _edit_provider(key: str, *, view: LLMSettingsPanel) -> None:
     view.invalidate()
 
 
-def _start_add_provider(provider_path: str, *, view: LLMSettingsPanel) -> None:
-    if not provider_path.strip():
+def _start_add_provider(*, view: LLMSettingsPanel) -> None:
+    """添加新 provider，默认使用第一种可用类型。"""
+    types = _available_provider_types()
+    if not types:
         return
+    provider_path = types[0]
     name = _unique_provider_name(view, _provider_name_seed(provider_path))
     draft = _make_provider_draft(name, provider_path)
     view.current_step = "edit"
     view.editing_key = name
     view.editing_is_new = True
     _apply_draft(view, draft)
+    _set_message(view)
+    view.invalidate()
+
+
+def _on_provider_type_change(*, view: LLMSettingsPanel, value: str) -> None:
+    """Provider Type 下拉切换时同步更新 base_url 默认值和模型列表。"""
+    view.provider_type = value
+    view.provider_type_label = _provider_label_from_path(value)
+    view.base_url = _provider_base_url_default(value)
+    view.discovered_models = _provider_default_models(value)
+    if not view.models:
+        view.models = list(view.discovered_models[:min(len(view.discovered_models), 3)])
     _set_message(view)
     view.invalidate()
 
@@ -549,7 +579,7 @@ async def _save_all_settings(*, view: LLMSettingsPanel) -> None:
         models = _normalize_models(draft.get("models", []))
         base_url = str(draft.get("base_url", "")).strip()
         auth_token = str(draft.get("auth_token", "")).strip()
-        provider_path = str(draft.get("provider", _ANTHROPIC_PROVIDER)).strip() or _ANTHROPIC_PROVIDER
+        provider_path = str(draft.get("type", "")).strip() or _ANTHROPIC_API_TYPE
         if not provider_name:
             _set_message(view, error="Provider name cannot be empty.")
             view.invalidate()
@@ -567,7 +597,7 @@ async def _save_all_settings(*, view: LLMSettingsPanel) -> None:
             view.invalidate()
             return
         providers[provider_name] = {
-            "provider": provider_path,
+            "type": provider_path,
             "auth_token": auth_token,
             "base_url": base_url,
             "models": models,
@@ -618,7 +648,7 @@ def _render_list(self: LLMSettingsPanel) -> list[dict[str, Any]]:
     items = _render_message(self)
     provider_buttons: list[dict[str, Any]] = []
     for key, draft in self._drafts.items():
-        provider_path = str(draft.get("provider", _ANTHROPIC_PROVIDER))
+        provider_path = str(draft.get("type", _ANTHROPIC_API_TYPE))
         provider_buttons.append({
             "$component": "antd.Button",
             "$id": f"provider-{key}",
@@ -679,14 +709,12 @@ def _render_list(self: LLMSettingsPanel) -> list[dict[str, Any]]:
                 ],
             }],
         })
-    add_buttons = []
-    for provider_path in _available_provider_types():
-        add_buttons.append({
-            "$component": "antd.Button",
-            "$id": _provider_add_button_id(provider_path),
-            "children": f"Add {_provider_label_from_path(provider_path)}",
-            "onClick": Callback(_start_add_provider, provider_path, view=self),
-        })
+    add_buttons = [{
+        "$component": "antd.Button",
+        "$id": "add-provider",
+        "children": "Add Provider",
+        "onClick": Callback(_start_add_provider, view=self),
+    }]
     items.extend([
         {
             "$component": "antd.Typography.Paragraph",
@@ -741,7 +769,7 @@ def _render_list(self: LLMSettingsPanel) -> list[dict[str, Any]]:
                 "fontSize": "12px",
                 "color": "var(--mutgui-text-dim)",
             },
-            "children": f"Config file: {_config_path(self)}",
+            "children": f"Config file: {self._app.config.path or '(not saved)'}",
         },
         {
             "$component": "antd.Button",
@@ -797,10 +825,14 @@ def _render_edit(self: LLMSettingsPanel) -> list[dict[str, Any]]:
                     "$id": "provider-type-item",
                     "label": "Provider Type",
                     "$children": [{
-                        "$component": "antd.Input",
+                        "$component": "antd.Select",
                         "$id": "provider-type",
                         "value": self.provider_type,
-                        "disabled": True,
+                        "options": [
+                            {"label": _provider_label_from_path(t), "value": t}
+                            for t in _available_provider_types()
+                        ],
+                        "onChange": Callback(_on_provider_type_change, view=self, value=Expr.wire("$0")),
                     }],
                 },
                 {

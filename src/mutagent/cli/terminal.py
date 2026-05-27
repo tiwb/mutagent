@@ -6,16 +6,26 @@ objects to the terminal.  Used by CLI App.run().
 
 from __future__ import annotations
 
-import sys
-from typing import TYPE_CHECKING
+import argparse
+import asyncio
+import logging
+import queue
 
+import sys
+import threading
+from typing import TYPE_CHECKING, Any
+
+from mutagent.app.app import App
 from mutagent.cli.ansi import (
     bold_cyan, bold_red, dim, _format_tool_call, _format_tool_result,
     highlight_markdown_line,
 )
 
 if TYPE_CHECKING:
-    from mutagent.messages import StreamEvent
+    from mutagent.core.messages import StreamEvent
+
+
+logger = logging.getLogger(__name__)
 
 
 class TerminalRenderer:
@@ -64,3 +74,114 @@ class TerminalRenderer:
                 return False
         print("")
         return True
+
+
+def add_terminal_subcommand(subparsers: Any) -> argparse.ArgumentParser:
+    """Register the terminal subparser."""
+    parser = subparsers.add_parser(
+        "terminal",
+        help="Start an interactive chat session (default)",
+    )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Force headless mode (ignored, no TUI)",
+    )
+    return parser
+
+
+def dispatch_terminal(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """在终端 REPL 中运行 agent 会话。"""
+    app = App()
+    app.load_config(args.config)
+    app.setup_agent()
+    spec = app.config.resolve_model()
+    print(f"mutagent ready  (model: {spec.get('model_id', '?') if spec else '?'})")
+    print("Type your message. 'exit' or Ctrl+C to quit.\n")
+
+    renderer = TerminalRenderer()
+
+    # 启动 asyncio event loop 线程
+    loop = asyncio.new_event_loop()
+    loop_thread = threading.Thread(target=loop.run_forever, daemon=True)
+    loop_thread.start()
+
+    # 在 loop 上连接 MCP/CLI sources
+    try:
+        asyncio.run_coroutine_threadsafe(
+            app.connect_sources(), loop
+        ).result(timeout=120)
+    except Exception as e:
+        logger.warning("connect_sources failed: %s", e)
+        print(f"Warning: failed to connect sources: {e}", file=sys.stderr)
+
+    # 订阅 agent 事件（线程安全的 queue.put）
+    event_q: queue.Queue[StreamEvent] = queue.Queue()
+    app.agent.subscribe(event_q.put)
+
+    waiting_for_input = True  # True when blocked on read_input()
+
+    while True:
+        try:
+            waiting_for_input = True
+            user_input = renderer.read_input()
+            waiting_for_input = False
+
+            if not user_input:
+                continue
+
+            # exit / /exit 直接退出
+            if user_input in ("exit", "/exit"):
+                break
+
+            # 提交 agent 任务到 asyncio 线程
+            asyncio.run_coroutine_threadsafe(
+                app.agent.submit(user_input), loop
+            )
+
+            # 主线程同步消费事件
+            while True:
+                try:
+                    evt = event_q.get(timeout=0.2)
+                except queue.Empty:
+                    if app.agent.is_busy():
+                        continue
+                    break
+                renderer.render_event(evt)
+                if evt.type == "turn_done":
+                    break
+
+        except KeyboardInterrupt:
+            if waiting_for_input:
+                # 空输入时 Ctrl+C：询问是否退出
+                if renderer.confirm_exit():
+                    break
+            else:
+                # agent 运行中 Ctrl+C：取消当前任务
+                app.agent.cancel()
+                # 排空 event_q 中残留事件
+                try:
+                    while True:
+                        event_q.get_nowait()
+                except queue.Empty:
+                    pass
+                print("\n[User interrupted]")
+        except EOFError:
+            # Ctrl+D (Unix) / Ctrl+Z (Windows)
+            break
+        except Exception as e:
+            print(f"\n[Error: {e}]", file=sys.stderr, flush=True)
+
+    # 清理 sandbox + event loop
+    sandbox = getattr(app, "sandbox", None)
+    if sandbox is not None:
+        try:
+            asyncio.run_coroutine_threadsafe(sandbox.close(), loop).result(timeout=5)
+        except Exception:
+            pass
+    try:
+        asyncio.run_coroutine_threadsafe(loop.shutdown_asyncgens(), loop).result(timeout=2)
+    except Exception:
+        pass
+    loop.call_soon_threadsafe(loop.stop)
+    loop_thread.join(timeout=2)

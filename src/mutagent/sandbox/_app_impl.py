@@ -16,7 +16,6 @@ import time
 from typing import Any, Callable, Iterator
 
 import mutobj
-import mutagent
 from mutagent.sandbox.app import SandboxApp, CleanupCallback
 from mutagent.sandbox._engine import execute
 from mutagent.sandbox._namespace import (
@@ -403,8 +402,8 @@ def _schedule_cleanup_sync(name: str, cb: CleanupCallback) -> None:
 # SandboxApp @impl
 # ---------------------------------------------------------------------------
 
-@mutagent.impl(SandboxApp.add_namespace)
-def _add_namespace(
+@mutobj.impl(SandboxApp.add_namespace)
+def sandbox_app_add_namespace(
     self: SandboxApp,
     ns: Namespace,
     on_remove: CleanupCallback | None = None,
@@ -427,8 +426,8 @@ def _add_namespace(
                  ns.name, ns.provider_kind, on_remove is not None)
 
 
-@mutagent.impl(SandboxApp.remove_namespace)
-def _remove_namespace(self: SandboxApp, name: str) -> None:
+@mutobj.impl(SandboxApp.remove_namespace)
+def sandbox_app_remove_namespace(self: SandboxApp, name: str) -> None:
     """按 name 移除该名下的**全部** providers（向后兼容接口）。
 
     同时调度所有被移除 provider 的 cleanup。
@@ -479,23 +478,23 @@ def _remove_namespace_provider(self: SandboxApp, ns: Namespace) -> bool:
 SandboxApp.remove_provider = _remove_namespace_provider  # type: ignore[attr-defined]
 
 
-@mutagent.impl(SandboxApp.register_mcp_connection)
-def _register_mcp_connection(self: SandboxApp, name: str, conn: Any) -> None:
+@mutobj.impl(SandboxApp.register_mcp_connection)
+def sandbox_app_register_mcp_connection(self: SandboxApp, name: str, conn: Any) -> None:
     _get_mcp_conns(self)[name] = conn
 
 
-@mutagent.impl(SandboxApp.unregister_mcp_connection)
-def _unregister_mcp_connection(self: SandboxApp, name: str) -> None:
+@mutobj.impl(SandboxApp.unregister_mcp_connection)
+def sandbox_app_unregister_mcp_connection(self: SandboxApp, name: str) -> None:
     _get_mcp_conns(self).pop(name, None)
 
 
-@mutagent.impl(SandboxApp.mcp_connections)
-def _mcp_connections(self: SandboxApp) -> dict[str, Any]:
+@mutobj.impl(SandboxApp.mcp_connections)
+def sandbox_app_mcp_connections(self: SandboxApp) -> dict[str, Any]:
     return dict(_get_mcp_conns(self))
 
 
-@mutagent.impl(SandboxApp.iter_namespaces)
-def _iter_namespaces(
+@mutobj.impl(SandboxApp.iter_namespaces)
+def sandbox_app_iter_namespaces(
     self: SandboxApp,
 ) -> Iterator[Namespace | MergedNamespaceView]:
     """按名排序遍历 sandbox 可见的全部 namespace。
@@ -508,8 +507,8 @@ def _iter_namespaces(
         yield ns_dict[name]
 
 
-@mutagent.impl(SandboxApp.get_namespace)
-def _get_namespace(
+@mutobj.impl(SandboxApp.get_namespace)
+def sandbox_app_get_namespace(
     self: SandboxApp, name: str,
 ) -> Namespace | MergedNamespaceView | None:
     """按名获取 namespace；不存在返回 ``None``。与 ``iter_namespaces`` 来自同一可见集。"""
@@ -523,15 +522,15 @@ def _get_namespace(
     return None
 
 
-@mutagent.impl(SandboxApp.exec_code)
-def _exec_code(self: SandboxApp, code: str,
+@mutobj.impl(SandboxApp.exec_code)
+def sandbox_app_exec_code(self: SandboxApp, code: str,
                state: dict[str, Any] | None = None) -> dict[str, Any]:
     ns_dict = _build_namespace_dict(self)
     return execute(code, ns_dict, state)
 
 
-@mutagent.impl(SandboxApp.close)
-async def _close(self: SandboxApp) -> None:
+@mutobj.impl(SandboxApp.close)
+async def sandbox_app_close(self: SandboxApp) -> None:
     cleanups = _get_cleanups(self)
     registry = _get_registry(self)
     mcp_conns = _get_mcp_conns(self)
@@ -549,8 +548,8 @@ async def _close(self: SandboxApp) -> None:
     _invalidate_cache(self)
 
 
-@mutagent.impl(SandboxApp.format_result)
-def _format_result(self: SandboxApp, result: dict[str, Any]) -> tuple[str, bool]:
+@mutobj.impl(SandboxApp.format_result)
+def sandbox_app_format_result(self: SandboxApp, result: dict[str, Any]) -> tuple[str, bool]:
     if "error" in result:
         text = result["error"]
         if result.get("traceback"):

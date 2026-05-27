@@ -10,11 +10,9 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 from copy import deepcopy
-from pathlib import Path
 from typing import Any, ClassVar
 
 import mutagent
@@ -272,24 +270,11 @@ def _apply_draft_to_form(self: MCPSettingsPanel, draft: dict[str, Any]) -> None:
 # ═══════════════════════════════════════════════════════════════
 
 
-def _config_path(self: MCPSettingsPanel) -> Path:
-    path = getattr(self._app, "config_path", None)
-    if isinstance(path, Path):
-        return path
-    return (Path.cwd() / ".mutagent" / "config.json").resolve()
-
-
 def _write_config(self: MCPSettingsPanel,
                   mcp_sources: dict[str, dict[str, Any]]) -> None:
-    config = self._agent.config
-    data = getattr(config, "_data", None)
-    if not isinstance(data, dict):
-        raise RuntimeError("Current Config implementation cannot be saved from WebUI")
+    config = self._app.config
     config.set("mcp_sources", mcp_sources, source="webui")
-    path = _config_path(self)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-                    encoding="utf-8")
+    config.save()
 
 
 def _load_from_config(self: MCPSettingsPanel) -> None:
@@ -299,7 +284,7 @@ def _load_from_config(self: MCPSettingsPanel) -> None:
     conns: dict[原始 key, MCPConnection]
     两者按原始 key 对齐；conn 可能没有（rename/未启动）。
     """
-    cfg_sources = self._agent.config.get("mcp_sources", default={}) or {}
+    cfg_sources = self._app.config.get("mcp_sources", default={}) or {}
     self._drafts = {
         key: _draft_from_config(key, deepcopy(cfg))
         for key, cfg in cfg_sources.items()
@@ -907,7 +892,7 @@ def _render_list(self: MCPSettingsPanel) -> list[dict[str, Any]]:
             "fontSize": "12px",
             "color": "var(--mutgui-text-dim)",
         },
-        "children": f"Config file: {_config_path(self)}",
+        "children": f"Config file: {self._app.config.path or '(not saved)'}",
     })
 
 

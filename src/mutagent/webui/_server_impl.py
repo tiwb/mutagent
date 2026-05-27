@@ -7,6 +7,7 @@ import json
 from typing import Any
 
 import mutagent
+import mutobj
 from mutagent.sandbox.tools import PySandboxTools
 from mutagent.webui.conversation import Conversation
 from mutagent.webui.server import WebUIServer
@@ -17,8 +18,8 @@ from mutio.net.server import HTMLResponse, StaticView, WebSocketConnection, WebS
 logger = logging.getLogger(__name__)
 
 
-@mutagent.impl(WebUIServer.on_startup)
-async def _on_startup(self: WebUIServer) -> None:
+@mutobj.impl(WebUIServer.on_startup)
+async def web_ui_server_on_startup(self: WebUIServer) -> None:
     """在 server 自己的 event loop 上连接 mcp_sources / cli_sources。
 
     必须在这里 await（而不是 setup_agent 后马上），因为 MCP client 会绑定到
@@ -103,8 +104,8 @@ def _runtime_messages(registry: ModuleRegistry) -> list[dict[str, str]]:
     return messages
 
 
-@mutagent.impl(WebUIServer.__init__)
-def __init__(
+@mutobj.impl(WebUIServer.__init__)
+def web_ui_server_init__(
     self: WebUIServer,
     *,
     app: Any,

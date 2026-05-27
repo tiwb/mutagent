@@ -7,8 +7,8 @@ from typing import Any, TYPE_CHECKING, ClassVar
 from mutgui import View, ViewBlock
 
 if TYPE_CHECKING:
-    from mutagent.agent import Agent
-    from mutagent.main import App
+    from mutagent.core.agent import Agent
+    from mutagent.app.app import App
 
 
 class SettingsPage(View):

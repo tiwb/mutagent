@@ -13,7 +13,6 @@ from __future__ import annotations
 import inspect
 from typing import Any
 
-import mutagent
 import mutobj
 from mutobj.core import AttributeDescriptor
 from mutagent.webui.settings import SettingsPage, SettingsPanel
@@ -67,8 +66,8 @@ async def _call_maybe_async(handler: Any, *args: Any) -> None:
 # ── @impl: __init__ ──────────────────────────────────────────
 
 
-@mutagent.impl(SettingsPage.__init__)
-def __init__(
+@mutobj.impl(SettingsPage.__init__)
+def settings_page_init__(
     self: SettingsPage,
     *,
     app: Any,
@@ -117,8 +116,8 @@ def __init__(
 # ── @impl: render ────────────────────────────────────────────
 
 
-@mutagent.impl(SettingsPage.render)
-def render(self: SettingsPage) -> ViewBlock:
+@mutobj.impl(SettingsPage.render)
+def settings_page_render(self: SettingsPage) -> ViewBlock:
     ext = _spext(self)
     active = ext.panels.get(self.active_panel_id)
 
@@ -253,8 +252,8 @@ def render(self: SettingsPage) -> ViewBlock:
 # ── @impl: activate / deactivate / close / list / notify ─────
 
 
-@mutagent.impl(SettingsPage.activate)
-async def activate(self: SettingsPage, panel_id: str) -> None:
+@mutobj.impl(SettingsPage.activate)
+async def settings_page_activate(self: SettingsPage, panel_id: str) -> None:
     ext = _spext(self)
     target = panel_id or (ext.ordered_panel_ids[0] if ext.ordered_panel_ids else "")
     if not target or target not in ext.panels:
@@ -277,8 +276,8 @@ async def activate(self: SettingsPage, panel_id: str) -> None:
     self.invalidate()
 
 
-@mutagent.impl(SettingsPage.deactivate)
-async def deactivate(self: SettingsPage) -> None:
+@mutobj.impl(SettingsPage.deactivate)
+async def settings_page_deactivate(self: SettingsPage) -> None:
     ext = _spext(self)
     if ext.active:
         prev = ext.panels.get(self.active_panel_id)
@@ -290,21 +289,21 @@ async def deactivate(self: SettingsPage) -> None:
     self.invalidate()
 
 
-@mutagent.impl(SettingsPage.close)
-async def close(self: SettingsPage) -> None:
+@mutobj.impl(SettingsPage.close)
+async def settings_page_close(self: SettingsPage) -> None:
     ext = _spext(self)
     if ext.on_request_close is not None:
         await _call_maybe_async(ext.on_request_close)
 
 
-@mutagent.impl(SettingsPage.list_panels)
-def list_panels(self: SettingsPage) -> list[SettingsPanel]:
+@mutobj.impl(SettingsPage.list_panels)
+def settings_page_list_panels(self: SettingsPage) -> list[SettingsPanel]:
     ext = _spext(self)
     return [ext.panels[pid] for pid in ext.ordered_panel_ids]
 
 
-@mutagent.impl(SettingsPage.notify_models_changed)
-async def notify_models_changed(self: SettingsPage, preferred_model: str = "") -> None:
+@mutobj.impl(SettingsPage.notify_models_changed)
+async def settings_page_notify_models_changed(self: SettingsPage, preferred_model: str = "") -> None:
     ext = _spext(self)
     cb = ext.on_models_changed
     if cb is not None:

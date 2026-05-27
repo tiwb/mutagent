@@ -65,6 +65,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from mutagent.app.app import App
+
 logger = logging.getLogger(__name__)
 
 
@@ -191,11 +193,6 @@ def _validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
                 "To start a sandbox server:\n"
                 "  mutagent pysandbox --serve --port 8080"
             )
-
-
-def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
-    """供 main 在 parse 后立即调用的校验入口。"""
-    _validate(parser, args)
 
 
 # ---------------------------------------------------------------------------
@@ -495,7 +492,7 @@ def _setup_pysandbox_logging(config: Any) -> None:
 
     沿用原独立模式的实现：写 ``.mutagent/logs/<ts>.log``，不挂 console handler。
     """
-    from mutagent.runtime.log_store import LogStore, LogStoreHandler, SingleLineFormatter
+    from mutagent.app.log_store import LogStore, LogStoreHandler, SingleLineFormatter
 
     session_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_dir = Path(config.get("logging.log_dir", default=".mutagent/logs"))
@@ -639,7 +636,7 @@ def _dispatch_server(app: Any, args: argparse.Namespace) -> None:
 # 总入口
 # ---------------------------------------------------------------------------
 
-def dispatch_pysandbox(app: Any, args: argparse.Namespace) -> None:
+def dispatch_pysandbox(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     """由 main() 调用。
 
     Server 模式：``app.config`` 已 load 完毕（main 入口加载）。
@@ -648,7 +645,12 @@ def dispatch_pysandbox(app: Any, args: argparse.Namespace) -> None:
     （传 ``prog`` / ``default_url`` / ``unreachable_hint`` 定制）调用
     ``dispatch(args)``，而非走本函数。
     """
+    _validate(parser, args)
+
+    app = App()
+    # Client 模式不需要本地 config（纯RPC）——跳过加载避免不必要的 IO / 错误
     if args.serve:
+        app.load_config(args.config)
         _dispatch_server(app, args)
     else:
         PysandboxClient().dispatch(args)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 from typing import Any
 
-import mutagent
+import mutobj
 from mutagent.webui.toolbar import AgentStatusBar
 from mutgui import Action, ActionContext, ActionRef, Callback, Expr, ViewBlock
 
@@ -23,8 +23,8 @@ async def _call_action(handler: Any, *args: Any) -> None:
         await result
 
 
-@mutagent.impl(AgentStatusBar.__init__)
-def status_bar_init(
+@mutobj.impl(AgentStatusBar.__init__)
+def agent_status_bar_init(
     self: AgentStatusBar,
     *,
     status: str = "idle",
@@ -71,8 +71,8 @@ def _format_count(n: int) -> str:
     return str(n)
 
 
-@mutagent.impl(AgentStatusBar.render)
-def status_bar_render(self: AgentStatusBar) -> ViewBlock:
+@mutobj.impl(AgentStatusBar.render)
+def agent_status_bar_render(self: AgentStatusBar) -> ViewBlock:
     # 紧凑行内容
     segments: list[dict[str, Any]] = []
 
