@@ -1,14 +1,9 @@
-"""``mutagent pysandbox`` —— 通用 pysandbox MCP 客户端 + 纯沙箱服务。
+"""``mutagent pysandbox`` —— 通用 pysandbox MCP 客户端。
 
-两种运行模式：
+连远程 MCP server，调 ``pysandbox`` tool 执行代码。
+适配 agent 一次性脚本调用。本地无 logging、无 config，纯 RPC。
 
-- **Client（默认）**: 连远程 MCP server，调 ``pysandbox`` tool 执行代码。
-  适配 agent 一次性脚本调用。本地无 logging、无 config，纯 RPC。
-
-- **Server (``--serve``)**: 启动一个 HTTP MCP server，暴露 ``pysandbox``
-  tool。常驻进程，没有 agent loop / WebUI。
-
-对齐 python CLI 约定（仅 client 模式）::
+对齐 python CLI 约定::
 
   mutagent pysandbox --port P -c "code"          # 单条代码
   mutagent pysandbox --port P script.py          # 脚本文件
@@ -17,8 +12,6 @@
 
   mutagent pysandbox --url http://host:P/mcp -c "code"   # 显式 URL
   mutagent pysandbox --port P                    # 进入交互 REPL
-
-  mutagent pysandbox --serve --port P            # 纯沙箱服务
 
 MSYS2 兼容：含 ``/`` 的参数（URL/正则/路径）通过 stdin 或 ``--config``
 传入，避免 Git Bash 自动转换为 Windows 路径。
@@ -57,17 +50,9 @@ import argparse
 import asyncio
 import code
 import json
-import logging
 import os
-import socket
 import sys
-from datetime import datetime
-from pathlib import Path
 from typing import Any
-
-from mutagent.app.app import App
-
-logger = logging.getLogger(__name__)
 
 
 DEFAULT_TIMEOUT = 30.0
@@ -80,16 +65,10 @@ DEFAULT_TIMEOUT = 30.0
 def add_pysandbox_subcommand(subparsers: Any) -> argparse.ArgumentParser:
     parser = subparsers.add_parser(
         "pysandbox",
-        help="pysandbox MCP client（默认）/ --serve 启动纯沙箱 MCP server",
-    )
-    # 模式选择
-    parser.add_argument(
-        "--serve",
-        action="store_true",
-        help="启动纯沙箱 MCP server（常驻），而非作为 client",
+        help="pysandbox MCP client",
     )
 
-    # 公用 host/port
+    # host/port
     parser.add_argument(
         "--host",
         default="127.0.0.1",
@@ -111,25 +90,24 @@ def add_pysandbox_subcommand(subparsers: Any) -> argparse.ArgumentParser:
         type=int,
         default=env_port,
         help=(
-            "server 端口（必填）。client 模式下若用 --url 则可省。"
+            "server 端口（必填）。若用 --url 则可省。"
             "未显式指定时从环境变量 MUTAGENT_PORT 读取默认值"
         ),
     )
 
-    # client only
     parser.add_argument(
         "--url",
         default=None,
-        help="client 模式：完整 MCP endpoint URL，覆盖 --host/--port",
+        help="完整 MCP endpoint URL，覆盖 --host/--port",
     )
     parser.add_argument(
         "--timeout",
         type=float,
         default=DEFAULT_TIMEOUT,
-        help=f"client 模式：RPC timeout 秒（默认 {DEFAULT_TIMEOUT}）",
+        help=f"RPC timeout 秒（默认 {DEFAULT_TIMEOUT}）",
     )
 
-    # 代码源（仅 client 模式有效）
+    # 代码源
     parser.add_argument(
         "-c",
         dest="code",
@@ -161,38 +139,16 @@ def _has_code_source(args: argparse.Namespace) -> bool:
 
 def _validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     """互斥与必填检查。报错时通过 parser.error 退出。"""
-    if args.serve:
-        # server 模式
-        if args.url is not None:
-            parser.error("--url is a client-only option, cannot combine with --serve")
-        if args.port is None:
-            parser.error(
-                "--port is required with --serve\n"
-                "  (or set MUTAGENT_PORT environment variable)\n"
-                "\n"
-                "Example:\n"
-                "  mutagent pysandbox --serve --port 8080"
-            )
-        if _has_code_source(args):
-            parser.error(
-                "--serve does not accept code input (-c / script / stdin); "
-                "it runs as a pure MCP server."
-            )
-    else:
-        # client 模式
-        if args.code is not None and args.script is not None:
-            parser.error("-c CODE and script file are mutually exclusive")
-        if args.url is None and args.port is None:
-            parser.error(
-                "--port is required (or set MUTAGENT_PORT, or use --url for full endpoint)\n"
-                "\n"
-                "Examples:\n"
-                "  mutagent pysandbox --port 8080 -c 'help()'\n"
-                "  mutagent pysandbox --url http://host:8080/mcp -c 'help()'\n"
-                "\n"
-                "To start a sandbox server:\n"
-                "  mutagent pysandbox --serve --port 8080"
-            )
+    if args.code is not None and args.script is not None:
+        parser.error("-c CODE and script file are mutually exclusive")
+    if args.url is None and args.port is None:
+        parser.error(
+            "--port is required (or set MUTAGENT_PORT, or use --url for full endpoint)\n"
+            "\n"
+            "Examples:\n"
+            "  mutagent pysandbox --port 8080 -c 'help()'\n"
+            "  mutagent pysandbox --url http://host:8080/mcp -c 'help()'"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -333,10 +289,7 @@ class PysandboxClient:
         return (
             f"Error: No pysandbox server at {url} ({reason})\n"
             f"\n"
-            f"Start a server:\n"
-            f"  {self.prog} pysandbox --serve --port PORT      # sandbox-only MCP server\n"
-            f"\n"
-            f"Or point to a different server:\n"
+            f"Connect to a different server:\n"
             f"  {self.prog} pysandbox --port PORT -c '...'\n"
             f"  {self.prog} pysandbox --url URL    -c '...'\n"
             f"  (or set MUTAGENT_PORT to inherit a parent server's port)\n"
@@ -484,173 +437,18 @@ class PysandboxClient:
 
 
 # ---------------------------------------------------------------------------
-# Server 模式
-# ---------------------------------------------------------------------------
-
-def _setup_pysandbox_logging(config: Any) -> None:
-    """配置 server 模式的基础 logging（LogStore + 文件）。
-
-    沿用原独立模式的实现：写 ``.mutagent/logs/<ts>.log``，不挂 console handler。
-    """
-    from mutagent.app.log_store import LogStore, LogStoreHandler, SingleLineFormatter
-
-    session_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_dir = Path(config.get("logging.log_dir", default=".mutagent/logs"))
-
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.DEBUG)
-
-    log_store = LogStore()
-    mem_handler = LogStoreHandler(log_store)
-    mem_handler.setFormatter(logging.Formatter("%(message)s"))
-    root_logger.addHandler(mem_handler)
-
-    if config.get("logging.file_log", default=True):
-        log_dir.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.FileHandler(
-            log_dir / f"{session_ts}.log", encoding="utf-8"
-        )
-        file_handler.setLevel(logging.DEBUG)
-        file_handler.setFormatter(SingleLineFormatter(
-            "%(asctime)s %(levelname)-8s %(name)s - %(message)s"
-        ))
-        root_logger.addHandler(file_handler)
-
-    logger.info("Pysandbox server logging initialized (session=%s)", session_ts)
-
-
-def _build_sandbox(config: Any) -> Any:
-    """构造 SandboxApp 并注入 mcp_sources / cli_sources，返回 sandbox。
-
-    必须在 server 的 event loop 里调用（MCPConnection 捕获当前 loop）。
-    """
-    from mutagent.sandbox.app import SandboxApp
-    from mutagent.sandbox._adapter_mcp import MCPConnection
-    from mutagent.sandbox._adapter_cli import build_cli_namespace
-
-    sandbox = SandboxApp()
-    main_loop = asyncio.get_running_loop()
-
-    mcp_sources = config.get("mcp_sources", default={}) or {}
-    for ns_name, server_cfg in mcp_sources.items():
-        autostart = bool(server_cfg.get("autostart", True))
-        retry_cooldown = float(server_cfg.get("retry_cooldown", 5.0))
-        try:
-            conn = MCPConnection(
-                ns_name, server_cfg, main_loop,
-                retry_cooldown=retry_cooldown)
-        except Exception as e:
-            logger.warning("MCP source '%s' init failed: %s", ns_name, e)
-            continue
-        sandbox.add_namespace(conn.namespace, on_remove=conn.close)
-        # 回引 sandbox，供 _do_rebuild 同步注册 peer namespaces。
-        conn._sandbox = sandbox
-        if autostart:
-            async def _bg(c: MCPConnection = conn, n: str = ns_name) -> None:
-                try:
-                    await c.ensure_connected()
-                except Exception as exc:
-                    logger.warning(
-                        "MCP source '%s' autostart failed: %s", n, exc)
-            asyncio.create_task(_bg())
-
-    cli_sources = config.get("cli_sources", default={}) or {}
-    if cli_sources:
-        cli_ns = build_cli_namespace(cli_sources)
-        sandbox.add_namespace(cli_ns)
-
-    return sandbox
-
-
-async def _serve(config: Any, host: str, port: int) -> None:
-    """启动纯沙箱 MCP server，阻塞监听直到收到取消信号。"""
-    import mutagent
-    from mutio.mcp.view import MCPView
-    from mutio.net.server import Server
-    from mutagent.sandbox.tools import PySandboxTools
-
-    # 1. 构建 sandbox（必须在 server loop 里）
-    sandbox = _build_sandbox(config)
-
-    # 2. 注入到 PySandboxTools 类级单例
-    PySandboxTools._app = sandbox
-
-    # 3. 定义本进程独占的 MCPView，path=/mcp。
-    #    PySandboxTools.path == "/mcp" 会自动挂到这个 view。
-    class PySandboxMCPView(MCPView):
-        path = "/mcp"
-        name = "mutagent-pysandbox"
-        version = mutagent.__version__
-
-    # 4. 监听 socket（统一 IPv4，避免 host="" 造成的 v4/v6 歧义）
-    listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        listen_sock.bind((host, port))
-    except OSError as exc:
-        listen_sock.close()
-        raise SystemExit(f"Error: cannot bind {host}:{port}: {exc}") from exc
-
-    actual_host, actual_port = listen_sock.getsockname()[:2]
-    url = f"http://{actual_host}:{actual_port}/mcp"
-    # 曝光端口给子进程（pi agent / mutagent pysandbox client 可自动发现）
-    os.environ["MUTAGENT_PORT"] = str(actual_port)
-
-    server = Server(host=actual_host, port=actual_port)
-    print(f"mutagent sandbox server: {url}")
-    logger.info("Starting pysandbox MCP server at %s", url)
-
-    try:
-        await server.start(listen=[listen_sock])
-        # start() 立即返回，需要阻塞等待中断信号
-        stop_evt = asyncio.Event()
-        try:
-            await stop_evt.wait()
-        except asyncio.CancelledError:
-            pass
-    finally:
-        try:
-            await server.stop()
-        except Exception:
-            logger.exception("server.stop() failed")
-        try:
-            await sandbox.close()
-        except Exception:
-            logger.exception("sandbox.close() failed")
-        try:
-            listen_sock.close()
-        except OSError:
-            pass
-
-
-def _dispatch_server(app: Any, args: argparse.Namespace) -> None:
-    """server 模式入口（依赖 app.config）。"""
-    _setup_pysandbox_logging(app.config)
-    try:
-        asyncio.run(_serve(app.config, args.host, args.port))
-    except KeyboardInterrupt:
-        pass
-
-
-# ---------------------------------------------------------------------------
 # 总入口
 # ---------------------------------------------------------------------------
 
 def dispatch_pysandbox(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     """由 main() 调用。
 
-    Server 模式：``app.config`` 已 load 完毕（main 入口加载）。
-    Client 模式：``app.config`` **不依赖**——main 入口已为 client 跳过 load。
+    纯 MCP client 模式，不依赖本地 config。连远程 pysandbox MCP server，
+    执行代码后退出（或进入交互 REPL）。
+
     下游项目想要自己的品牌化 client 时，请直接构造 :class:`PysandboxClient`
     （传 ``prog`` / ``default_url`` / ``unreachable_hint`` 定制）调用
     ``dispatch(args)``，而非走本函数。
     """
     _validate(parser, args)
-
-    app = App()
-    # Client 模式不需要本地 config（纯RPC）——跳过加载避免不必要的 IO / 错误
-    if args.serve:
-        app.load_config(args.config)
-        _dispatch_server(app, args)
-    else:
-        PysandboxClient().dispatch(args)
+    PysandboxClient().dispatch(args)
