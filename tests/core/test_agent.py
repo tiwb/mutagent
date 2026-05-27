@@ -16,7 +16,6 @@ from mutagent.core.messages import (
     ToolUseBlock,
 )
 from mutagent.core.tools import ToolSet, Toolkit
-from mutobj.core import DeclarationMeta, _DECLARED_METHODS
 
 
 # ---------------------------------------------------------------------------
@@ -107,15 +106,14 @@ class TestAgentDeclaration:
         assert issubclass(Agent, mutobj.Declaration)
 
     def test_uses_declaration_meta(self):
-        assert isinstance(Agent, DeclarationMeta)
+        assert issubclass(Agent, mutobj.Declaration)
 
     def test_declared_methods(self):
-        declared = getattr(Agent, _DECLARED_METHODS, set())
-        assert "submit" in declared
-        assert "cancel" in declared
-        assert "subscribe" in declared
-        assert "is_busy" in declared
-        assert "handle_tool_calls" in declared
+        assert mutobj.get_declaration_func(Agent, "submit") is not None
+        assert mutobj.get_declaration_func(Agent, "cancel") is not None
+        assert mutobj.get_declaration_func(Agent, "subscribe") is not None
+        assert mutobj.get_declaration_func(Agent, "is_busy") is not None
+        assert mutobj.get_declaration_func(Agent, "handle_tool_calls") is not None
 
     def test_stub_submit_does_nothing(self):
         agent = _make_agent()

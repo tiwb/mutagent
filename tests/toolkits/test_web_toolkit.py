@@ -15,7 +15,6 @@ from mutagent.toolkits.web_toolkit import FetchImpl, SearchImpl, WebToolkit
 from mutagent.core.tools import ToolSet
 from mutobj import get_declaration_func
 from mutagent.core._tools_impl import _make_schema
-from mutobj.core import DeclarationMeta, _DECLARED_METHODS
 
 import mutagent.toolkits._web_toolkit_impl_local  # noqa: F401  -- register LocalFetchImpl
 
@@ -92,12 +91,11 @@ class TestWebToolkitDeclaration:
         assert issubclass(WebToolkit, mutobj.Declaration)
 
     def test_uses_declaration_meta(self):
-        assert isinstance(WebToolkit, DeclarationMeta)
+        assert issubclass(WebToolkit, mutobj.Declaration)
 
     def test_declared_methods(self):
-        declared = getattr(WebToolkit, _DECLARED_METHODS, set())
-        assert "search" in declared
-        assert "fetch" in declared
+        assert mutobj.get_declaration_func(WebToolkit, "search") is not None
+        assert mutobj.get_declaration_func(WebToolkit, "fetch") is not None
 
     def test_has_config_attribute(self, toolkit):
         assert hasattr(toolkit, "config")

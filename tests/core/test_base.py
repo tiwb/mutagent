@@ -4,19 +4,15 @@ import pytest
 import mutagent
 import mutobj
 from mutobj import Declaration
-from mutobj.core import DeclarationMeta, _DECLARED_METHODS
 
 
 class TestDeclarationMeta:
 
-    def test_declaration_uses_declaration_meta(self):
-        assert isinstance(mutobj.Declaration, DeclarationMeta)
-
-    def test_subclass_uses_declaration_meta(self):
+    def test_subclass_is_declaration(self):
         class MyClass(mutobj.Declaration):
             pass
 
-        assert isinstance(MyClass, DeclarationMeta)
+        assert issubclass(MyClass, mutobj.Declaration)
 
 
 class TestMutagentDeclaration:
@@ -45,8 +41,7 @@ class TestMutagentDeclaration:
         class Service(mutobj.Declaration):
             def process(self) -> str: ...
 
-        declared = getattr(Service, _DECLARED_METHODS, set())
-        assert "process" in declared
+        assert mutobj.get_declaration_func(Service, "process") is not None
 
     def test_stub_method_is_default_impl(self):
         class Handler(mutobj.Declaration):

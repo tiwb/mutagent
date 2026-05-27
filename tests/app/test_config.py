@@ -6,7 +6,6 @@ from pathlib import Path
 
 import mutobj
 
-from mutobj.core import DeclarationMeta, _DECLARED_METHODS
 from mutagent.app.config import Config
 from mutagent.app._config_impl import _expand_env, _resolve_paths_inplace
 
@@ -32,13 +31,12 @@ class TestConfigDeclaration:
         assert issubclass(Config, mutobj.Declaration)
 
     def test_uses_declaration_meta(self):
-        assert isinstance(Config, DeclarationMeta)
+        assert issubclass(Config, mutobj.Declaration)
 
     def test_declared_methods(self):
-        declared = getattr(Config, _DECLARED_METHODS, set())
-        assert "get" in declared
-        assert "set" in declared
-        assert "on_change" in declared
+        assert mutobj.get_declaration_func(Config, "get") is not None
+        assert mutobj.get_declaration_func(Config, "set") is not None
+        assert mutobj.get_declaration_func(Config, "on_change") is not None
 
     def test_stub_get_returns_default(self):
         config = Config()

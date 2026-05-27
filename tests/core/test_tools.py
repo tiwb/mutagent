@@ -4,8 +4,8 @@ import pytest
 
 from mutagent.core.tools import ToolSet, Toolkit
 from mutagent.core.messages import ToolUseBlock, ToolSchema
+import mutobj
 from mutobj import Declaration
-from mutobj.core import DeclarationMeta, _DECLARED_METHODS
 
 
 # ---------------------------------------------------------------------------
@@ -61,15 +61,14 @@ class TestToolSetDeclaration:
         assert issubclass(ToolSet, Declaration)
 
     def test_uses_declaration_meta(self):
-        assert isinstance(ToolSet, DeclarationMeta)
+        assert issubclass(ToolSet, mutobj.Declaration)
 
     def test_declared_methods(self):
-        declared = getattr(ToolSet, _DECLARED_METHODS, set())
-        assert "add" in declared
-        assert "remove" in declared
-        assert "query" in declared
-        assert "get_tools" in declared
-        assert "dispatch" in declared
+        assert mutobj.get_declaration_func(ToolSet, "add") is not None
+        assert mutobj.get_declaration_func(ToolSet, "remove") is not None
+        assert mutobj.get_declaration_func(ToolSet, "query") is not None
+        assert mutobj.get_declaration_func(ToolSet, "get_tools") is not None
+        assert mutobj.get_declaration_func(ToolSet, "dispatch") is not None
 
 
 # ---------------------------------------------------------------------------

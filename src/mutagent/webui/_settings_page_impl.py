@@ -14,7 +14,7 @@ import inspect
 from typing import Any
 
 import mutobj
-from mutobj.core import AttributeDescriptor
+from mutobj import AttributeDescriptor
 from mutagent.webui.settings import SettingsPage, SettingsPanel
 from mutgui import Action, ActionContext, Callback, Expr, ViewBlock
 
