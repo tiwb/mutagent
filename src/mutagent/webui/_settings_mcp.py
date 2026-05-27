@@ -16,11 +16,10 @@ from copy import deepcopy
 from typing import Any, ClassVar
 
 import mutagent
-from mutagent.sandbox._adapter_mcp import (
-    MCPConnection,
-    _sanitize_ns_name,
-)
-from mutagent.sandbox._namespace import connection_status
+import mutobj
+from mutagent.sandbox import MCPConnection
+from mutagent.sandbox._mcp_impl import MCPConnectionImpl, _sanitize_ns_name
+from mutagent.sandbox._namespace_impl import connection_status
 from mutagent.sandbox._signature import format_callable_signature
 from mutagent.webui.settings import SettingsPanel
 from mutgui import Bind, Callback, ViewBlock
@@ -41,6 +40,10 @@ _RUNTIME_CRITICAL_FIELDS = (
 )
 
 _KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _connection_impl(conn: MCPConnection) -> MCPConnectionImpl:
+    return mutobj.implementation_of(conn, MCPConnectionImpl)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -291,8 +294,8 @@ def _load_from_config(self: MCPSettingsPanel) -> None:
         if isinstance(cfg, dict)
     }
     sandbox = getattr(self._app, "sandbox", None)
-    if sandbox is not None and hasattr(sandbox, "mcp_connections"):
-        self._conns = sandbox.mcp_connections()
+    if sandbox is not None and hasattr(sandbox, "list_sources"):
+        self._conns = sandbox.list_sources()
     else:
         self._conns = {}
     self.current_step = "list"
@@ -431,10 +434,12 @@ def _sandbox_loop(self: MCPSettingsPanel) -> asyncio.AbstractEventLoop | None:
 
 
 def _ensure_conn(self: MCPSettingsPanel, key: str) -> MCPConnection | None:
-    """按需创建 MCPConnection。
+    """按需创建 MCPConnection（仅本地缓存，不注册到 sandbox）。
 
     - 已有 → 直接返回
-    - 无 → 用最新 draft 构造，挂到 sandbox._mcp_conns + conn._sandbox 回引
+    - 无 → 用最新 draft 构造
+
+    sandbox 注册由 ``_do_connect`` 通过 ``connect_source()`` 完成。
     """
     conn = self._conns.get(key)
     if conn is not None:
@@ -442,24 +447,16 @@ def _ensure_conn(self: MCPSettingsPanel, key: str) -> MCPConnection | None:
     draft = self._drafts.get(key)
     if draft is None:
         return None
-    sandbox = getattr(self._app, "sandbox", None)
-    if sandbox is None:
-        return None
     loop = _sandbox_loop(self)
     if loop is None:
         _set_message(self, error="Sandbox event loop not available.")
         return None
     cfg = _draft_to_config(draft)
     try:
-        conn = MCPConnection(
-            key, cfg, loop,
-            retry_cooldown=float(draft.get("retry_cooldown", 5.0)),
-        )
+        conn = MCPConnection(key, cfg)
     except Exception as exc:
         _set_message(self, error=f"Init connection failed: {exc}")
         return None
-    conn._sandbox = sandbox
-    sandbox.register_mcp_connection(key, conn)
     self._conns[key] = conn
     return conn
 
@@ -490,8 +487,8 @@ def _submit_async(self: MCPSettingsPanel, coro: Any,
             _set_message(self)
         # 反查 sandbox conns（autostart 后端自动新增的 conn 也能拿到）
         sandbox = getattr(self._app, "sandbox", None)
-        if sandbox is not None and hasattr(sandbox, "mcp_connections"):
-            self._conns = sandbox.mcp_connections()
+        if sandbox is not None and hasattr(sandbox, "list_sources"):
+            self._conns = sandbox.list_sources()
         self.invalidate()
 
     fut = asyncio.run_coroutine_threadsafe(coro, loop)
@@ -503,15 +500,8 @@ async def _do_connect(self: MCPSettingsPanel, key: str) -> None:
     if conn is None:
         raise RuntimeError(f"Connection '{key}' could not be created.")
     sandbox = getattr(self._app, "sandbox", None)
-    # 若 namespace 还没注册（autostart=false 路径），先注册再连
     if sandbox is not None:
-        registry = getattr(sandbox, "_registry", None)
-        already_registered = (
-            registry is not None and conn.namespace in
-            registry._namespaces.get(conn.namespace.name, [])
-        )
-        if not already_registered:
-            sandbox.add_namespace(conn.namespace, on_remove=conn.close)
+        sandbox.connect_source(conn)
     await conn.reconnect()
 
 
@@ -627,10 +617,7 @@ def _save_edits(*, view: MCPSettingsPanel) -> None:
         sandbox = getattr(view._app, "sandbox", None)
         if old_conn is not None and sandbox is not None:
             try:
-                if hasattr(sandbox, "remove_provider"):
-                    sandbox.remove_provider(old_conn.namespace)
-                if hasattr(sandbox, "unregister_mcp_connection"):
-                    sandbox.unregister_mcp_connection(old_key)
+                sandbox.disconnect_source(old_key)
             except Exception as exc:
                 logger.warning("Cleanup old conn '%s' failed: %s", old_key, exc)
         view._drafts.pop(old_key, None)
@@ -667,10 +654,7 @@ def _delete_source(*, view: MCPSettingsPanel) -> None:
     sandbox = getattr(view._app, "sandbox", None)
     if conn is not None and sandbox is not None:
         try:
-            if hasattr(sandbox, "remove_provider"):
-                sandbox.remove_provider(conn.namespace)
-            if hasattr(sandbox, "unregister_mcp_connection"):
-                sandbox.unregister_mcp_connection(key)
+            sandbox.disconnect_source(key)
         except Exception as exc:
             logger.warning("Cleanup conn '%s' failed: %s", key, exc)
     view._drafts.pop(key, None)

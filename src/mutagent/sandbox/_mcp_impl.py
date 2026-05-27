@@ -1,4 +1,4 @@
-"""MCP 桥接 — 连接外部 MCP server，自动生成命名空间函数。
+"""MCP 桥接实现 — 连接外部 MCP server，自动生成命名空间函数。
 
 支持两种 transport:
 - stdio: 通过 subprocess + JSON-RPC over stdin/stdout（`StdioMCPClient`）
@@ -22,8 +22,14 @@ import time
 from typing import Any, Optional, Union
 
 import httpx
+import mutobj
 
-from mutagent.sandbox._namespace import Namespace
+from mutagent.sandbox._env_impl import (
+    sandbox_env_add_namespace,
+    sandbox_env_remove_provider,
+)
+from mutagent.sandbox._namespace_impl import Namespace
+from mutagent.sandbox.mcp import ConnectionState, MCPConnection
 from mutio.mcp.client import MCPClient
 from mutio.mcp.protocol import PROTOCOL_VERSION
 
@@ -390,14 +396,6 @@ def make_client(ns_name: str, server_config: dict[str, Any]) -> AnyMCPClient:
 # MCPConnection — 长生命周期连接代理
 # ---------------------------------------------------------------------------
 
-# 有效状态：
-#   "disconnected" — 从未连过 / 已主动断开
-#   "connecting"   — 正在连接（reconnect 进行中）
-#   "connected"    — 当前可用
-#   "failed"       — 上次连接失败，处于冷却期 / 等下次触发
-ConnectionState = str  # Literal["disconnected", "connecting", "connected", "failed"]
-
-
 def _sanitize_ns_name(name: str) -> str:
     """将 MCP namespace 名转换为合法 Python 标识符。
 
@@ -426,7 +424,7 @@ def _sanitize_ns_name(name: str) -> str:
     return sanitized
 
 
-class MCPConnection:
+class MCPConnectionImpl(mutobj.Implementation[MCPConnection]):
     """一个 MCP source 的长生命周期代理。
 
     职责：
@@ -436,37 +434,35 @@ class MCPConnection:
     - 根据连接结果增删 namespace 上的函数
     """
 
-    def __init__(self, ns_name: str, server_config: dict[str, Any],
-                 main_loop: asyncio.AbstractEventLoop,
-                 retry_cooldown: float = 5.0):
-        self.ns_name = ns_name  # 原始名，用于日志
-        self.config = server_config
-        self.main_loop = main_loop
-        self.retry_cooldown = max(0.0, float(retry_cooldown))
+    def __init__(self, ns_name: str, server_config: dict[str, Any]):
+        self._name = ns_name  # 原始名，用于日志
+        self._config = server_config
+        self.retry_cooldown = max(0.0, float(server_config.get("retry_cooldown", 5.0)))
 
         self.client: Optional[AnyMCPClient] = None
-        self.state: ConnectionState = "disconnected"
-        self.last_error: Optional[str] = None
-        self.last_attempt_at: Optional[float] = None
+        self._state: ConnectionState = "disconnected"
+        self._last_error: Optional[str] = None
+        self._last_attempt_at: Optional[float] = None
         self._lock = asyncio.Lock()
 
         # 始终存在的 namespace；失败 / 未连状态下函数表为空
         # namespace 名用 sanitized 版本，确保可作为 Python 标识符访问
         safe_name = _sanitize_ns_name(ns_name)
         # provider_kind="tool"：本 conn 主 namespace 由 MCP tools 列表驱动
-        self.namespace = Namespace(safe_name, description="",
-                                   provider_kind="tool")
-        self.namespace._connection = self  # type: ignore[attr-defined]
-        self.namespace.connection_state = self.state  # type: ignore[attr-defined]
-        self.namespace.connection_error = None  # type: ignore[attr-defined]
+        self._namespace = Namespace(safe_name, description="",
+                                    provider_kind="tool")
+        owner = mutobj.implementation_owner(self)
+        self._namespace._connection = owner  # type: ignore[attr-defined]
+        self._namespace.connection_state = self.state  # type: ignore[attr-defined]
+        self._namespace.connection_error = None  # type: ignore[attr-defined]
 
         # 通过 pysandbox/namespaces.* 扩展协议从对端融合进来的 peer
         # namespaces。每次 _do_rebuild 重建；与 self.namespace 一样
         # 共享本 conn 的连接状态。详见
         # ``mutagent/docs/specifications/feature-pysandbox-namespace-sharing.md``。
-        self.peer_namespaces: list[Namespace] = []
+        self._peer_namespaces: list[Namespace] = []
 
-        # SandboxApp 回引：由调用方（connect_sources / pysandbox._build_sandbox）
+        # SandboxEnv 回引：由调用方 connect_sources 赋值
         # 在 ``sandbox.add_namespace(conn.namespace)`` 之后立即赋值。
         # 用于 _do_rebuild 中把 peer namespaces 同步注册到 sandbox registry，
         # 以及 close 时摘除。允许为 None：单元测试或裸 conn 自测场景下
@@ -474,16 +470,49 @@ class MCPConnection:
         # ``mutagent/docs/specifications/feature-namespace-multi-provider.md``。
         self._sandbox: Any | None = None
 
+    # -- 只读属性 -------------------------------------------------------
+
+    @property
+    def name(self) -> str:
+        """原始 source 名（config dict key）。"""
+        return self._name
+
+    @property
+    def state(self) -> ConnectionState:
+        """当前连接状态。"""
+        return self._state
+
+    @property
+    def last_error(self) -> str | None:
+        """最近一次连接失败的原因。"""
+        return self._last_error
+
+    @property
+    def namespace(self) -> Namespace:
+        return self._namespace
+
+    @property
+    def config(self) -> dict[str, Any]:
+        return self._config
+
+    @property
+    def last_attempt_at(self) -> float | None:
+        return self._last_attempt_at
+
+    @property
+    def peer_namespaces(self) -> list[Namespace]:
+        return self._peer_namespaces
+
     # -- 状态变更 helper（保证 namespace 状态字段同步）-------------------
 
     def _set_state(self, state: ConnectionState,
                    error: str | None = None) -> None:
-        self.state = state
-        self.last_error = error
-        self.namespace.connection_state = state  # type: ignore[attr-defined]
-        self.namespace.connection_error = error  # type: ignore[attr-defined]
+        self._state = state
+        self._last_error = error
+        self._namespace.connection_state = state  # type: ignore[attr-defined]
+        self._namespace.connection_error = error  # type: ignore[attr-defined]
         # peer namespaces 共享同一连接状态（D6）
-        for peer in self.peer_namespaces:
+        for peer in self._peer_namespaces:
             peer.connection_state = state  # type: ignore[attr-defined]
             peer.connection_error = error  # type: ignore[attr-defined]
 
@@ -495,7 +524,7 @@ class MCPConnection:
         if self.state == "connected":
             self._set_state("failed", reason)
             logger.info("MCP '%s' marked disconnected: %s",
-                        self.ns_name, reason)
+                        self.name, reason)
 
     # -- 公开接口 ---------------------------------------------------------
 
@@ -510,7 +539,7 @@ class MCPConnection:
             return
         if self.state == "failed" and self._in_cooldown():
             raise MCPTransportError(
-                f"MCP '{self.ns_name}' in cooldown after failure: "
+                f"MCP '{self.name}' in cooldown after failure: "
                 f"{self.last_error}")
         async with self._lock:
             # 拿锁后重检：别人可能已经重连完
@@ -518,7 +547,7 @@ class MCPConnection:
                 return
             if self.state == "failed" and self._in_cooldown():
                 raise MCPTransportError(
-                    f"MCP '{self.ns_name}' in cooldown after failure: "
+                    f"MCP '{self.name}' in cooldown after failure: "
                     f"{self.last_error}")
             await self._do_rebuild()
 
@@ -539,7 +568,7 @@ class MCPConnection:
         否则 state 卡 connecting + cooldown 失效，autostart 会静默吞错。
         """
         self._set_state("connecting", None)
-        self.last_attempt_at = time.time()
+        self._last_attempt_at = time.time()
 
         # 关闭旧 client（如果有）— 失败不影响重建流程
         old_client = self.client
@@ -549,15 +578,15 @@ class MCPConnection:
                 await old_client.close()
             except Exception as exc:
                 logger.debug("MCP '%s' old client close failed: %s",
-                             self.ns_name, exc)
+                             self.name, exc)
 
         # 配置错误（make_client 抛 ValueError）走单独分支：
         # 不 wrap 为 MCPTransportError，但依然记为 failed 状态供 help 展示
         try:
-            new_client = make_client(self.ns_name, self.config)
+            new_client = make_client(self.name, self._config)
         except ValueError as exc:
             self._set_state("failed", str(exc))
-            self.last_attempt_at = time.time()
+            self._last_attempt_at = time.time()
             raise
 
         # ------------------------------------------------------------
@@ -571,7 +600,7 @@ class MCPConnection:
 
             # 检测 pysandbox capability（D3）— 决定是否过滤对端 pysandbox tool
             # 自身（D2）以及是否融合 peer namespaces（D4 Eager 拉取）
-            from mutagent.sandbox._adapter_pysandbox import (
+            from mutagent.sandbox._mcp_impl_sandbox import (
                 build_peer_namespaces,
                 has_pysandbox_capability,
             )
@@ -596,25 +625,25 @@ class MCPConnection:
                 self._check_peer_name_conflicts(new_peer_namespaces)
             # multi-provider 同步：把 new 注册到 sandbox，把 old 中不在 new
             # 的从 sandbox registry 摘掉。事务式更新，按实例 id 区分。
-            self._sync_peer_providers(self.peer_namespaces,
+            self._sync_peer_providers(self._peer_namespaces,
                                       new_peer_namespaces)
-            self.peer_namespaces = new_peer_namespaces
+            self._peer_namespaces = new_peer_namespaces
 
             self._set_state("connected", None)
             if new_peer_namespaces:
                 logger.info(
                     "MCP '%s' connected (%d functions, merged %d namespaces from %s)",
-                    self.ns_name, len(self.namespace._functions),
-                    len(new_peer_namespaces), self.ns_name)
+                    self.name, len(self._namespace._functions),
+                    len(new_peer_namespaces), self.name)
             else:
                 logger.info("MCP '%s' connected (%d functions)",
-                            self.ns_name, len(self.namespace._functions))
+                            self.name, len(self._namespace._functions))
         except MCPTransportError as exc:
             reason = str(exc) or exc.__class__.__name__
             self._set_state("failed", reason)
-            self.last_attempt_at = time.time()
+            self._last_attempt_at = time.time()
             logger.warning("MCP '%s' rebuild failed (transport): %s",
-                           self.ns_name, reason)
+                           self.name, reason)
             # 清空 client，避免 failed 状态下还残留旧引用
             self.client = None
             raise
@@ -623,28 +652,28 @@ class MCPConnection:
             # 不允许 state 留在 connecting
             reason = str(exc) or exc.__class__.__name__
             self._set_state("failed", reason)
-            self.last_attempt_at = time.time()
+            self._last_attempt_at = time.time()
             logger.warning("MCP '%s' rebuild failed: %s",
-                           self.ns_name, reason)
+                           self.name, reason)
             # 清空 client / peer 列表，避免 failed 状态残留。
             # 把已注册到 sandbox 的旧 peer providers 全部摘掉，与 D11
             # 「出口要么 connected 要么 failed，状态绝对一致」对齐。
             self.client = None
-            self._sync_peer_providers(self.peer_namespaces, [])
-            self.peer_namespaces = []
+            self._sync_peer_providers(self._peer_namespaces, [])
+            self._peer_namespaces = []
             # 包成 MCPTransportError 让上层 cooldown 生效
             raise MCPTransportError(
-                f"MCP '{self.ns_name}' rebuild failed: {reason}"
+                f"MCP '{self.name}' rebuild failed: {reason}"
             ) from exc
 
     async def close(self) -> None:
         """彻底关闭 — sandbox cleanup 入口。多次调用幂等。"""
         async with self._lock:
             # 摘掉本 conn 注册到 sandbox 的全部 peer providers。
-            # conn.namespace 自己由 SandboxApp 用 on_remove → conn.close
+            # conn.namespace 自己由 SandboxEnv 用 on_remove → conn.close
             # 持有，不在这里清（会循环）。
-            self._sync_peer_providers(self.peer_namespaces, [])
-            self.peer_namespaces = []
+            self._sync_peer_providers(self._peer_namespaces, [])
+            self._peer_namespaces = []
 
             client = self.client
             self.client = None
@@ -654,7 +683,7 @@ class MCPConnection:
                     await client.close()
                 except Exception as exc:
                     logger.debug("MCP '%s' close failed: %s",
-                                 self.ns_name, exc)
+                                 self.name, exc)
 
     # -- 外部查询 ----------------------------------------------------
 
@@ -674,7 +703,7 @@ class MCPConnection:
             }
         """
         result: list[dict[str, Any]] = []
-        seen: list[Namespace] = [self.namespace, *self.peer_namespaces]
+        seen: list[Namespace] = [self._namespace, *self._peer_namespaces]
         for ns in seen:
             for fn_name, fn in ns._functions.items():
                 schema = getattr(fn, '_mcp_input_schema', None) or {}
@@ -698,7 +727,7 @@ class MCPConnection:
         old_peers: list[Namespace],
         new_peers: list[Namespace],
     ) -> None:
-        """把 peer namespaces 的注册状态同步到 SandboxApp registry。
+        """把 peer namespaces 的注册状态同步到 SandboxEnv registry。
 
         按实例 id 做 diff：
 
@@ -716,17 +745,17 @@ class MCPConnection:
         old_ids = {id(p) for p in old_peers}
         for old in old_peers:
             if id(old) not in new_ids:
-                sandbox.remove_provider(old)
+                sandbox_env_remove_provider(sandbox, old)
         for new in new_peers:
             if id(new) not in old_ids:
-                sandbox.add_namespace(new)
+                sandbox_env_add_namespace(sandbox, new)
 
     def _check_peer_name_conflicts(
         self, peer_namespaces: list[Namespace]) -> None:
         """D1 (multi-provider 重写)：只检查 peer 之间是否重名。
 
         旧逻辑还检查 peer vs 本 conn 的 tool ns 同名 → 阻塞注册。
-        新模型下「source 名 = peer ns 名」是常态，撞名由 SandboxApp 走
+        新模型下「source 名 = peer ns 名」是常态，撞名由 SandboxEnv 走
         :class:`MergedNamespaceView` 在调用/help 级处理，启动期不阻塞。
 
         但同一 server 自我 export 两个同名 peer namespace 必然是 server bug，
@@ -736,7 +765,7 @@ class MCPConnection:
         for peer in peer_namespaces:
             if peer.name in seen:
                 raise RuntimeError(
-                    f"Pysandbox peer-namespace duplicate on source '{self.ns_name}': "
+                    f"Pysandbox peer-namespace duplicate on source '{self.name}': "
                     f"server exported namespace '{peer.name}' more than once"
                 )
             seen.add(peer.name)
@@ -744,9 +773,9 @@ class MCPConnection:
     def _in_cooldown(self) -> bool:
         if self.retry_cooldown <= 0:
             return False
-        if self.last_attempt_at is None:
+        if self._last_attempt_at is None:
             return False
-        return (time.time() - self.last_attempt_at) < self.retry_cooldown
+        return (time.time() - self._last_attempt_at) < self.retry_cooldown
 
     def _refresh_namespace(self, init_result: dict[str, Any],
                            tools: list[dict[str, Any]]) -> None:
@@ -755,7 +784,7 @@ class MCPConnection:
         - 删除当前不存在的旧 tool
         - 注册 / 覆盖最新 tool 的 wrapper
         """
-        ns = self.namespace
+        ns = self._namespace
         # 描述：优先 instructions，退化 serverInfo.title
         ns_desc = (
             (init_result.get("instructions") or "").strip()
@@ -796,7 +825,7 @@ class MCPConnection:
 # tool wrapper
 # ---------------------------------------------------------------------------
 
-def _make_tool_func(conn: MCPConnection, tool_name: str,
+def _make_tool_func(conn: MCPConnectionImpl, tool_name: str,
                     description: str,
                     input_schema: dict) -> Any:
     """为一个 MCP tool 生成 Python 函数。
@@ -847,6 +876,11 @@ def _make_tool_func(conn: MCPConnection, tool_name: str,
 
     doc = "\n\n".join(sections)
 
+    # conn._sandbox 推断为 Any | None，但此函数仅在 sandbox 已挂时调用，
+    # 闭包内用到 _async_loop 时 sandbox 必然存在
+    sandbox = conn._sandbox
+    assert sandbox is not None
+
     async def call_with_retry(kwargs: dict[str, Any]) -> Any:
         from mutagent.sandbox._signature import _MISSING
 
@@ -873,7 +907,7 @@ def _make_tool_func(conn: MCPConnection, tool_name: str,
         mcp_schema_to_specs(input_schema),
         context=f"MCP tool {tool_name!r}")
 
-    # _async_original: 供 share.py:_handle_call 等在事件循环线程上的
+    # _async_original: 供 _mcp_share.py:_handle_call 直接在事件循环线程上
     # 调用方直接 await，避免 sync wrapper 的 run_coroutine_threadsafe
     # + future.result() 同线程死锁（与 _wrap_async 的 _async_original 模式一致）。
     async def _tool_async(**kwargs: Any) -> Any:
@@ -886,14 +920,14 @@ def _make_tool_func(conn: MCPConnection, tool_name: str,
             bound = _bind_sig.bind(*args, **kwargs)
             bound.apply_defaults()
             future = asyncio.run_coroutine_threadsafe(
-                call_with_retry(dict(bound.arguments)), conn.main_loop)
+                call_with_retry(dict(bound.arguments)), sandbox._async_loop)
             return future.result(timeout=120)
 
         tool_func.__signature__ = sig  # type: ignore[attr-defined]
     else:
         def tool_func(**kwargs: Any) -> Any:  # type: ignore[misc, reportRedeclaration]
             future = asyncio.run_coroutine_threadsafe(
-                call_with_retry(kwargs), conn.main_loop)
+                call_with_retry(kwargs), sandbox._async_loop)
             return future.result(timeout=120)
 
     tool_func.__name__ = tool_name
@@ -903,23 +937,3 @@ def _make_tool_func(conn: MCPConnection, tool_name: str,
     tool_func._mcp_input_schema = input_schema  # type: ignore[attr-defined]
     tool_func._mcp_description = description  # type: ignore[attr-defined]
     return tool_func
-
-
-# ---------------------------------------------------------------------------
-# 兼容入口 — 旧 API
-# ---------------------------------------------------------------------------
-
-async def bridge_mcp_server(ns_name: str,
-                            server_config: dict[str, Any]
-                            ) -> tuple[Namespace, AnyMCPClient]:
-    """[Legacy] 同步桥接 — 一次性创建 connection、立即连、返回 (namespace, client)。
-
-    新代码请直接构造 :class:`MCPConnection`。该入口保留是为了避免破坏
-    旧调用方（pysandbox CLI 等），其语义改为：内部仍走 MCPConnection，
-    但启动期失败保持原行为（向上抛异常）。
-    """
-    main_loop = asyncio.get_running_loop()
-    conn = MCPConnection(ns_name, server_config, main_loop)
-    await conn.reconnect()
-    assert conn.client is not None
-    return conn.namespace, conn.client

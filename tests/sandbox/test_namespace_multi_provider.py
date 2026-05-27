@@ -5,7 +5,7 @@
 - ``MergedNamespaceView`` 函数解析「先注册先赢」+ shadowed 列表
 - 冲突 WARNING 在 providers 签名内只触发一次，签名变化后重新触发一次
 - ``_do_rebuild`` D11：peer-namespace duplicate / build 异常都把 state 翻 failed
-- ``SandboxApp`` add_namespace 同名不互相覆盖；remove_provider 按实例移除
+- ``SandboxEnv`` add_namespace 同名不互相覆盖；remove_provider 按实例移除
 - ``_render_namespace`` 多 provider 显示 Providers + 函数归属 + shadowed
 """
 
@@ -13,9 +13,17 @@ import asyncio
 import logging
 from typing import Any
 
+import mutobj
 import pytest
 
-from mutagent.sandbox._namespace import (
+from mutagent.sandbox import SandboxEnv, _mcp_impl, _mcp_impl_sandbox
+from mutagent.sandbox._mcp_share import _all_namespaces
+from mutagent.sandbox._mcp_impl import MCPConnectionImpl
+from mutagent.sandbox._env_impl import (
+    sandbox_env_add_namespace,
+    sandbox_env_remove_provider,
+)
+from mutagent.sandbox._namespace_impl import (
     MergedNamespaceView,
     Namespace,
     NamespaceRegistry,
@@ -304,49 +312,46 @@ class TestRenderMultiProvider:
 
 
 # ---------------------------------------------------------------------------
-# SandboxApp 集成（add/remove provider）
+# SandboxEnv 集成（add/remove provider）
 # ---------------------------------------------------------------------------
 
 
-class TestSandboxAppMultiProvider:
+class TestSandboxEnvMultiProvider:
 
     def test_same_name_add_does_not_replace(self):
-        from mutagent.sandbox.app import SandboxApp
-        app = SandboxApp()
+        sandbox = SandboxEnv()
         a = Namespace("foo", provider_kind="tool")
         a.register("x", lambda: "A", "")
         b = Namespace("foo", provider_kind="peer")
         b.register("x", lambda: "B", "")
-        app.add_namespace(a)
-        app.add_namespace(b)
+        sandbox_env_add_namespace(sandbox, a)
+        sandbox_env_add_namespace(sandbox, b)
         # _registry 下应有 2 providers
-        assert len(app._registry._namespaces["foo"]) == 2
+        assert len(sandbox._registry._namespaces["foo"]) == 2
 
     def test_remove_provider_by_instance(self):
-        from mutagent.sandbox.app import SandboxApp
-        app = SandboxApp()
+        sandbox = SandboxEnv()
         a = Namespace("foo")
         b = Namespace("foo")
         cleanups = []
-        app.add_namespace(a, on_remove=lambda: cleanups.append("a"))
-        app.add_namespace(b, on_remove=lambda: cleanups.append("b"))
+        sandbox_env_add_namespace(sandbox, a, on_remove=lambda: cleanups.append("a"))
+        sandbox_env_add_namespace(sandbox, b, on_remove=lambda: cleanups.append("b"))
         # 仅移除 a
-        ok = app.remove_provider(a)
+        ok = sandbox_env_remove_provider(sandbox, a)
         assert ok is True
-        assert app._registry._namespaces["foo"] == [b]
+        assert sandbox._registry._namespaces["foo"] == [b]
         # a 的 cleanup 被调用，b 未被触发
         assert cleanups == ["a"]
 
     def test_exec_code_sees_view_for_multi_provider(self):
-        from mutagent.sandbox.app import SandboxApp
-        app = SandboxApp()
+        sandbox = SandboxEnv()
         a = Namespace("foo")
         a.register("aa", lambda: "from-a", "")
         b = Namespace("foo")
         b.register("bb", lambda: "from-b", "")
-        app.add_namespace(a)
-        app.add_namespace(b)
-        result = app.exec_code("foo.aa() + '|' + foo.bb()")
+        sandbox_env_add_namespace(sandbox, a)
+        sandbox_env_add_namespace(sandbox, b)
+        result = sandbox.exec_code("foo.aa() + '|' + foo.bb()")
         assert result.get("result") == "from-a|from-b"
 
 
@@ -363,7 +368,6 @@ class TestDoRebuildExceptionCompleteness:
     def test_peer_duplicate_lands_in_failed_state(
             self, monkeypatch: pytest.MonkeyPatch):
         """peer-namespace duplicate 异常发生在握手后，state 必须是 failed 而非 connecting。"""
-        from mutagent.sandbox import _adapter_mcp, _adapter_pysandbox
 
         class _FakeClient:
             async def connect(self):
@@ -381,19 +385,19 @@ class TestDoRebuildExceptionCompleteness:
 
         fake = _FakeClient()
         monkeypatch.setattr(
-            _adapter_mcp, "make_client", lambda *a, **kw: fake)
+            _mcp_impl, "make_client", lambda *a, **kw: fake)
         monkeypatch.setattr(
-            _adapter_mcp, "HTTPMCPClient", _FakeClient)
-        monkeypatch.setattr(_adapter_pysandbox, "HTTPMCPClient",
+            _mcp_impl, "HTTPMCPClient", _FakeClient)
+        monkeypatch.setattr(_mcp_impl_sandbox, "HTTPMCPClient",
                             _FakeClient, raising=False)
-        monkeypatch.setattr(_adapter_pysandbox, "build_peer_namespaces",
+        monkeypatch.setattr(_mcp_impl_sandbox, "build_peer_namespaces",
                             fake_build)
 
         loop = self._setup_loop()
         try:
-            conn = _adapter_mcp.MCPConnection(
-                "x", {"url": "http://x"}, loop)
-            with pytest.raises(_adapter_mcp.MCPTransportError):
+            conn = _mcp_impl.MCPConnection(
+                "x", {"url": "http://x"})
+            with pytest.raises(_mcp_impl.MCPTransportError):
                 loop.run_until_complete(conn.reconnect())
             assert conn.state == "failed", \
                 f"state stuck at {conn.state!r}, should be 'failed'"
@@ -405,7 +409,6 @@ class TestDoRebuildExceptionCompleteness:
     def test_arbitrary_runtime_error_lands_in_failed_state(
             self, monkeypatch: pytest.MonkeyPatch):
         """任意 RuntimeError（非 transport）也必须翻 failed，不能卡 connecting。"""
-        from mutagent.sandbox import _adapter_mcp, _adapter_pysandbox
 
         class _FakeClient:
             async def connect(self):
@@ -422,18 +425,18 @@ class TestDoRebuildExceptionCompleteness:
 
         fake = _FakeClient()
         monkeypatch.setattr(
-            _adapter_mcp, "make_client", lambda *a, **kw: fake)
+            _mcp_impl, "make_client", lambda *a, **kw: fake)
         monkeypatch.setattr(
-            _adapter_mcp, "HTTPMCPClient", _FakeClient)
-        monkeypatch.setattr(_adapter_pysandbox, "HTTPMCPClient",
+            _mcp_impl, "HTTPMCPClient", _FakeClient)
+        monkeypatch.setattr(_mcp_impl_sandbox, "HTTPMCPClient",
                             _FakeClient, raising=False)
-        monkeypatch.setattr(_adapter_pysandbox, "build_peer_namespaces", boom)
+        monkeypatch.setattr(_mcp_impl_sandbox, "build_peer_namespaces", boom)
 
         loop = self._setup_loop()
         try:
-            conn = _adapter_mcp.MCPConnection(
-                "x", {"url": "http://x"}, loop)
-            with pytest.raises(_adapter_mcp.MCPTransportError):
+            conn = _mcp_impl.MCPConnection(
+                "x", {"url": "http://x"})
+            with pytest.raises(_mcp_impl.MCPTransportError):
                 loop.run_until_complete(conn.reconnect())
             assert conn.state == "failed"
             assert "simulated bug" in (conn.last_error or "")
@@ -563,7 +566,7 @@ class TestFlattenView:
 
 
 class TestAllNamespacesFlatten:
-    """验证 ``share._all_namespaces`` 拍平后与 exec_code 函数集一致。"""
+    """验证 ``_mcp_share._all_namespaces`` 拍平后与 exec_code 函数集一致。"""
 
     def test_multi_provider_export_function_set_matches_exec_code(self):
         """同名多 provider 时，_all_namespaces 拍平后的函数集 == exec_code 看到的。
@@ -571,22 +574,20 @@ class TestAllNamespacesFlatten:
         这是原设计文档针对的 bug 修复：旧实现用 dict.update 让 decl 整个
         覆盖 external，导致 export 丢了 external 的非冲突函数。
         """
-        from mutagent.sandbox.app import SandboxApp
-        from mutagent.sandbox.share import _all_namespaces
 
-        app = SandboxApp()
+        sandbox = SandboxEnv()
         # external provider（模拟 peer）
         ext = Namespace("foo", provider_kind="peer", description="ext-desc")
         ext.register("shared", lambda: "ext", "")
         ext.register("only_ext", lambda: "ext-only", "")
-        app.add_namespace(ext)
+        sandbox_env_add_namespace(sandbox, ext)
         # 再加一个同名 external（模拟 decl-like 的优先 provider）
         local = Namespace("foo", provider_kind="builtin", description="local-desc")
         local.register("shared", lambda: "local", "local doc")
         local.register("only_local", lambda: "local-only", "")
-        app.add_namespace(local)
+        sandbox_env_add_namespace(sandbox, local)
 
-        result = _all_namespaces(app)
+        result = _all_namespaces(sandbox)
         assert "foo" in result
         flat = result["foo"]
         # 三个函数都在：shared (先注册先赢 = ext)、only_ext、only_local
@@ -596,49 +597,51 @@ class TestAllNamespacesFlatten:
         # description 走 primary（= ext）
         assert flat._description == "ext-desc"
 
-        # 同一 SandboxApp 走 exec_code 能看到同一集（验证不丢函数）
-        r = app.exec_code("sorted(foo._functions.keys())")
+        # 同一 SandboxEnv 走 exec_code 能看到同一集（验证不丢函数）
+        r = sandbox.exec_code("sorted(foo._functions.keys())")
         assert r.get("result") == ["only_ext", "only_local", "shared"]
 
     def test_single_provider_returned_as_is(self):
-        from mutagent.sandbox.app import SandboxApp
-        from mutagent.sandbox.share import _all_namespaces
 
-        app = SandboxApp()
+        sandbox = SandboxEnv()
         ns = Namespace("foo", description="single")
         ns.register("x", lambda: 1, "")
-        app.add_namespace(ns)
-        result = _all_namespaces(app)
+        sandbox_env_add_namespace(sandbox, ns)
+        result = _all_namespaces(sandbox)
         # 单 provider 名直接返回原 Namespace（不拍平）
         assert result["foo"] is ns
 
 
+def _impl(conn):
+    """Resolve MCPConnection → implementation."""
+    impl = mutobj.implementation_of(conn, MCPConnectionImpl)
+    return impl
+
+
 class TestRefreshNamespaceInvalidatesView:
-    """验证 ``_adapter_mcp._refresh_namespace`` 后 view cache 失效。
+    """验证 ``_mcp_impl._refresh_namespace`` 后 view cache 失效。
 
     原隐藏 bug：provider 列表 id 不变但 ns._functions 变动，
     view.displayed / primary / _description 会拿到旧结果。
     """
 
     def test_refresh_namespace_invalidates_view_cache(self):
-        from mutagent.sandbox import _adapter_mcp
-        from mutagent.sandbox.app import SandboxApp
 
-        app = SandboxApp()
+        sandbox = SandboxEnv()
         loop = asyncio.new_event_loop()
         try:
-            conn = _adapter_mcp.MCPConnection(
-                "mysrv", {"transport": "http", "url": "http://x"}, loop)
+            conn = _mcp_impl.MCPConnection(
+                "mysrv", {"transport": "http", "url": "http://x"})
             # 添加两个同名 provider，打出 MergedNamespaceView
             other = Namespace("mysrv", provider_kind="peer",
                               description="peer-desc")
             # 必须先加一个函数让 other 变为 displayed，否则空壳 view 退化路径
             # 会掩盖 cache 失效问题。
             other.register("placeholder", lambda: 0, "")
-            app.add_namespace(conn.namespace)
-            conn._sandbox = app
-            app.add_namespace(other)
-            view = app._registry.get("mysrv")
+            sandbox_env_add_namespace(sandbox, conn.namespace)
+            _impl(conn)._sandbox = sandbox
+            sandbox_env_add_namespace(sandbox, other)
+            view = sandbox._registry.get("mysrv")
             assert isinstance(view, MergedNamespaceView)
             # 初始：conn.namespace 空壳 → displayed = [other]，primary = other
             assert view.displayed == [other]
@@ -654,13 +657,13 @@ class TestRefreshNamespaceInvalidatesView:
                 {"name": "do_something", "description": "do it",
                  "inputSchema": {}},
             ]
-            conn._refresh_namespace(init_result, tools)
+            _impl(conn)._refresh_namespace(init_result, tools)
 
-            # 修正后：view.displayed 应立即看到 conn.namespace 加入
-            # （conn.namespace 先注册，位于 providers[0]，应为 primary）
+            # 修正后：view.displayed 应立即看到 impl namespace 加入
+            # （ns 先注册，位于 providers[0]，应为 primary）
             assert conn.namespace in view.displayed
             assert view.primary is conn.namespace
-            # _description 走 primary = conn.namespace.description = "tool-desc"
+            # _description 走 primary = ns.description = "tool-desc"
             assert view._description == "tool-desc"
         finally:
             loop.close()

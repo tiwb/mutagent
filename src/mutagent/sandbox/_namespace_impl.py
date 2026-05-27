@@ -18,20 +18,32 @@ import inspect
 import logging
 import time
 from dataclasses import dataclass, field
+
+import mutobj
 from typing import Any, Callable, Literal, TYPE_CHECKING
 
 from mutagent.sandbox._signature import (
     _RENDER_LINE_WIDTH,
     format_callable_signature,
 )
+from mutagent.sandbox.namespace import NamespaceProtocol
 
 if TYPE_CHECKING:
-    from mutagent.sandbox._adapter_mcp import MCPConnection
+    from mutagent.sandbox._mcp_impl import MCPConnection
 
 logger = logging.getLogger(__name__)
 
 
 ProviderKind = Literal["builtin", "tool", "peer", "cli"]
+
+
+def _connection_impl(connection: object) -> Any:
+    if not isinstance(connection, mutobj.Declaration):
+        raise TypeError(f"Expected Declaration, got {type(connection)}")
+
+    from mutagent.sandbox._mcp_impl import MCPConnectionImpl
+
+    return mutobj.implementation_of(connection, MCPConnectionImpl)
 
 
 def _first_line(text: str) -> str:
@@ -45,7 +57,7 @@ def _first_line(text: str) -> str:
     return ""
 
 
-class Namespace:
+class Namespace(NamespaceProtocol):
     """命名空间对象，通过 . 访问其中的函数。
 
     >>> ns = Namespace("browser", description="浏览器自动化工具")
@@ -100,9 +112,13 @@ class Namespace:
         # MCP namespace 且未连：阻塞式触发 ensure_connected
         connection = self.__dict__.get('_connection')
         state = self.__dict__.get('connection_state')
-        if connection is not None and state != "connected":
+        _sandbox = None
+        if connection is not None:
+            impl = _connection_impl(connection)
+            _sandbox = impl._sandbox
+        if connection is not None and state != "connected" and _sandbox is not None:
             future = asyncio.run_coroutine_threadsafe(
-                connection.ensure_connected(), connection.main_loop)
+                connection.ensure_connected(), _sandbox._async_loop)
             try:
                 # 30s 余量覆盖 stdio 冷启动 / npx 下载场景
                 future.result(timeout=30)
@@ -316,9 +332,12 @@ class MergedNamespaceView:
         for p in providers:
             conn = p._connection
             state = p.connection_state
-            if conn is not None and state != "connected":
+            sandbox = None
+            if conn is not None:
+                sandbox = _connection_impl(conn)._sandbox
+            if conn is not None and state != "connected" and sandbox is not None:
                 future = asyncio.run_coroutine_threadsafe(
-                    conn.ensure_connected(), conn.main_loop)
+                    conn.ensure_connected(), sandbox._async_loop)
                 try:
                     future.result(timeout=30)
                 except Exception:
@@ -705,10 +724,13 @@ def _render_namespace(ns: "NamespaceLike") -> str:
             lines.append(f"⚠ Connection failed: {reason}")
             last_attempt = None
             connection = ns._connection
-            if connection is not None and getattr(connection, "last_attempt_at", None):
+            last_attempt_at = None
+            if connection is not None:
+                last_attempt_at = connection.last_attempt_at
+            if last_attempt_at:
                 last_attempt = time.strftime(
                     "%Y-%m-%d %H:%M:%S",
-                    time.localtime(connection.last_attempt_at))
+                    time.localtime(last_attempt_at))
             if last_attempt:
                 lines.append(f"  Last attempt: {last_attempt}")
             lines.append("  Calling any function will retry the connection.")

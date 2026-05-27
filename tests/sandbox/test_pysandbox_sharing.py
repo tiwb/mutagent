@@ -14,27 +14,49 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+from datetime import datetime
 from typing import Any
 
+import mutobj
 import pytest
 
-from mutagent.sandbox._namespace import Namespace, NamespaceRegistry
-from mutagent.sandbox.share import (
+from mutagent.sandbox import SandboxEnv, _mcp_impl, _mcp_impl_sandbox
+from mutagent.sandbox._env_impl import _wrap_async
+from mutagent.sandbox._mcp_impl import MCPConnectionImpl
+from mutagent.sandbox._mcp_impl_sandbox import (
+    _make_namespace_func,
+    build_peer_namespaces,
+)
+from mutagent.sandbox._namespace_impl import (
+    Namespace,
+    NamespaceRegistry,
+    _render_function,
+)
+from mutagent.sandbox._signature import _MISSING
+from mutagent.sandbox._mcp_share import (
     PYSANDBOX_CAPABILITY,
+    _describe_function,
     register_pysandbox_methods,
 )
 from mutio.mcp.protocol import JsonRpcDispatcher
 
 
+def _impl(conn):
+    """Resolve MCPConnection → implementation."""
+    impl = mutobj.implementation_of(conn, MCPConnectionImpl)
+    return impl
+
+
 # ---------------------------------------------------------------------------
-# Server 侧：一个最小 SandboxApp-like 对象 + dispatcher
+# Server 侧：一个最小 SandboxEnv-like 对象 + dispatcher
 # ---------------------------------------------------------------------------
 
 
 class _FakeSandbox:
-    """最小 SandboxApp 替身 —— share.py 只摸 ``_registry._namespaces``。
+    """最小 SandboxEnv 替身 —— _mcp_share.py 只摸 ``_registry._namespaces``。
 
-    不走完整 SandboxApp Declaration 路径，避免引入 NamespaceTools 自动发现
+    不走完整 SandboxEnv Declaration 路径，避免引入 NamespaceTools 自动发现
     干扰；只验证 share 协议本身的行为。
     """
 
@@ -184,7 +206,6 @@ class TestPeerBuild:
     """build_peer_namespaces 单元行为。"""
 
     def test_builds_namespace_with_callable_functions(self) -> None:
-        from mutagent.sandbox._adapter_pysandbox import build_peer_namespaces
 
         sandbox = _FakeSandbox()
         sandbox._registry.add(_build_mutbot_namespace())
@@ -193,10 +214,10 @@ class TestPeerBuild:
         # 构造一个最小 conn 占位 —— build_peer_namespaces 只读 ns_name / state /
         # last_error，不调用 reconnect
         class _FakeConn:
-            ns_name = "mutbot_local"
+            name = "mutbot_local"
             state = "connected"
             last_error = None
-            main_loop = None  # ns_func 不会被调用就不需要
+            _sandbox = type('_S', (), {'_async_loop': None})()  # ns_func 不会被调用就不需要
 
         conn = _FakeConn()
         client = _FakeHTTPClient(dispatch)
@@ -257,7 +278,6 @@ class TestMCPConnectionPeerIntegration:
 
     def _setup_conn(self, capabilities: dict, tools: list[dict],
                     monkeypatch: pytest.MonkeyPatch):
-        from mutagent.sandbox import _adapter_mcp
 
         sandbox = _FakeSandbox()
         sandbox._registry.add(_build_mutbot_namespace())
@@ -268,22 +288,22 @@ class TestMCPConnectionPeerIntegration:
         def _fake_make_client(ns_name: str, cfg: dict):
             return fake_client
 
-        monkeypatch.setattr(_adapter_mcp, "make_client", _fake_make_client)
+        monkeypatch.setattr(_mcp_impl, "make_client", _fake_make_client)
 
         # _do_rebuild 用 isinstance(client, HTTPMCPClient) 判定 peer 路径，
         # 临时把 HTTPMCPClient 也指向 _FakeHTTPClientForConn 的基类（用 monkeypatch
         # 的方式不行 —— isinstance 检查走 import 时的真名）。改用 patch 替换。
         monkeypatch.setattr(
-            _adapter_mcp, "HTTPMCPClient", _FakeHTTPClientForConn)
-        # _adapter_pysandbox 也在内部 import 了 HTTPMCPClient
-        from mutagent.sandbox import _adapter_pysandbox as _ap
-        monkeypatch.setattr(_ap, "HTTPMCPClient", _FakeHTTPClientForConn,
+            _mcp_impl, "HTTPMCPClient", _FakeHTTPClientForConn)
+        # _mcp_impl_sandbox 也在内部 import 了 HTTPMCPClient
+        monkeypatch.setattr(_mcp_impl_sandbox, "HTTPMCPClient", _FakeHTTPClientForConn,
                             raising=False)
 
         loop = asyncio.new_event_loop()
         try:
-            conn = _adapter_mcp.MCPConnection(
-                "mutbot_remote", {"url": "http://x"}, loop)
+            conn = _mcp_impl.MCPConnection(
+                "mutbot_remote", {"url": "http://x"})
+            _impl(conn)._sandbox = type('_S', (), {'_async_loop': loop})()
             loop.run_until_complete(conn.reconnect())
             return conn, loop
         except Exception:
@@ -301,8 +321,8 @@ class TestMCPConnectionPeerIntegration:
             # tool 路径：echo 注册到主 namespace
             assert "echo" in conn.namespace._functions
             # peer 路径：mutbot namespace 融合进来
-            assert len(conn.peer_namespaces) == 1
-            assert conn.peer_namespaces[0].name == "mutbot"
+            assert len(_impl(conn).peer_namespaces) == 1
+            assert _impl(conn).peer_namespaces[0].name == "mutbot"
         finally:
             loop.run_until_complete(conn.close())
             loop.close()
@@ -332,7 +352,7 @@ class TestMCPConnectionPeerIntegration:
                     "inputSchema": {}}],
             monkeypatch=monkeypatch)
         try:
-            assert conn.peer_namespaces == []
+            assert _impl(conn).peer_namespaces == []
             # 没有 capability 时不过滤 pysandbox tool
             assert "pysandbox" in conn.namespace._functions
         finally:
@@ -346,10 +366,10 @@ class TestMCPConnectionPeerIntegration:
             tools=[],
             monkeypatch=monkeypatch)
         try:
-            peer = conn.peer_namespaces[0]
+            peer = _impl(conn).peer_namespaces[0]
             assert peer.connection_state == "connected"
             # 模拟传输错
-            conn.mark_disconnected("network down")
+            _impl(conn).mark_disconnected("network down")
             assert peer.connection_state == "failed"
             assert peer.connection_error == "network down"
         finally:
@@ -363,7 +383,6 @@ class TestMCPConnectionPeerIntegration:
         冲突在调用/help 级走 :class:`MergedNamespaceView` 处理。详
         ``mutagent/docs/specifications/feature-namespace-multi-provider.md``。
         """
-        from mutagent.sandbox import _adapter_mcp
 
         sandbox = _FakeSandbox()
         clash_ns = Namespace("mutbot_remote", description="clash")
@@ -374,21 +393,21 @@ class TestMCPConnectionPeerIntegration:
             dispatch, PYSANDBOX_CAPABILITY, [])
 
         monkeypatch.setattr(
-            _adapter_mcp, "make_client", lambda *a, **kw: fake_client)
+            _mcp_impl, "make_client", lambda *a, **kw: fake_client)
         monkeypatch.setattr(
-            _adapter_mcp, "HTTPMCPClient", _FakeHTTPClientForConn)
-        from mutagent.sandbox import _adapter_pysandbox as _ap
-        monkeypatch.setattr(_ap, "HTTPMCPClient", _FakeHTTPClientForConn,
+            _mcp_impl, "HTTPMCPClient", _FakeHTTPClientForConn)
+        monkeypatch.setattr(_mcp_impl_sandbox, "HTTPMCPClient", _FakeHTTPClientForConn,
                             raising=False)
 
         loop = asyncio.new_event_loop()
         try:
-            conn = _adapter_mcp.MCPConnection(
-                "mutbot_remote", {"url": "http://x"}, loop)
+            conn = _mcp_impl.MCPConnection(
+                "mutbot_remote", {"url": "http://x"})
+            _impl(conn)._sandbox = type('_S', (), {'_async_loop': loop})()
             # 不再抛错：conn 成功 connected，peer 列表含同名 ns
             loop.run_until_complete(conn.reconnect())
             assert conn.state == "connected"
-            peer_names = [p.name for p in conn.peer_namespaces]
+            peer_names = [p.name for p in _impl(conn).peer_namespaces]
             assert "mutbot_remote" in peer_names
         finally:
             loop.run_until_complete(conn.close())
@@ -398,7 +417,6 @@ class TestMCPConnectionPeerIntegration:
             self, monkeypatch: pytest.MonkeyPatch):
         """D1：同一 server 自我 export 两个同名 peer namespace 仍是 server bug，
         仍然报错。"""
-        from mutagent.sandbox import _adapter_mcp, _adapter_pysandbox
 
         async def fake_build(conn, init_result, client):
             # 模拟 server 返回两个同名 peer ns
@@ -410,19 +428,19 @@ class TestMCPConnectionPeerIntegration:
             dispatch, PYSANDBOX_CAPABILITY, [])
 
         monkeypatch.setattr(
-            _adapter_mcp, "make_client", lambda *a, **kw: fake_client)
+            _mcp_impl, "make_client", lambda *a, **kw: fake_client)
         monkeypatch.setattr(
-            _adapter_mcp, "HTTPMCPClient", _FakeHTTPClientForConn)
-        monkeypatch.setattr(_adapter_pysandbox, "HTTPMCPClient",
+            _mcp_impl, "HTTPMCPClient", _FakeHTTPClientForConn)
+        monkeypatch.setattr(_mcp_impl_sandbox, "HTTPMCPClient",
                             _FakeHTTPClientForConn, raising=False)
-        monkeypatch.setattr(_adapter_pysandbox, "build_peer_namespaces",
+        monkeypatch.setattr(_mcp_impl_sandbox, "build_peer_namespaces",
                             fake_build)
 
         loop = asyncio.new_event_loop()
         try:
-            conn = _adapter_mcp.MCPConnection(
-                "buggy_server", {"url": "http://x"}, loop)
-            with pytest.raises(_adapter_mcp.MCPTransportError,
+            conn = _mcp_impl.MCPConnection(
+                "buggy_server", {"url": "http://x"})
+            with pytest.raises(_mcp_impl.MCPTransportError,
                                match="peer-namespace duplicate"):
                 loop.run_until_complete(conn.reconnect())
             # D11：异常后 state 必须是 failed，不能卡 connecting
@@ -437,10 +455,9 @@ class TestMCPConnectionPeerIntegration:
 # ============================================================
 
 class TestDescribeFunctionParams:
-    """验证 share._describe_function 按设计方案输出 params 结构。"""
+    """验证 _mcp_share._describe_function 按设计方案输出 params 结构。"""
 
     def test_typical_function(self) -> None:
-        from mutagent.sandbox.share import _describe_function
 
         def logs(level: str = "INFO", last_n: int = 10) -> list[str]:
             """Query logs."""
@@ -458,7 +475,6 @@ class TestDescribeFunctionParams:
         assert params[1]["annotation"] == "int"
 
     def test_no_defaults(self) -> None:
-        from mutagent.sandbox.share import _describe_function
 
         def add(a: int, b: int) -> int:
             return a + b
@@ -469,7 +485,6 @@ class TestDescribeFunctionParams:
         assert all(p["annotation"] == "int" for p in params)
 
     def test_no_annotations(self) -> None:
-        from mutagent.sandbox.share import _describe_function
 
         def probe(x, y=1):
             return x
@@ -481,7 +496,6 @@ class TestDescribeFunctionParams:
         assert params[1]["default"] == 1
 
     def test_skips_var_positional_and_var_keyword(self) -> None:
-        from mutagent.sandbox.share import _describe_function
 
         def variadic(a: int, *args, **kwargs) -> None:
             return None
@@ -491,9 +505,7 @@ class TestDescribeFunctionParams:
         assert names == ["a"]  # *args / **kwargs 被跳过
 
     def test_non_json_default_becomes_default_repr(self) -> None:
-        from datetime import datetime
 
-        from mutagent.sandbox.share import _describe_function
 
         sentinel = datetime(2020, 1, 1)
 
@@ -507,8 +519,6 @@ class TestDescribeFunctionParams:
         assert "2020" in p["default_repr"]
 
     def test_missing_sentinel_becomes_default_missing_flag(self) -> None:
-        from mutagent.sandbox.share import _describe_function
-        from mutagent.sandbox._signature import _MISSING
 
         def upload(paths=_MISSING):
             return paths
@@ -519,7 +529,6 @@ class TestDescribeFunctionParams:
         assert p["default_missing"] is True
 
     def test_keyword_only(self) -> None:
-        from mutagent.sandbox.share import _describe_function
 
         def f(a: int, *, b: str = "x") -> None:
             return None
@@ -530,7 +539,6 @@ class TestDescribeFunctionParams:
         assert params[1]["kind"] == "KEYWORD_ONLY"
 
     def test_unparseable_signature(self) -> None:
-        from mutagent.sandbox.share import _describe_function
 
         # 某些 builtin 如 object.__init__ signature 不可解析
         entry = _describe_function(lambda: None)  # lambda 可解析
@@ -547,7 +555,6 @@ class TestDescribeFunctionParams:
 
     def test_signature_field_preserved(self) -> None:
         """旧字段 signature 继续保留，供展示兜底。"""
-        from mutagent.sandbox.share import _describe_function
 
         def f(a: int = 1) -> None:
             return None
@@ -567,16 +574,14 @@ class TestMakeNamespaceFuncSignature:
 
     def _fake_conn(self):
         class _FakeConn:
-            ns_name = "peer"
+            name = "peer"
             state = "connected"
             last_error = None
-            main_loop = None  # 本组测试不触发调用
+            _sandbox = type('_S', (), {'_async_loop': None})()  # 本组测试不触发调用
         return _FakeConn()
 
     def test_with_params_builds_signature(self) -> None:
-        import inspect as _inspect
 
-        from mutagent.sandbox._adapter_pysandbox import _make_namespace_func
 
         params = [
             {"name": "level", "kind": "POSITIONAL_OR_KEYWORD",
@@ -588,7 +593,7 @@ class TestMakeNamespaceFuncSignature:
         fn = _make_namespace_func(
             self._fake_conn(), "mutbot", "logs",  # type: ignore[arg-type]
             "Query logs.", params)
-        sig = _inspect.signature(fn)
+        sig = inspect.signature(fn)
         assert list(sig.parameters) == ["level", "last_n"]
         assert sig.parameters["level"].default == "INFO"
         assert sig.parameters["last_n"].default == 10
@@ -598,36 +603,31 @@ class TestMakeNamespaceFuncSignature:
 
     def test_without_params_falls_back_to_kwargs(self) -> None:
         """老 server 不返回 params → 客户端保持 (**kwargs) 形态。"""
-        import inspect as _inspect
 
-        from mutagent.sandbox._adapter_pysandbox import _make_namespace_func
 
         fn = _make_namespace_func(
             self._fake_conn(), "mutbot", "logs",  # type: ignore[arg-type]
             "Query logs.", None)
-        sig = _inspect.signature(fn)
+        sig = inspect.signature(fn)
         params = list(sig.parameters.values())
         assert len(params) == 1
-        assert params[0].kind is _inspect.Parameter.VAR_KEYWORD
+        assert params[0].kind is inspect.Parameter.VAR_KEYWORD
         # doc 保持原样
         assert fn.__doc__ == "Query logs."
 
     def test_malformed_params_falls_back_to_kwargs(self) -> None:
         """params 畸形 → try_build_signature 返回 None → 回落 (**kwargs)。"""
-        import inspect as _inspect
 
-        from mutagent.sandbox._adapter_pysandbox import _make_namespace_func
 
         bad_params = [{"default": 1}]  # 缺 name
         fn = _make_namespace_func(
             self._fake_conn(), "mutbot", "weird",  # type: ignore[arg-type]
             "", bad_params)
-        sig = _inspect.signature(fn)
+        sig = inspect.signature(fn)
         assert len(list(sig.parameters)) == 1
-        assert list(sig.parameters.values())[0].kind is _inspect.Parameter.VAR_KEYWORD
+        assert list(sig.parameters.values())[0].kind is inspect.Parameter.VAR_KEYWORD
 
     def test_async_original_preserved(self) -> None:
-        from mutagent.sandbox._adapter_pysandbox import _make_namespace_func
 
         params = [{"name": "x", "required": True, "annotation": "int"}]
         fn = _make_namespace_func(
@@ -647,19 +647,17 @@ class TestPeerBuildWithParams:
 
     def test_peer_namespace_functions_carry_signature(self) -> None:
         """服务端真函数签名 → describe.params → 客户端 __signature__ 一致。"""
-        import inspect as _inspect
 
-        from mutagent.sandbox._adapter_pysandbox import build_peer_namespaces
 
         sandbox = _FakeSandbox()
         sandbox._registry.add(_build_mutbot_namespace())
         dispatch = _make_server_dispatch(sandbox)
 
         class _FakeConn:
-            ns_name = "mutbot_local"
+            name = "mutbot_local"
             state = "connected"
             last_error = None
-            main_loop = None
+            _sandbox = type('_S', (), {'_async_loop': None})()
 
         conn = _FakeConn()
         client = _FakeHTTPClient(dispatch)
@@ -671,23 +669,20 @@ class TestPeerBuildWithParams:
 
         # logs(level: str = "INFO", last_n: int = 10)
         logs = ns._functions["logs"]
-        sig = _inspect.signature(logs)
+        sig = inspect.signature(logs)
         assert list(sig.parameters) == ["level", "last_n"]
         assert sig.parameters["level"].default == "INFO"
         assert sig.parameters["last_n"].default == 10
 
         # status() — 无参
         status = ns._functions["status"]
-        assert list(_inspect.signature(status).parameters) == []
+        assert list(inspect.signature(status).parameters) == []
 
         # 原 bug 断言：help 形式（func.__doc__）不再以 "logs(" 开头
         assert not (logs.__doc__ or "").lstrip().startswith("logs(")
 
     def test_peer_namespace_optional_no_default_keeps_omit_signature(self) -> None:
-        import inspect as _inspect
 
-        from mutagent.sandbox._adapter_pysandbox import build_peer_namespaces
-        from mutagent.sandbox._signature import _MISSING
 
         sandbox = _FakeSandbox()
         ns = Namespace("mutbot", description="mutbot runtime introspection")
@@ -704,10 +699,10 @@ class TestPeerBuildWithParams:
         dispatch = _make_server_dispatch(sandbox)
 
         class _FakeConn:
-            ns_name = "mutbot_local"
+            name = "mutbot_local"
             state = "connected"
             last_error = None
-            main_loop = None
+            _sandbox = type('_S', (), {'_async_loop': None})()
 
         conn = _FakeConn()
         client = _FakeHTTPClient(dispatch)
@@ -717,7 +712,7 @@ class TestPeerBuildWithParams:
             build_peer_namespaces(conn, init_result, client))  # type: ignore[arg-type]
         peer_ns = namespaces[0]
         upload = peer_ns._functions["browser_file_upload"]
-        sig = _inspect.signature(upload)
+        sig = inspect.signature(upload)
         assert sig.parameters["paths"].default is _MISSING
         # iter3: _MISSING.__repr__ → <omit>
         assert str(sig) == "(paths=<omit>)"
@@ -739,11 +734,8 @@ class TestWrapAsyncSignature:
 
     def test_signature_with_positional_params(self) -> None:
         """带位置参数的 async 方法 → wrapper.__signature__ 去掉 self。"""
-        import inspect
-        from mutagent.sandbox._app_impl import _wrap_async
-        from mutagent.sandbox.app import SandboxApp
 
-        app = SandboxApp()
+        app = SandboxEnv()
 
         async def method(self, a: str, b: int = 10) -> str:
             return f"{a}{b}"
@@ -760,11 +752,8 @@ class TestWrapAsyncSignature:
 
     def test_no_self_function(self) -> None:
         """无 self 的 async 函数 → 签名原样保留。"""
-        import inspect
-        from mutagent.sandbox._app_impl import _wrap_async
-        from mutagent.sandbox.app import SandboxApp
 
-        app = SandboxApp()
+        app = SandboxEnv()
 
         async def standalone(x: int, *, y: str = "") -> None:
             ...
@@ -780,11 +769,8 @@ class TestWrapAsyncSignature:
 
     def test_no_params_method(self) -> None:
         """无参 async 方法 → 空签名 ()"""
-        import inspect
-        from mutagent.sandbox._app_impl import _wrap_async
-        from mutagent.sandbox.app import SandboxApp
 
-        app = SandboxApp()
+        app = SandboxEnv()
 
         async def method(self) -> str:
             return "ok"
@@ -797,11 +783,8 @@ class TestWrapAsyncSignature:
 
     def test_unparseable_signature_no_signature_set(self) -> None:
         """签名不可解析 → __signature__ 不挂，回落 (*args, **kwargs)。"""
-        import inspect
-        from mutagent.sandbox._app_impl import _wrap_async
-        from mutagent.sandbox.app import SandboxApp
 
-        app = SandboxApp()
+        app = SandboxEnv()
 
         # 构造 inspect.signature 抛 ValueError 的对象：挂无效 __signature__
         def fake_fn(a, b):
@@ -821,11 +804,8 @@ class TestWrapAsyncSignature:
 
     def test_positional_call(self) -> None:
         """位置调用 → sig.bind 规范化后正确传递给 coro_fn。"""
-        import inspect
-        from mutagent.sandbox._app_impl import _wrap_async
-        from mutagent.sandbox.app import SandboxApp
 
-        app = SandboxApp()
+        app = SandboxEnv()
         # bind_main_loop 只在真执行时需要，这里只测 wrapper 参数规范化
         # 不实际执行 coroutine，用 mock 验证参数传递
 
@@ -856,11 +836,8 @@ class TestWrapAsyncSignature:
         原 bug：_make_namespace_func 把签名拼进 __doc__ 首行 + inspect.signature
         又展示一份 → 双签名。验证 _render_function 只输出一份。
         """
-        from mutagent.sandbox._app_impl import _wrap_async
-        from mutagent.sandbox._namespace import _render_function
-        from mutagent.sandbox.app import SandboxApp
 
-        app = SandboxApp()
+        app = SandboxEnv()
 
         async def method(self, level: str = "INFO", last_n: int = 50) -> str:
             """查询日志。

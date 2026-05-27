@@ -1,6 +1,6 @@
 """Pysandbox namespace sharing — server side.
 
-把一个 ``SandboxApp`` 的 namespace registry 通过 MCP 信道分享给
+把一个 ``SandboxEnv`` 的 namespace registry 通过 MCP 信道分享给
 对端 pysandbox（典型场景：mutbot 把自身能力 share 给 mutagent）。
 
 设计文档：
@@ -30,8 +30,8 @@ from mutio.mcp.protocol import (
 )
 
 if TYPE_CHECKING:
-    from mutagent.sandbox._namespace import Namespace
-    from mutagent.sandbox.app import SandboxApp
+    from mutagent.sandbox._namespace_impl import Namespace
+    from mutagent.sandbox.env import SandboxEnv
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ PYSANDBOX_CAPABILITY: dict[str, Any] = {"pysandbox": {"version": "1"}}
 # 内部 helper
 # ---------------------------------------------------------------------------
 
-def _all_namespaces(sandbox: "SandboxApp") -> dict[str, "Namespace"]:
+def _all_namespaces(sandbox: "SandboxEnv") -> dict[str, "Namespace"]:
     """收集 sandbox 当前可见的全部 namespace（拍平成单 provider）。
 
     与 ``_build_namespace_dict``（exec_code 路径）共享合并软辑——
@@ -55,8 +55,8 @@ def _all_namespaces(sandbox: "SandboxApp") -> dict[str, "Namespace"]:
     - ``description`` / ``provider_kind`` 取 :func:`primary_of`
     - ``functions`` 集 = view 合并后的 active 集，不丢 external 的非冲突函数
     """
-    from mutagent.sandbox._app_impl import _collect_namespaces
-    from mutagent.sandbox._namespace import MergedNamespaceView, flatten_view
+    from mutagent.sandbox._env_impl import _collect_namespaces
+    from mutagent.sandbox._namespace_impl import MergedNamespaceView, flatten_view
 
     result: dict[str, "Namespace"] = {}
     for name, ns in _collect_namespaces(sandbox).items():
@@ -168,7 +168,7 @@ def _describe_function(fn: Any) -> dict[str, Any]:
 
 def register_pysandbox_methods(
     dispatch: JsonRpcDispatcher,
-    sandbox: "SandboxApp",
+    sandbox: "SandboxEnv",
 ) -> None:
     """在 view 的 dispatcher 上注册 3 个 pysandbox namespace sharing 扩展方法。
 

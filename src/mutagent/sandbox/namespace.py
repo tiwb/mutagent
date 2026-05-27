@@ -5,9 +5,22 @@
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import Any, ClassVar, Protocol
 
 import mutobj
+
+
+class NamespaceProtocol(Protocol):
+    """命名空间对象，通过 . 访问其中的函数。
+    """
+
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def description(self) -> str: ...
+
+    def __getattr__(self, name: str) -> Any: ...
 
 
 class NamespaceTools(mutobj.Declaration):
@@ -32,3 +45,6 @@ class NamespaceTools(mutobj.Declaration):
     """
 
     _namespace: ClassVar[str | None] = None
+
+
+from . import _namespace_impl as _namespace_impl  # noqa: E402,F401

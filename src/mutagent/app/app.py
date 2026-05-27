@@ -9,7 +9,7 @@ from mutagent.app.config import Config
 
 if TYPE_CHECKING:
     from mutagent.core.agent import Agent
-    from mutagent.sandbox.app import SandboxApp
+    from mutagent.sandbox import SandboxEnv
 
 
 class App(mutobj.Declaration):
@@ -18,12 +18,12 @@ class App(mutobj.Declaration):
     Attributes:
         config: The loaded Config object.
         agent: The Agent for this session, set by ``setup_agent()``.
-        sandbox: The SandboxApp for this session, set by ``setup_agent()``.
+        sandbox: The SandboxEnv for this session, set by ``setup_agent()``.
     """
 
     config: Config
     agent: Agent
-    sandbox: SandboxApp
+    sandbox: SandboxEnv
 
     def load_config(self, config_path: str = ".mutagent/config.json") -> None:
         """Load configuration from the given path and store in ``self.config``.
@@ -40,7 +40,7 @@ class App(mutobj.Declaration):
         """Initialise the session Agent and store it in ``self.agent``.
 
         Also creates the UserIO instance (``self.userio``) and an empty
-        SandboxApp (``self.sandbox``).  This method is **synchronous and
+        SandboxEnv (``self.sandbox``).  This method is **synchronous and
         does NOT connect to MCP/CLI sources**—call ``connect_sources()``
         in the appropriate event loop afterwards to populate sandbox
         namespaces.

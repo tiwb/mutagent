@@ -17,10 +17,10 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
-from mutagent.sandbox._namespace import Namespace
+from mutagent.sandbox._namespace_impl import Namespace
 
 if TYPE_CHECKING:
-    from mutagent.sandbox._adapter_mcp import HTTPMCPClient, MCPConnection
+    from mutagent.sandbox._mcp_impl import HTTPMCPClient, MCPConnection, MCPConnectionImpl
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +67,7 @@ class PysandboxPeerClient:
 
 
 def _make_namespace_func(
-    conn: "MCPConnection",
+    conn: "MCPConnectionImpl",
     ns_name: str,
     fn_name: str,
     doc: str,
@@ -93,7 +93,7 @@ def _make_namespace_func(
     已去除 fallback 分发。
     """
     # 延迟 import 避免循环
-    from mutagent.sandbox._adapter_mcp import HTTPMCPClient, _is_transport_error
+    from mutagent.sandbox._mcp_impl import HTTPMCPClient, _is_transport_error
     from mutagent.sandbox._signature import try_build_signature
 
     async def call_with_retry(kwargs: dict[str, Any]) -> Any:
@@ -113,10 +113,15 @@ def _make_namespace_func(
             peer = PysandboxPeerClient(client)
             return await peer.call_namespace(ns_name, fn_name, kwargs)
 
-    # _async_original: 供 share.py:_handle_call 直接 await，避免
+    # _async_original: 供 _mcp_share.py:_handle_call 直接 await，避免
     # sync wrapper 的同线程死锁（与 _wrap_async 模式一致）。
     async def _ns_async(**kwargs: Any) -> Any:
         return await call_with_retry(kwargs)
+
+    # conn._sandbox 推断为 Any | None，但此函数仅在 sandbox 已挂时调用，
+    # 闭包内用到 _async_loop 时 sandbox 必然存在
+    sandbox = conn._sandbox
+    assert sandbox is not None
 
     # 构真签名：仅在 server 提供结构化 params 时尝试
     # 注意：空列表亦是合法入参（无参函数），用 is not None 而非真值测试
@@ -132,14 +137,14 @@ def _make_namespace_func(
             bound = _bind_sig.bind(*args, **kwargs)
             bound.apply_defaults()
             future = asyncio.run_coroutine_threadsafe(
-                call_with_retry(dict(bound.arguments)), conn.main_loop)
+                call_with_retry(dict(bound.arguments)), sandbox._async_loop)
             return future.result(timeout=120)
 
         ns_func.__signature__ = sig  # type: ignore[attr-defined]
     else:
         def ns_func(**kwargs: Any) -> Any:  # type: ignore[misc, reportRedeclaration]
             future = asyncio.run_coroutine_threadsafe(
-                call_with_retry(kwargs), conn.main_loop)
+                call_with_retry(kwargs), sandbox._async_loop)
             return future.result(timeout=120)
 
     ns_func.__name__ = fn_name
@@ -160,7 +165,7 @@ def has_pysandbox_capability(init_result: dict[str, Any]) -> bool:
 
 
 async def build_peer_namespaces(
-    conn: "MCPConnection",
+    conn: "MCPConnectionImpl",
     init_result: dict[str, Any],
     client: "HTTPMCPClient",
 ) -> list[Namespace]:
@@ -175,12 +180,12 @@ async def build_peer_namespaces(
 
     Returns:
         按 server 返回顺序构建的 namespace 列表。重名冲突由调用方
-        （``MCPConnection`` / ``SandboxApp``）按 D1 处理。
+        （``MCPConnection`` / ``SandboxEnv``）按 D1 处理。
     """
     peer = PysandboxPeerClient(client)
     items = await peer.list_namespaces()  # 失败往上抛 → MCPConnection 转 failed
 
-    source_label = conn.ns_name
+    source_label = conn.name
     namespaces: list[Namespace] = []
     for item in items:
         name = item.get("name") or ""
@@ -191,7 +196,7 @@ async def build_peer_namespaces(
         except Exception as exc:
             logger.warning(
                 "MCP '%s': describe namespace %r failed, skipped: %s",
-                conn.ns_name, name, exc)
+                conn.name, name, exc)
             continue
 
         base_desc = (described.get("description") or "").rstrip()

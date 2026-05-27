@@ -1,4 +1,4 @@
-"""SandboxApp 实现 — 纯 sync namespace registry + 执行引擎。
+"""SandboxEnv 实现 — 纯 sync namespace registry + 执行引擎。
 
 设计要点：
 - 不读 config，不发起 MCP 连接，不创建 event loop
@@ -13,12 +13,15 @@ import inspect
 import logging
 import threading
 import time
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, cast
 
 import mutobj
-from mutagent.sandbox.app import SandboxApp, CleanupCallback
+from mutagent.sandbox.env import SandboxEnv
+
+# 类型别名：on_remove 回调可以是 sync 或 async（从 app.py 移入）
+CleanupCallback = Callable[[], Any]
 from mutagent.sandbox._engine import execute
-from mutagent.sandbox._namespace import (
+from mutagent.sandbox._namespace_impl import (
     MergedNamespaceView,
     Namespace,
     NamespaceRegistry,
@@ -31,7 +34,7 @@ logger = logging.getLogger(__name__)
 # 内部状态 helpers
 # ---------------------------------------------------------------------------
 
-def _get_registry(self: SandboxApp) -> NamespaceRegistry:
+def _get_registry(self: SandboxEnv) -> NamespaceRegistry:
     registry = getattr(self, '_registry', None)
     if registry is None:
         registry = NamespaceRegistry()
@@ -39,7 +42,7 @@ def _get_registry(self: SandboxApp) -> NamespaceRegistry:
     return registry
 
 
-def _get_cleanups(self: SandboxApp) -> dict[int, tuple[Namespace, CleanupCallback]]:
+def _get_cleanups(self: SandboxEnv) -> dict[int, tuple[Namespace, CleanupCallback]]:
     """id(ns) -> (ns, on_remove)。
 
     multi-provider 下同名 ns 有多个实例，按名存会互盖。
@@ -53,7 +56,7 @@ def _get_cleanups(self: SandboxApp) -> dict[int, tuple[Namespace, CleanupCallbac
     return cleanups
 
 
-def _get_mcp_conns(self: SandboxApp) -> dict[str, Any]:
+def _get_mcp_conns(self: SandboxEnv) -> dict[str, Any]:
     conns = getattr(self, '_mcp_conns', None)
     if conns is None:
         conns = {}
@@ -61,7 +64,7 @@ def _get_mcp_conns(self: SandboxApp) -> dict[str, Any]:
     return conns
 
 
-def _get_start_time(self: SandboxApp) -> float:
+def _get_start_time(self: SandboxEnv) -> float:
     t = getattr(self, '_start_time', None)
     if t is None:
         t = time.time()
@@ -84,7 +87,7 @@ def _get_ns_tools_prefix(cls: type) -> str:
     return name.lower()
 
 
-def _build_declaration_namespaces(self: SandboxApp) -> dict[str, Namespace]:
+def _build_declaration_namespaces(self: SandboxEnv) -> dict[str, Namespace]:
     """从 NamespaceTools 子类构建命名空间。"""
     from mutagent.sandbox.namespace import NamespaceTools
 
@@ -129,21 +132,21 @@ def _build_declaration_namespaces(self: SandboxApp) -> dict[str, Namespace]:
     return result
 
 
-def _wrap_async(app: SandboxApp, coro_fn: Any) -> Any:
+def _wrap_async(sandbox: SandboxEnv, coro_fn: Any) -> Any:
     """将 async NamespaceTools 方法包装为 sync。
 
-    把 coroutine 投递到 SandboxApp 上捕获的主 event loop 执行，
+    把 coroutine 投递到 SandboxEnv 上捕获的主 event loop 执行，
     不创建临时 event loop，避免 async tool 在错误线程/loop 执行。
 
     主 loop 由调用方（PySandboxTools / SandboxToolkit / 其他 entry）在
-    ``run_in_executor`` 前通过 ``app.bind_main_loop()`` 注入。
+    ``run_in_executor`` 前通过 ``sandbox.bind_main_loop()`` 注入。
 
     返回的 wrapper 上挂 ``_async_original`` 属性，指向原始 coroutine
     函数，供已经在主 loop 异步上下文里的调用方（如
-    ``share.py:_handle_call``）绕过 sync wrapper 直接 ``await``，
+    ``_mcp_share.py:_handle_call``）绕过 sync wrapper 直接 ``await``，
     避免「同线程同步等自己排队的 coroutine」死锁。
 
-    超时行为可通过 SandboxApp 属性配置：
+    超时行为可通过 SandboxEnv 属性配置：
     - ``_wrap_async_timeout``: float | None — 超时秒数，None 使用默认 120s
     - ``_on_wrap_async_timeout``: Callable | None — 超时回调
       签名: ``(fn_name: str, future: concurrent.futures.Future) -> Any``
@@ -152,15 +155,15 @@ def _wrap_async(app: SandboxApp, coro_fn: Any) -> Any:
     fn_name = coro_fn.__name__
 
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        loop = getattr(app, '_async_loop', None)
+        loop = getattr(sandbox, '_async_loop', None)
         if loop is None:
             raise RuntimeError(
-                "SandboxApp._async_loop not set; "
-                "caller must call app.bind_main_loop() before exec_code"
+                "SandboxEnv._async_loop not set; "
+                "caller must call sandbox.bind_main_loop() before exec_code"
             )
 
         # 同线程死锁保护
-        loop_thread_id = getattr(app, '_async_loop_thread_id', None)
+        loop_thread_id = getattr(sandbox, '_async_loop_thread_id', None)
         if loop_thread_id is not None and threading.get_ident() == loop_thread_id:
             raise RuntimeError(
                 "Cannot synchronously call async NamespaceTools from "
@@ -180,8 +183,8 @@ def _wrap_async(app: SandboxApp, coro_fn: Any) -> Any:
                 )
             call_kwargs = kwargs
 
-        timeout = getattr(app, '_wrap_async_timeout', None) or 120
-        on_timeout = getattr(app, '_on_wrap_async_timeout', None)
+        timeout = getattr(sandbox, '_wrap_async_timeout', None) or 120
+        on_timeout = getattr(sandbox, '_on_wrap_async_timeout', None)
 
         future = asyncio.run_coroutine_threadsafe(coro_fn(**call_kwargs), loop)
         try:
@@ -212,15 +215,15 @@ def _wrap_async(app: SandboxApp, coro_fn: Any) -> Any:
     if _sig is not None:
         wrapper.__signature__ = _sig  # type: ignore[attr-defined]
 
-    # 暴露原 coroutine 函数：异步上下文（如 share.py 的 RPC handler）
+    # 暴露原 coroutine 函数：异步上下文（如 _mcp_share.py 的 RPC handler）
     # 检测到该属性后可直接 await，跳过 sync wrapper 的 future 调度。
     wrapper._async_original = coro_fn  # type: ignore[attr-defined]
     return wrapper
 
 
-@mutobj.impl(SandboxApp.bind_main_loop)
-def sandbox_app_bind_main_loop(self: SandboxApp) -> None:
-    """把当前 event loop 注入 SandboxApp，作为 async NamespaceTools 的目标 loop。
+@mutobj.impl(SandboxEnv.bind_main_loop)
+def sandbox_env_bind_main_loop(self: SandboxEnv) -> None:
+    """把当前 event loop 注入 SandboxEnv，作为 async NamespaceTools 的目标 loop。
 
     必须在主 loop 线程里调用（典型场景：每个 pysandbox entry 在
     ``run_in_executor`` 之前一次）。重复调用幂等。
@@ -238,11 +241,11 @@ def sandbox_app_bind_main_loop(self: SandboxApp) -> None:
 # ---------------------------------------------------------------------------
 
 def _collect_namespaces(
-    sandbox: SandboxApp,
+    sandbox: SandboxEnv,
 ) -> dict[str, Namespace | MergedNamespaceView]:
     """sandbox 可见的全部 namespace（decl 先 + external 后，同名走 merged view）。
 
-    这是 ``_build_namespace_dict``（exec_code 路径）与 ``share.py::_all_namespaces``
+    这是 ``_build_namespace_dict``（exec_code 路径）与 ``_mcp_share.py::_all_namespaces``
     （跨进程序列化路径）共享的单一合并入口，保证两条路径看到的 namespace 可见集
     严格一致。
 
@@ -285,7 +288,7 @@ def _collect_namespaces(
 # Namespace dict 构建（cache + rebuild）
 # ---------------------------------------------------------------------------
 
-def _build_namespace_dict(self: SandboxApp) -> dict[str, Any]:
+def _build_namespace_dict(self: SandboxEnv) -> dict[str, Any]:
     """构建完整 namespace dict，带缓存。
 
     缓存失效条件：
@@ -315,14 +318,14 @@ def _build_namespace_dict(self: SandboxApp) -> dict[str, Any]:
     return ns_dict
 
 
-def _make_sandbox_help(sandbox: SandboxApp) -> Callable:
+def _make_sandbox_help(sandbox: SandboxEnv) -> Callable:
     """生成 sandbox-bound ``help()``。
 
     与 ``NamespaceRegistry._make_help`` 的区别：数据源是 sandbox 而非 registry，
     所以 Layer 1 列表包含 decl + external 合并后的完整集合（与 exec_code
     可见集一致），而非仅外部注入的 registry 视角。
     """
-    from mutagent.sandbox._namespace import (
+    from mutagent.sandbox._namespace_impl import (
         _render_function,
         _render_namespace,
         _render_registry_from_namespaces,
@@ -339,7 +342,7 @@ def _make_sandbox_help(sandbox: SandboxApp) -> Callable:
         # Layer 1: 列所有 namespace
         if func_or_name is None:
             return _render_registry_from_namespaces(
-                list(sandbox.iter_namespaces()))
+                list(sandbox_env_iter_namespaces(sandbox)))
 
         # Layer 2: 聚焦某个 namespace（含 view）
         if isinstance(func_or_name, (Namespace, MergedNamespaceView)):
@@ -352,7 +355,7 @@ def _make_sandbox_help(sandbox: SandboxApp) -> Callable:
         if isinstance(func_or_name, str):
             parts = func_or_name.split('.', 1)
             if len(parts) == 2:
-                ns = sandbox.get_namespace(parts[0])
+                ns = sandbox_env_get_namespace(sandbox, parts[0])
                 if ns is not None and parts[1] in ns._functions:
                     return _render_function(
                         ns._functions[parts[1]],
@@ -365,7 +368,7 @@ def _make_sandbox_help(sandbox: SandboxApp) -> Callable:
     return help
 
 
-def _invalidate_cache(self: SandboxApp) -> None:
+def _invalidate_cache(self: SandboxEnv) -> None:
     object.__setattr__(self, '_cached_ns', None)
     object.__setattr__(self, '_cached_gen', -1)
 
@@ -399,12 +402,11 @@ def _schedule_cleanup_sync(name: str, cb: CleanupCallback) -> None:
 
 
 # ---------------------------------------------------------------------------
-# SandboxApp @impl
+# SandboxEnv @impl
 # ---------------------------------------------------------------------------
 
-@mutobj.impl(SandboxApp.add_namespace)
-def sandbox_app_add_namespace(
-    self: SandboxApp,
+def sandbox_env_add_namespace(
+    self: SandboxEnv,
     ns: Namespace,
     on_remove: CleanupCallback | None = None,
 ) -> None:
@@ -426,8 +428,7 @@ def sandbox_app_add_namespace(
                  ns.name, ns.provider_kind, on_remove is not None)
 
 
-@mutobj.impl(SandboxApp.remove_namespace)
-def sandbox_app_remove_namespace(self: SandboxApp, name: str) -> None:
+def sandbox_env_remove_namespace(self: SandboxEnv, name: str) -> None:
     """按 name 移除该名下的**全部** providers（向后兼容接口）。
 
     同时调度所有被移除 provider 的 cleanup。
@@ -449,13 +450,8 @@ def sandbox_app_remove_namespace(self: SandboxApp, name: str) -> None:
     logger.debug("Namespace '%s' removed (%d providers)", name, len(providers))
 
 
-def _remove_namespace_provider(self: SandboxApp, ns: Namespace) -> bool:
-    """按实例移除一个 provider。
-
-    不是 Declaration 接口 —— 作为 SandboxApp 上的辅助函数暴露（
-    调用者可走 ``sandbox_app.remove_provider(ns)``）。详
-    feature-namespace-multi-provider。
-    """
+def sandbox_env_remove_provider(self: SandboxEnv, ns: Namespace) -> bool:
+    """按实例移除一个 provider。详 feature-namespace-multi-provider。"""
     registry = _get_registry(self)
     cleanups = _get_cleanups(self)
 
@@ -474,28 +470,36 @@ def _remove_namespace_provider(self: SandboxApp, ns: Namespace) -> bool:
     return True
 
 
-# 辅助方法挂到 SandboxApp 上，方便外部调用 sandbox_app.remove_provider(ns)
-SandboxApp.remove_provider = _remove_namespace_provider  # type: ignore[attr-defined]
+@mutobj.impl(SandboxEnv.connect_source)
+def sandbox_env_connect_source(self: SandboxEnv, conn: Any) -> None:
+    """注入一个 MCP 连接源。幂等。"""
+    from mutagent.sandbox._mcp_impl import MCPConnectionImpl
+
+    _get_mcp_conns(self)[conn.name] = conn
+    # 避免重复注册（panel Connect 可能调用多次）
+    impl = mutobj.implementation_of(conn, MCPConnectionImpl)
+    impl._sandbox = self
+    registry = _get_registry(self)
+    existing = registry._namespaces.get(conn.namespace.name, [])
+    if conn.namespace not in existing:
+        sandbox_env_add_namespace(self, conn.namespace, on_remove=conn.close)
 
 
-@mutobj.impl(SandboxApp.register_mcp_connection)
-def sandbox_app_register_mcp_connection(self: SandboxApp, name: str, conn: Any) -> None:
-    _get_mcp_conns(self)[name] = conn
+@mutobj.impl(SandboxEnv.disconnect_source)
+def sandbox_env_disconnect_source(self: SandboxEnv, name: str) -> None:
+    """移除一个 MCP 连接源。幂等。"""
+    conn = _get_mcp_conns(self).pop(name, None)
+    if conn is not None:
+        sandbox_env_remove_provider(self, cast(Namespace, conn.namespace))
 
 
-@mutobj.impl(SandboxApp.unregister_mcp_connection)
-def sandbox_app_unregister_mcp_connection(self: SandboxApp, name: str) -> None:
-    _get_mcp_conns(self).pop(name, None)
-
-
-@mutobj.impl(SandboxApp.mcp_connections)
-def sandbox_app_mcp_connections(self: SandboxApp) -> dict[str, Any]:
+@mutobj.impl(SandboxEnv.list_sources)
+def sandbox_env_list_sources(self: SandboxEnv) -> dict[str, Any]:
     return dict(_get_mcp_conns(self))
 
 
-@mutobj.impl(SandboxApp.iter_namespaces)
-def sandbox_app_iter_namespaces(
-    self: SandboxApp,
+def sandbox_env_iter_namespaces(
+    self: SandboxEnv,
 ) -> Iterator[Namespace | MergedNamespaceView]:
     """按名排序遍历 sandbox 可见的全部 namespace。
 
@@ -507,9 +511,8 @@ def sandbox_app_iter_namespaces(
         yield ns_dict[name]
 
 
-@mutobj.impl(SandboxApp.get_namespace)
-def sandbox_app_get_namespace(
-    self: SandboxApp, name: str,
+def sandbox_env_get_namespace(
+    self: SandboxEnv, name: str,
 ) -> Namespace | MergedNamespaceView | None:
     """按名获取 namespace；不存在返回 ``None``。与 ``iter_namespaces`` 来自同一可见集。"""
     if name == 'help':
@@ -522,15 +525,15 @@ def sandbox_app_get_namespace(
     return None
 
 
-@mutobj.impl(SandboxApp.exec_code)
-def sandbox_app_exec_code(self: SandboxApp, code: str,
-               state: dict[str, Any] | None = None) -> dict[str, Any]:
+@mutobj.impl(SandboxEnv.exec_code)
+def sandbox_env_exec_code(self: SandboxEnv, code: str,
+                          state: dict[str, Any] | None = None) -> dict[str, Any]:
     ns_dict = _build_namespace_dict(self)
     return execute(code, ns_dict, state)
 
 
-@mutobj.impl(SandboxApp.close)
-async def sandbox_app_close(self: SandboxApp) -> None:
+@mutobj.impl(SandboxEnv.close)
+async def sandbox_env_close(self: SandboxEnv) -> None:
     cleanups = _get_cleanups(self)
     registry = _get_registry(self)
     mcp_conns = _get_mcp_conns(self)
@@ -548,8 +551,8 @@ async def sandbox_app_close(self: SandboxApp) -> None:
     _invalidate_cache(self)
 
 
-@mutobj.impl(SandboxApp.format_result)
-def sandbox_app_format_result(self: SandboxApp, result: dict[str, Any]) -> tuple[str, bool]:
+@mutobj.impl(SandboxEnv.format_result)
+def sandbox_env_format_result(self: SandboxEnv, result: dict[str, Any]) -> tuple[str, bool]:
     if "error" in result:
         text = result["error"]
         if result.get("traceback"):

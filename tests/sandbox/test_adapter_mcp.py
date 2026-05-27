@@ -3,7 +3,8 @@
 覆盖:
 - _extract_content 各分支（isError / 单 text JSON / 单 text 非 JSON / 多 text / 无 text）
 - HTTPMCPClient 对 mock MCPClient 的行为
-- bridge_mcp_server 按 transport 分派（stdio / http / unknown）
+- make_client 按 transport 分派（stdio / http / unknown）
+- MCPConnection._do_rebuild 填充 namespace 描述
 """
 
 from __future__ import annotations
@@ -12,18 +13,40 @@ import asyncio
 import inspect
 from typing import cast
 
+import mutobj
 import pytest
 
-from mutagent.sandbox._adapter_mcp import (
+from mutagent.sandbox import _mcp_impl as _adapter_mcp
+from mutagent.sandbox._mcp_impl import (
     HTTPMCPClient,
     MCPConnection,
+    MCPConnectionImpl,
     MCPToolError,
     MCPTransportError,
+    StdioMCPClient,
     _extract_content,
     _is_transport_error,
-    bridge_mcp_server,
+    make_client,
 )
 from mutagent.sandbox._signature import _MISSING
+from mutagent.sandbox._namespace_impl import (
+    Namespace,
+    NamespaceRegistry,
+    _render_namespace,
+    _render_registry,
+)
+
+
+def _set_sandbox(conn, sandbox):
+    """Set _sandbox on MCPConnection's implementation."""
+    impl = mutobj.implementation_of(conn, MCPConnectionImpl)
+    impl._sandbox = sandbox
+
+
+def _impl(conn):
+    """Resolve MCPConnection → implementation."""
+    impl = mutobj.implementation_of(conn, MCPConnectionImpl)
+    return impl
 
 
 # ============================================================
@@ -108,7 +131,7 @@ class TestHTTPMCPClient:
     @pytest.mark.asyncio
     async def test_connect_returns_handshake_info(self, monkeypatch):
         monkeypatch.setattr(
-            "mutagent.sandbox._adapter_mcp.MCPClient", _MockMCPClient)
+            "mutagent.sandbox._mcp_impl.MCPClient", _MockMCPClient)
 
         client = HTTPMCPClient(url="http://example/mcp", timeout=5.0)
         info = await client.connect()
@@ -124,7 +147,7 @@ class TestHTTPMCPClient:
     @pytest.mark.asyncio
     async def test_list_tools_passthrough(self, monkeypatch):
         monkeypatch.setattr(
-            "mutagent.sandbox._adapter_mcp.MCPClient", _MockMCPClient)
+            "mutagent.sandbox._mcp_impl.MCPClient", _MockMCPClient)
 
         client = HTTPMCPClient(url="http://example/mcp")
         await client.connect()
@@ -139,7 +162,7 @@ class TestHTTPMCPClient:
     @pytest.mark.asyncio
     async def test_call_tool_extracts_content(self, monkeypatch):
         monkeypatch.setattr(
-            "mutagent.sandbox._adapter_mcp.MCPClient", _MockMCPClient)
+            "mutagent.sandbox._mcp_impl.MCPClient", _MockMCPClient)
 
         client = HTTPMCPClient(url="http://example/mcp")
         await client.connect()
@@ -156,7 +179,7 @@ class TestHTTPMCPClient:
     @pytest.mark.asyncio
     async def test_call_tool_is_error(self, monkeypatch):
         monkeypatch.setattr(
-            "mutagent.sandbox._adapter_mcp.MCPClient", _MockMCPClient)
+            "mutagent.sandbox._mcp_impl.MCPClient", _MockMCPClient)
 
         client = HTTPMCPClient(url="http://example/mcp")
         await client.connect()
@@ -171,7 +194,7 @@ class TestHTTPMCPClient:
     @pytest.mark.asyncio
     async def test_close(self, monkeypatch):
         monkeypatch.setattr(
-            "mutagent.sandbox._adapter_mcp.MCPClient", _MockMCPClient)
+            "mutagent.sandbox._mcp_impl.MCPClient", _MockMCPClient)
 
         client = HTTPMCPClient(url="http://example/mcp")
         await client.connect()
@@ -188,7 +211,7 @@ class TestHTTPMCPClient:
                 del self.server_instructions  # 模拟旧版无此字段
 
         monkeypatch.setattr(
-            "mutagent.sandbox._adapter_mcp.MCPClient", _OldClient)
+            "mutagent.sandbox._mcp_impl.MCPClient", _OldClient)
 
         client = HTTPMCPClient(url="http://example/mcp")
         info = await client.connect()
@@ -196,152 +219,122 @@ class TestHTTPMCPClient:
 
 
 # ============================================================
-# bridge_mcp_server 分派
+# make_client 分派
 # ============================================================
+
+class _BridgeClient:
+    """最小 mock client，供 TestBridgeDispatch / TestToolFuncCrossThread
+    中 monkeypatch make_client 后驱动 MCPConnection._do_rebuild。"""
+
+    def __init__(self, instructions="", tools=None, server_title="",
+                 call_tool_result=None):
+        self.instructions = instructions
+        self.tools = tools if tools is not None else []
+        self.server_title = server_title
+        self.call_tool_result = call_tool_result
+        self.call_log: list = []
+        self.connect_calls = 0
+
+    async def connect(self):
+        self.connect_calls += 1
+        return {
+            "instructions": self.instructions,
+            "serverInfo": {"name": "mock", "title": self.server_title},
+        }
+
+    async def list_tools(self):
+        return list(self.tools)
+
+    async def call_tool(self, name, arguments):
+        self.call_log.append((name, arguments))
+        result = self.call_tool_result or {}
+        return _extract_content(result)
+
+    async def close(self):
+        pass
+
 
 class TestBridgeDispatch:
 
-    @pytest.mark.asyncio
-    async def test_unknown_transport_raises(self):
+    def test_unknown_transport_raises(self):
         with pytest.raises(ValueError, match="unknown transport"):
-            await bridge_mcp_server("x", {"transport": "websocket"})
+            make_client("x", {"transport": "websocket"})
 
-    @pytest.mark.asyncio
-    async def test_stdio_requires_command(self):
-        with pytest.raises(ValueError, match="stdio transport requires 'command'"):
-            await bridge_mcp_server("x", {"transport": "stdio"})
+    def test_stdio_requires_command(self):
+        with pytest.raises(ValueError, match="requires 'command'"):
+            make_client("x", {"transport": "stdio"})
 
-    @pytest.mark.asyncio
-    async def test_http_requires_url(self):
-        with pytest.raises(ValueError, match="http transport requires 'url'"):
-            await bridge_mcp_server("x", {"transport": "http"})
+    def test_http_requires_url(self):
+        with pytest.raises(ValueError, match="requires 'url'"):
+            make_client("x", {"transport": "http"})
 
-    @pytest.mark.asyncio
-    async def test_http_dispatches_to_http_client(self, monkeypatch):
-        monkeypatch.setattr(
-            "mutagent.sandbox._adapter_mcp.MCPClient", _MockMCPClient)
-
-        # 注入一个预设 tools 的 mock
-        def _factory(url, timeout=30.0):
-            mock = _MockMCPClient(url=url, timeout=timeout)
-            mock.tools_payload = [
-                {"name": "echo", "description": "", "inputSchema": {}},
-            ]
-            return mock
-
-        monkeypatch.setattr(
-            "mutagent.sandbox._adapter_mcp.MCPClient", _factory)
-
-        ns, client = await bridge_mcp_server("serena", {
+    def test_http_dispatches_to_http_client(self):
+        client = make_client("serena", {
             "transport": "http",
             "url": "http://example/mcp",
         })
-
         assert isinstance(client, HTTPMCPClient)
-        assert ns._name == "serena"
-        assert "echo" in ns._functions
 
     @pytest.mark.asyncio
     async def test_http_fills_namespace_description_from_instructions(self, monkeypatch):
         """MCP instructions 应成为 Namespace.description。"""
-        def _factory(url, timeout=30.0):
-            mock = _MockMCPClient(url=url, timeout=timeout)
-            mock.tools_payload = []
-            mock.server_instructions = "Use this server for X and Y."
-            return mock
-
+        client = _BridgeClient(instructions="Use this server for X and Y.")
         monkeypatch.setattr(
-            "mutagent.sandbox._adapter_mcp.MCPClient", _factory)
+            "mutagent.sandbox._mcp_impl.make_client",
+            lambda ns_name, server_config: client)
 
-        ns, _ = await bridge_mcp_server("svc", {
+        conn = MCPConnection("svc", {
             "transport": "http",
             "url": "http://example/mcp",
         })
-        assert ns._description == "Use this server for X and Y."
+        await conn.ensure_connected()
+        assert conn.namespace._description == "Use this server for X and Y."
 
     @pytest.mark.asyncio
     async def test_http_falls_back_to_server_title(self, monkeypatch):
         """无 instructions 时退化到 serverInfo.title。"""
-        class _TitleMock(_MockMCPClient):
-            async def connect(self):
-                self.connected = True
-                self.server_info = {"name": "mock", "title": "My Nice Server"}
-                self.server_capabilities = {}
-                self.server_instructions = ""
-
+        client = _BridgeClient(server_title="My Nice Server")
         monkeypatch.setattr(
-            "mutagent.sandbox._adapter_mcp.MCPClient", _TitleMock)
+            "mutagent.sandbox._mcp_impl.make_client",
+            lambda ns_name, server_config: client)
 
-        ns, _ = await bridge_mcp_server("svc", {
+        conn = MCPConnection("svc", {
             "transport": "http",
             "url": "http://example/mcp",
         })
-        assert ns._description == "My Nice Server"
+        await conn.ensure_connected()
+        assert conn.namespace._description == "My Nice Server"
 
     @pytest.mark.asyncio
     async def test_stdio_fills_description_from_instructions(self, monkeypatch):
         """Stdio 分支：connect() 返回的 instructions 传给 Namespace。"""
-        class _FakeStdio:
-            def __init__(self, command, args=None, shell=False, env=None):
-                pass
-
-            async def connect(self):
-                return {
-                    "serverInfo": {"name": "x"},
-                    "instructions": "Stdio server docs.",
-                }
-
-            async def list_tools(self):
-                return []
-
-            async def close(self):
-                pass
-
+        client = _BridgeClient(instructions="Stdio server docs.")
         monkeypatch.setattr(
-            "mutagent.sandbox._adapter_mcp.StdioMCPClient", _FakeStdio)
+            "mutagent.sandbox._mcp_impl.make_client",
+            lambda ns_name, server_config: client)
 
-        ns, _ = await bridge_mcp_server("s", {"command": "cmd"})
-        assert ns._description == "Stdio server docs."
+        conn = MCPConnection("s", {"command": "cmd"})
+        await conn.ensure_connected()
+        assert conn.namespace._description == "Stdio server docs."
 
-    @pytest.mark.asyncio
-    async def test_stdio_default_transport(self, monkeypatch):
-        # 默认 transport=stdio 时应走 StdioMCPClient 分支 — 用 mock 替代
-        created: dict = {}
-
-        class _FakeStdio:
-            def __init__(self, command, args=None, shell=False, env=None):
-                created["command"] = command
-                created["args"] = args
-                created["shell"] = shell
-                created["env"] = env
-
-            async def connect(self):
-                return {}
-
-            async def list_tools(self):
-                return []
-
-            async def close(self):
-                pass
-
-        monkeypatch.setattr(
-            "mutagent.sandbox._adapter_mcp.StdioMCPClient", _FakeStdio)
-
-        ns, client = await bridge_mcp_server("play", {
+    def test_stdio_default_transport(self):
+        client = make_client("play", {
             "command": "npx",
             "args": ["-y", "@playwright/mcp"],
             "shell": True,
         })
-
-        assert isinstance(client, _FakeStdio)
-        assert created == {"command": "npx", "args": ["-y", "@playwright/mcp"], "shell": True, "env": None}
-        assert ns._name == "play"
+        assert isinstance(client, StdioMCPClient)
 
 
 # ============================================================
 # tool_func 跨线程调用：必须走 run_coroutine_threadsafe(main_loop)
 # 回归测试迭代 2 的 "Event loop is closed" bug
 # ============================================================
+
+class _FakeSandbox:
+    """Mock sandbox，仅提供 _async_loop，供 _make_tool_func 使用。"""
+    _async_loop: asyncio.AbstractEventLoop | None = None
+
 
 class TestToolFuncCrossThread:
 
@@ -355,22 +348,24 @@ class TestToolFuncCrossThread:
         """
         import threading
 
+        client = _BridgeClient(
+            tools=[{"name": "echo", "description": "", "inputSchema": {}}],
+            call_tool_result={"content": [{"type": "text", "text": "ok"}]},
+        )
         monkeypatch.setattr(
-            "mutagent.sandbox._adapter_mcp.MCPClient", _MockMCPClient)
+            "mutagent.sandbox._mcp_impl.make_client",
+            lambda ns_name, server_config: client)
 
-        def _factory(url, timeout=30.0):
-            mock = _MockMCPClient(url=url, timeout=timeout)
-            mock.tools_payload = [{"name": "echo", "description": "", "inputSchema": {}}]
-            mock.call_tool_result = {"content": [{"type": "text", "text": "ok"}]}
-            return mock
-
-        monkeypatch.setattr("mutagent.sandbox._adapter_mcp.MCPClient", _factory)
-
-        ns, _client = await bridge_mcp_server("svc", {
+        conn = MCPConnection("svc", {
             "transport": "http",
             "url": "http://example/mcp",
         })
-        echo = ns._functions["echo"]
+        sandbox = _FakeSandbox()
+        sandbox._async_loop = asyncio.get_running_loop()
+        _set_sandbox(conn, sandbox)
+
+        await conn.ensure_connected()
+        echo = conn.namespace._functions["echo"]
         main_loop = asyncio.get_running_loop()
 
         # 在非 asyncio 线程调用 tool_func —— 精确模拟 pysandbox 线程池
@@ -390,22 +385,24 @@ class TestToolFuncCrossThread:
     @pytest.mark.asyncio
     async def test_tool_func_repeated_calls(self, monkeypatch):
         """连续多次调用不会破坏 client 状态（之前 asyncio.run() 每次开关 loop 会泄漏）。"""
+        client = _BridgeClient(
+            tools=[{"name": "ping", "description": "", "inputSchema": {}}],
+            call_tool_result={"content": [{"type": "text", "text": "pong"}]},
+        )
         monkeypatch.setattr(
-            "mutagent.sandbox._adapter_mcp.MCPClient", _MockMCPClient)
+            "mutagent.sandbox._mcp_impl.make_client",
+            lambda ns_name, server_config: client)
 
-        def _factory(url, timeout=30.0):
-            mock = _MockMCPClient(url=url, timeout=timeout)
-            mock.tools_payload = [{"name": "ping", "description": "", "inputSchema": {}}]
-            mock.call_tool_result = {"content": [{"type": "text", "text": "pong"}]}
-            return mock
-
-        monkeypatch.setattr("mutagent.sandbox._adapter_mcp.MCPClient", _factory)
-
-        ns, _client = await bridge_mcp_server("svc", {
+        conn = MCPConnection("svc", {
             "transport": "http",
             "url": "http://example/mcp",
         })
-        ping = ns._functions["ping"]
+        sandbox = _FakeSandbox()
+        sandbox._async_loop = asyncio.get_running_loop()
+        _set_sandbox(conn, sandbox)
+
+        await conn.ensure_connected()
+        ping = conn.namespace._functions["ping"]
         main_loop = asyncio.get_running_loop()
 
         def worker():
@@ -523,9 +520,9 @@ class TestMCPConnectionStateMachine:
     @pytest.mark.asyncio
     async def test_initial_state_is_disconnected(self):
         loop = asyncio.get_running_loop()
-        conn = MCPConnection("ns", {"transport": "http", "url": "http://x"}, loop)
+        conn = MCPConnection("ns", {"transport": "http", "url": "http://x"})
         assert conn.state == "disconnected"
-        assert conn.client is None
+        assert _impl(conn).client is None
         assert conn.namespace.connection_state == "disconnected"
         assert conn.namespace._connection is conn
 
@@ -536,14 +533,15 @@ class TestMCPConnectionStateMachine:
             instructions="hello",
             tools=[{"name": "echo", "description": "", "inputSchema": {}}])
         monkeypatch.setattr(
-            "mutagent.sandbox._adapter_mcp.make_client",
+            "mutagent.sandbox._mcp_impl.make_client",
             lambda ns, cfg: fake)
 
-        conn = MCPConnection("ns", {"transport": "http", "url": "http://x"}, loop)
+        conn = MCPConnection("ns", {"transport": "http", "url": "http://x"})
+        _set_sandbox(conn, type('_S', (), {'_async_loop': loop})())
         await conn.reconnect()
 
         assert conn.state == "connected"
-        assert conn.client is fake
+        assert _impl(conn).client is fake
         assert "echo" in conn.namespace._functions
         assert conn.namespace._description == "hello"
         assert conn.namespace.connection_state == "connected"
@@ -554,15 +552,15 @@ class TestMCPConnectionStateMachine:
         fake = _FakeClient()
         fake.connect_errors.append(MCPTransportError("connect refused"))
         monkeypatch.setattr(
-            "mutagent.sandbox._adapter_mcp.make_client",
+            "mutagent.sandbox._mcp_impl.make_client",
             lambda ns, cfg: fake)
 
-        conn = MCPConnection("ns", {"transport": "http", "url": "http://x"}, loop)
+        conn = MCPConnection("ns", {"transport": "http", "url": "http://x"})
         with pytest.raises(MCPTransportError, match="connect refused"):
             await conn.reconnect()
 
         assert conn.state == "failed"
-        assert conn.client is None
+        assert _impl(conn).client is None
         assert "connect refused" in (conn.last_error or "")
         assert conn.namespace.connection_state == "failed"
         assert conn.namespace.connection_error is not None
@@ -572,10 +570,10 @@ class TestMCPConnectionStateMachine:
         loop = asyncio.get_running_loop()
         fake = _FakeClient()
         monkeypatch.setattr(
-            "mutagent.sandbox._adapter_mcp.make_client",
+            "mutagent.sandbox._mcp_impl.make_client",
             lambda ns, cfg: fake)
 
-        conn = MCPConnection("ns", {"transport": "http", "url": "http://x"}, loop)
+        conn = MCPConnection("ns", {"transport": "http", "url": "http://x"})
         await conn.ensure_connected()
         await conn.ensure_connected()
         await conn.ensure_connected()
@@ -589,12 +587,12 @@ class TestMCPConnectionStateMachine:
         fake = _FakeClient()
         fake.connect_errors.append(MCPTransportError("first fail"))
         monkeypatch.setattr(
-            "mutagent.sandbox._adapter_mcp.make_client",
+            "mutagent.sandbox._mcp_impl.make_client",
             lambda ns, cfg: fake)
 
         conn = MCPConnection(
-            "ns", {"transport": "http", "url": "http://x"},
-            loop, retry_cooldown=10.0)
+            "ns", {"transport": "http", "url": "http://x",
+                   "retry_cooldown": 10.0})
 
         with pytest.raises(MCPTransportError, match="first fail"):
             await conn.ensure_connected()
@@ -613,12 +611,12 @@ class TestMCPConnectionStateMachine:
         # 第一次 fail，第二次成功
         fake.connect_errors.append(MCPTransportError("transient"))
         monkeypatch.setattr(
-            "mutagent.sandbox._adapter_mcp.make_client",
+            "mutagent.sandbox._mcp_impl.make_client",
             lambda ns, cfg: fake)
 
         conn = MCPConnection(
-            "ns", {"transport": "http", "url": "http://x"},
-            loop, retry_cooldown=0.0)
+            "ns", {"transport": "http", "url": "http://x",
+                   "retry_cooldown": 0.0})
 
         with pytest.raises(MCPTransportError):
             await conn.ensure_connected()
@@ -638,10 +636,10 @@ class TestMCPConnectionStateMachine:
 
         fake = _SlowClient()
         monkeypatch.setattr(
-            "mutagent.sandbox._adapter_mcp.make_client",
+            "mutagent.sandbox._mcp_impl.make_client",
             lambda ns, cfg: fake)
 
-        conn = MCPConnection("ns", {"transport": "http", "url": "http://x"}, loop)
+        conn = MCPConnection("ns", {"transport": "http", "url": "http://x"})
 
         # 5 个并发 ensure_connected
         await asyncio.gather(*[conn.ensure_connected() for _ in range(5)])
@@ -654,15 +652,15 @@ class TestMCPConnectionStateMachine:
         loop = asyncio.get_running_loop()
         fake = _FakeClient()
         monkeypatch.setattr(
-            "mutagent.sandbox._adapter_mcp.make_client",
+            "mutagent.sandbox._mcp_impl.make_client",
             lambda ns, cfg: fake)
 
-        conn = MCPConnection("ns", {"transport": "http", "url": "http://x"}, loop)
+        conn = MCPConnection("ns", {"transport": "http", "url": "http://x"})
         await conn.ensure_connected()
         await conn.close()
 
         assert conn.state == "disconnected"
-        assert conn.client is None
+        assert _impl(conn).client is None
         assert fake.close_calls == 1
 
         # 多次 close 幂等
@@ -675,10 +673,11 @@ class TestMCPConnectionStateMachine:
         fake = _FakeClient(
             tools=[{"name": "old", "description": "", "inputSchema": {}}])
         monkeypatch.setattr(
-            "mutagent.sandbox._adapter_mcp.make_client",
+            "mutagent.sandbox._mcp_impl.make_client",
             lambda ns, cfg: fake)
 
-        conn = MCPConnection("ns", {"transport": "http", "url": "http://x"}, loop)
+        conn = MCPConnection("ns", {"transport": "http", "url": "http://x"})
+        _set_sandbox(conn, type('_S', (), {'_async_loop': loop})())
         await conn.reconnect()
         assert "old" in conn.namespace._functions
 
@@ -698,10 +697,11 @@ class TestToolFuncAutoReconnect:
         fake = _FakeClient(
             tools=[{"name": "ping", "description": "", "inputSchema": {}}])
         monkeypatch.setattr(
-            "mutagent.sandbox._adapter_mcp.make_client",
+            "mutagent.sandbox._mcp_impl.make_client",
             lambda ns, cfg: fake)
 
-        conn = MCPConnection("ns", {"transport": "http", "url": "http://x"}, loop)
+        conn = MCPConnection("ns", {"transport": "http", "url": "http://x"})
+        _set_sandbox(conn, type('_S', (), {'_async_loop': loop})())
         # 没 autostart，未 connect
         assert conn.state == "disconnected"
 
@@ -734,11 +734,12 @@ class TestToolFuncAutoReconnect:
             return c
 
         monkeypatch.setattr(
-            "mutagent.sandbox._adapter_mcp.make_client", factory)
+            "mutagent.sandbox._mcp_impl.make_client", factory)
 
         conn = MCPConnection(
-            "ns", {"transport": "http", "url": "http://x"},
-            loop, retry_cooldown=0.0)
+            "ns", {"transport": "http", "url": "http://x",
+                   "retry_cooldown": 0.0})
+        _set_sandbox(conn, type('_S', (), {'_async_loop': loop})())
         await conn.ensure_connected()  # 拿到第一个 client
 
         result_box: dict = {}
@@ -766,9 +767,10 @@ class TestToolFuncAutoReconnect:
             return c
 
         monkeypatch.setattr(
-            "mutagent.sandbox._adapter_mcp.make_client", factory)
+            "mutagent.sandbox._mcp_impl.make_client", factory)
 
-        conn = MCPConnection("ns", {"transport": "http", "url": "http://x"}, loop)
+        conn = MCPConnection("ns", {"transport": "http", "url": "http://x"})
+        _set_sandbox(conn, type('_S', (), {'_async_loop': loop})())
         await conn.ensure_connected()
 
         result_box: dict = {}
@@ -802,11 +804,12 @@ class TestToolFuncAutoReconnect:
             return c
 
         monkeypatch.setattr(
-            "mutagent.sandbox._adapter_mcp.make_client", factory)
+            "mutagent.sandbox._mcp_impl.make_client", factory)
 
         conn = MCPConnection(
-            "ns", {"transport": "http", "url": "http://x"},
-            loop, retry_cooldown=0.0)
+            "ns", {"transport": "http", "url": "http://x",
+                   "retry_cooldown": 0.0})
+        _set_sandbox(conn, type('_S', (), {'_async_loop': loop})())
         await conn.ensure_connected()
 
         result_box: dict = {}
@@ -828,17 +831,15 @@ class TestToolFuncAutoReconnect:
 class TestNamespaceRender:
 
     def _make_registry(self, namespaces):
-        from mutagent.sandbox._namespace import NamespaceRegistry
         reg = NamespaceRegistry()
         for ns in namespaces:
             reg.add(ns)
         return reg
 
     def _mcp_ns(self, name, state, error=None, functions=None):
-        from mutagent.sandbox._namespace import Namespace
         ns = Namespace(name, description="")
         # 模拟有 connection（非 None 即可触发 MCP 渲染分支）
-        ns._connection = object()  # type: ignore[assignment]
+        ns._connection = type("_FakeConn", (), {"last_attempt_at": None})()
         ns.connection_state = state
         ns.connection_error = error
         for fname in functions or []:
@@ -846,7 +847,6 @@ class TestNamespaceRender:
         return ns
 
     def test_connected_no_state_label(self):
-        from mutagent.sandbox._namespace import _render_registry
         ns = self._mcp_ns("playwright", "connected", functions=["a", "b"])
         text = _render_registry(self._make_registry([ns]))
         assert "[connecting" not in text
@@ -856,26 +856,22 @@ class TestNamespaceRender:
         assert "(2 functions)" in text
 
     def test_connecting_label(self):
-        from mutagent.sandbox._namespace import _render_registry
         ns = self._mcp_ns("serena", "connecting")
         text = _render_registry(self._make_registry([ns]))
         assert "[connecting...]" in text
 
     def test_disconnected_unknown_count(self):
-        from mutagent.sandbox._namespace import _render_registry
         ns = self._mcp_ns("experimental", "disconnected")
         text = _render_registry(self._make_registry([ns]))
         assert "[disconnected]" in text
         assert "(? functions)" in text  # 从未连过
 
     def test_failed_with_reason(self):
-        from mutagent.sandbox._namespace import _render_registry
         ns = self._mcp_ns("weather", "failed", error="connection refused")
         text = _render_registry(self._make_registry([ns]))
         assert "[failed: connection refused]" in text
 
     def test_failed_reason_truncated(self):
-        from mutagent.sandbox._namespace import _render_registry
         long = "x" * 200
         ns = self._mcp_ns("weather", "failed", error=long)
         text = _render_registry(self._make_registry([ns]))
@@ -885,7 +881,6 @@ class TestNamespaceRender:
         assert ("x" * 100) not in text
 
     def test_render_namespace_failed_hint(self):
-        from mutagent.sandbox._namespace import _render_namespace
         ns = self._mcp_ns("weather", "failed", error="ECONNREFUSED")
         text = _render_namespace(ns)
         assert "Connection failed: ECONNREFUSED" in text
@@ -893,7 +888,6 @@ class TestNamespaceRender:
 
     def test_non_mcp_namespace_no_state(self):
         """普通 NamespaceTools / CLI namespace 不显示状态标签。"""
-        from mutagent.sandbox._namespace import Namespace, _render_registry
         ns = Namespace("fs", description="")
         ns.register("read", lambda **k: None, "")
         text = _render_registry(self._make_registry([ns]))
@@ -911,7 +905,7 @@ class TestStdioEnvPassthrough:
     @pytest.mark.asyncio
     async def test_make_client_forwards_env_to_stdio(self, monkeypatch):
         """make_client 把 server_config['env'] 传给 StdioMCPClient.__init__。"""
-        from mutagent.sandbox._adapter_mcp import make_client
+        from mutagent.sandbox._mcp_impl import make_client
 
         captured: dict = {}
 
@@ -920,7 +914,7 @@ class TestStdioEnvPassthrough:
                 captured["env"] = env
 
         monkeypatch.setattr(
-            "mutagent.sandbox._adapter_mcp.StdioMCPClient", _FakeStdio)
+            "mutagent.sandbox._mcp_impl.StdioMCPClient", _FakeStdio)
 
         make_client("x", {
             "transport": "stdio",
@@ -932,7 +926,7 @@ class TestStdioEnvPassthrough:
     @pytest.mark.asyncio
     async def test_make_client_omits_env_when_missing(self, monkeypatch):
         """无 env 字段时传 None，保持子进程继承父 env。"""
-        from mutagent.sandbox._adapter_mcp import make_client
+        from mutagent.sandbox._mcp_impl import make_client
 
         captured: dict = {}
 
@@ -941,7 +935,7 @@ class TestStdioEnvPassthrough:
                 captured["env"] = env
 
         monkeypatch.setattr(
-            "mutagent.sandbox._adapter_mcp.StdioMCPClient", _FakeStdio)
+            "mutagent.sandbox._mcp_impl.StdioMCPClient", _FakeStdio)
 
         make_client("x", {"transport": "stdio", "command": "echo"})
         assert captured["env"] is None
@@ -950,7 +944,7 @@ class TestStdioEnvPassthrough:
     async def test_stdio_popen_receives_merged_env(self, monkeypatch):
         """StdioMCPClient.connect 把 os.environ | env 合并后传 Popen.env。"""
         import os
-        from mutagent.sandbox import _adapter_mcp as adapter
+        from mutagent.sandbox import _mcp_impl as adapter
 
         captured: dict = {}
 
@@ -998,7 +992,7 @@ class TestStdioEnvPassthrough:
     @pytest.mark.asyncio
     async def test_stdio_popen_env_none_when_no_env_config(self, monkeypatch):
         """env 配置缺省 → Popen 收到 env=None（继承父进程）。"""
-        from mutagent.sandbox import _adapter_mcp as adapter
+        from mutagent.sandbox import _mcp_impl as adapter
 
         captured: dict = {}
 
@@ -1037,7 +1031,7 @@ class TestListToolsMetadata:
     @pytest.mark.asyncio
     async def test_list_tools_metadata_returns_schema(self, monkeypatch):
         """list_tools_metadata 应返回 name/description/input_schema/source_namespace。"""
-        from mutagent.sandbox._adapter_mcp import MCPConnection
+        from mutagent.sandbox._mcp_impl import MCPConnection
 
         # mock 一个 client，返回带 inputSchema 的 tools
         class _FakeClient:
@@ -1077,11 +1071,12 @@ class TestListToolsMetadata:
                 pass
 
         monkeypatch.setattr(
-            "mutagent.sandbox._adapter_mcp.make_client",
+            "mutagent.sandbox._mcp_impl.make_client",
             lambda ns, cfg: _FakeClient())
 
         loop = asyncio.get_running_loop()
-        conn = MCPConnection("fs", {"transport": "stdio", "command": "x"}, loop)
+        conn = MCPConnection("fs", {"transport": "stdio", "command": "x"})
+        _set_sandbox(conn, type('_S', (), {'_async_loop': loop})())
         await conn.reconnect()
 
         meta = conn.list_tools_metadata()
@@ -1100,9 +1095,9 @@ class TestListToolsMetadata:
     @pytest.mark.asyncio
     async def test_list_tools_metadata_empty_when_disconnected(self):
         """未连接时返回空列表。"""
-        from mutagent.sandbox._adapter_mcp import MCPConnection
+        from mutagent.sandbox._mcp_impl import MCPConnection
         loop = asyncio.get_running_loop()
-        conn = MCPConnection("fs", {"transport": "stdio", "command": "x"}, loop)
+        conn = MCPConnection("fs", {"transport": "stdio", "command": "x"})
         # 还未 reconnect
         assert conn.list_tools_metadata() == []
 
@@ -1119,13 +1114,16 @@ class TestMakeToolFuncSignature:
         """构造 tool_func，不真启事件循环（把 call_with_retry 替换成 stub）。"""
         import inspect as _inspect
 
-        from mutagent.sandbox import _adapter_mcp
+        from mutagent.sandbox import _mcp_impl
 
-        # 伪造 MCPConnection：_make_tool_func 只在调用时用到 conn.main_loop /
+        # 伪造 MCPConnection：_make_tool_func 只在调用时用到 conn._sandbox._async_loop /
         # conn.client / conn.ensure_connected；本组测试不触发调用分支，所以
         # 可以直接传最小对象。
+        class _DummySandbox:
+            _async_loop = None
+
         class _DummyConn:
-            main_loop = None
+            _sandbox = _DummySandbox()
             client = None
 
             async def ensure_connected(self): return None
@@ -1230,7 +1228,7 @@ class TestMakeToolFuncSignature:
         )
 
     def test_browser_console_messages_filters_omitted_params(self, monkeypatch):
-        from mutagent.sandbox import _adapter_mcp
+        from mutagent.sandbox import _mcp_impl
 
         class _DoneFuture:
             def __init__(self, value):
@@ -1255,7 +1253,7 @@ class TestMakeToolFuncSignature:
 
         class _DummyConn:
             def __init__(self):
-                self.main_loop = None
+                self._sandbox = type('_S', (), {'_async_loop': None})()
                 self.client = _DummyClient()
 
             async def ensure_connected(self):
@@ -1291,7 +1289,7 @@ class TestMakeToolFuncSignature:
         ]
 
     def test_browser_click_accepts_required_only_call(self, monkeypatch):
-        from mutagent.sandbox import _adapter_mcp
+        from mutagent.sandbox import _mcp_impl
 
         class _DoneFuture:
             def __init__(self, value):
@@ -1316,7 +1314,7 @@ class TestMakeToolFuncSignature:
 
         class _DummyConn:
             def __init__(self):
-                self.main_loop = None
+                self._sandbox = type('_S', (), {'_async_loop': None})()
                 self.client = _DummyClient()
 
             async def ensure_connected(self):
@@ -1355,7 +1353,7 @@ class TestMakeToolFuncSignature:
         assert conn.client.call_log == [("browser_click", {"target": "test"})]
 
     def test_browser_wait_for_accepts_all_params_omitted(self, monkeypatch):
-        from mutagent.sandbox import _adapter_mcp
+        from mutagent.sandbox import _mcp_impl
 
         class _DoneFuture:
             def __init__(self, value):
@@ -1380,7 +1378,7 @@ class TestMakeToolFuncSignature:
 
         class _DummyConn:
             def __init__(self):
-                self.main_loop = None
+                self._sandbox = type('_S', (), {'_async_loop': None})()
                 self.client = _DummyClient()
 
             async def ensure_connected(self):

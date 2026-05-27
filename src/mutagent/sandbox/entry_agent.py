@@ -13,7 +13,7 @@ import asyncio
 from typing import Any
 
 from mutagent.core.tools import Toolkit
-from mutagent.sandbox.app import SandboxApp, PYSANDBOX_DOC
+from mutagent.sandbox.env import SandboxEnv, PYSANDBOX_DOC
 
 
 class SandboxToolkit(Toolkit):
@@ -22,23 +22,23 @@ class SandboxToolkit(Toolkit):
     Attributes:
         _tool_prefix: 空字符串，使 tool 名直接为方法名（"pysandbox"）。
         _tool_methods: 限定只暴露 pysandbox 一个方法。
-        _app: 沙箱执行引擎实例。
+        _env: 沙箱执行引擎实例。
         _state: 跨 tool call 共享的 REPL 变量字典（per-toolkit 实例隔离）。
     """
 
     _tool_prefix = ""
     _tool_methods = ["pysandbox"]
 
-    _app: SandboxApp
+    _env: SandboxEnv
     _state: dict[str, Any]
 
     async def pysandbox(self, code: str) -> str:
         loop = asyncio.get_running_loop()
         # 注入主 loop 供 _wrap_async 投递 async NamespaceTools 方法
-        self._app.bind_main_loop()
+        self._env.bind_main_loop()
         result = await loop.run_in_executor(
-            None, self._app.exec_code, code, self._state)
-        text, _is_error = self._app.format_result(result)
+            None, self._env.exec_code, code, self._state)
+        text, _is_error = self._env.format_result(result)
         return text
 
 

@@ -2,7 +2,7 @@
 
 import pytest
 from mutagent.sandbox._engine import execute
-from mutagent.sandbox._namespace import Namespace, NamespaceRegistry, _first_line
+from mutagent.sandbox._namespace_impl import Namespace, NamespaceRegistry, _first_line
 
 
 # ============================================================

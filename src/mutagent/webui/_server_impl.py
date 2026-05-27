@@ -8,7 +8,7 @@ from typing import Any
 
 import mutagent
 import mutobj
-from mutagent.sandbox.tools import PySandboxTools
+from mutagent.sandbox.entry_mcp import PySandboxTools
 from mutagent.webui.conversation import Conversation
 from mutagent.webui.server import WebUIServer
 from mutgui import Channel, ModuleRegistry, ViewPort
@@ -166,7 +166,7 @@ def web_ui_server_init__(
 
     # PySandbox MCP endpoint —— 注入 sandbox 后注册 MCPView，
     # PySandboxTools.path == "/mcp" 会自动挂接到该 view。
-    PySandboxTools._app = self.app.sandbox
+    PySandboxTools._env = self.app.sandbox
 
     class _MCPView(MCPView):
         path = "/mcp"

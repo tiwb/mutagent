@@ -48,24 +48,21 @@ class _FakeSandbox:
         self._mcp_conns: dict[str, Any] = {}
         self._removed: list[Any] = []
         self._added: list[tuple[Any, Any]] = []
+        self._connected: list[Any] = []
         self._registry = _FakeRegistry()
         self._async_loop = None
 
-    def mcp_connections(self) -> dict[str, Any]:
+    def list_sources(self) -> dict[str, Any]:
         return dict(self._mcp_conns)
 
-    def register_mcp_connection(self, name: str, conn: Any) -> None:
-        self._mcp_conns[name] = conn
+    def connect_source(self, conn: Any) -> None:
+        self._mcp_conns[conn.name] = conn
+        self._connected.append(conn)
 
-    def unregister_mcp_connection(self, name: str) -> None:
-        self._mcp_conns.pop(name, None)
-
-    def add_namespace(self, ns: Any, on_remove=None) -> None:
-        self._added.append((ns, on_remove))
-
-    def remove_provider(self, ns: Any) -> bool:
-        self._removed.append(ns)
-        return True
+    def disconnect_source(self, name: str) -> None:
+        conn = self._mcp_conns.pop(name, None)
+        if conn is not None:
+            self._removed.append(conn.namespace)
 
 
 class _FakeApp:
@@ -86,7 +83,8 @@ class _FakeConn:
                  cfg: dict | None = None,
                  tools: list[dict] | None = None,
                  last_error: str = "") -> None:
-        self.ns_name = name
+        self.name = name
+        self.ns_name = name  # 别名（兼容旧测试）
         self.state = state
         self.config = cfg or {"transport": "stdio", "command": "x"}
         self.last_error = last_error
@@ -118,7 +116,7 @@ def _make_panel(*, mcp_sources: dict | None = None,
     sandbox = _FakeSandbox()
     if conns:
         for k, c in conns.items():
-            sandbox.register_mcp_connection(k, c)
+            sandbox.connect_source(c)
     app = _FakeApp(config, sandbox)
     agent = _FakeAgent(config)
     panel = MCPSettingsPanel(app=app, agent=agent)
@@ -371,7 +369,7 @@ class TestButtonStates:
 
     def test_state_tag_text_matches_format_state_label(self):
         """R3：同一 failed ns 上，文本端与 UI 端的 reason 截断结果一致。"""
-        from mutagent.sandbox._namespace import _format_state_label
+        from mutagent.sandbox._namespace_impl import _format_state_label
         from mutagent.webui._settings_mcp import _state_tag_text
         long_err = ("a" * 80) + "\nsecond line should be ignored"
         conn = _FakeConn("a", state="failed", last_error=long_err)
