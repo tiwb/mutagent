@@ -7,6 +7,7 @@ import pytest
 import mutobj
 from mutagent.core.agent import Agent
 from mutagent.core.context import AgentContext
+from mutagent.core._agent_impl import MAX_TOOL_ROUNDS
 from mutagent.core._llm_impl_anthropic import AnthropicApiClient
 from mutagent.core.messages import (
     Message,
@@ -14,6 +15,7 @@ from mutagent.core.messages import (
     StreamEvent,
     TextBlock,
     ToolUseBlock,
+    TurnEndBlock,
 )
 from mutagent.core.tools import ToolSet, Toolkit
 
@@ -118,7 +120,6 @@ class TestAgentDeclaration:
     def test_stub_submit_does_nothing(self):
         agent = _make_agent()
         # stub is awaited but does nothing
-        import asyncio
         asyncio.run(agent.submit("test"))
 
     def test_stub_subscribe_returns_cancel_fn(self):
@@ -509,8 +510,6 @@ class TestMaxToolRounds:
         Need MAX_TOOL_ROUNDS+1 tool_use responses: the first 25 drive
         tool_round up to 25, then the 26th triggers the >= check.
         """
-        from mutagent.core._agent_impl import MAX_TOOL_ROUNDS
-
         call_idx = 0
         async def mock_send(messages, tools, prompts=None, stream=True):
             nonlocal call_idx
@@ -616,7 +615,6 @@ class TestEdgeCases:
         agent.llm.send = mock_send
 
         await _collect_events(agent)
-        from mutagent.core.messages import TurnEndBlock
         last_msg = agent.context.messages[-1]
         assert last_msg.role == "assistant"
         turn_end_blocks = [b for b in last_msg.blocks if isinstance(b, TurnEndBlock)]

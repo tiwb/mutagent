@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
+import httpx
+
 from mutagent.webui.messages import MessageList
 from mutagent.webui._conversation_impl import _cext
 from mutagent.webui._messages_impl import _aext
@@ -247,8 +249,6 @@ def test_discover_remote_models_falls_back_to_v1_models():
                     {"id": "doubao-seed-1-6-flash-250715", "created": 1},
                 ]
             })
-
-    import httpx
 
     original_client = httpx.AsyncClient
     httpx.AsyncClient = lambda *args, **kwargs: _Client()

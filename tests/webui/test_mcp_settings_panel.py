@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -22,15 +23,22 @@ from mutagent.webui._settings_mcp import (
     MCPSettingsPanel,
     _check_name_conflicts,
     _config_changed_at_runtime,
+    _delete_source,
     _draft_to_config,
+    _edit_source,
     _fn_detail,
     _format_args_text,
     _format_env_text,
     _parse_args_text,
     _parse_env_text,
     _persist_current_form,
+    _render_list_row,
+    _save_edits,
+    _start_add,
     _state_tag_color,
+    _state_tag_text,
 )
+from mutagent.sandbox._namespace_impl import _format_state_label
 
 
 # ─────────────────────────────────────────────────────────────
@@ -314,7 +322,6 @@ class TestButtonStates:
 
     def _row_button_id_label(self, panel: MCPSettingsPanel, key: str
                              ) -> tuple[str, str, bool]:
-        from mutagent.webui._settings_mcp import _render_list_row
         row = _render_list_row(panel, key, panel._drafts[key])
         btn = row["$children"][1]
         return btn["$id"], btn["children"], bool(btn.get("disabled"))
@@ -357,7 +364,6 @@ class TestButtonStates:
 
     def test_state_tag_text_truncates_long_reason_to_60(self):
         """R3：failed reason 截断长度从 50 统一为 60。"""
-        from mutagent.webui._settings_mcp import _state_tag_text
         long_err = "x" * 200
         conn = _FakeConn("a", state="failed", last_error=long_err)
         text = _state_tag_text("failed", conn)
@@ -369,8 +375,6 @@ class TestButtonStates:
 
     def test_state_tag_text_matches_format_state_label(self):
         """R3：同一 failed ns 上，文本端与 UI 端的 reason 截断结果一致。"""
-        from mutagent.sandbox._namespace_impl import _format_state_label
-        from mutagent.webui._settings_mcp import _state_tag_text
         long_err = ("a" * 80) + "\nsecond line should be ignored"
         conn = _FakeConn("a", state="failed", last_error=long_err)
 
@@ -484,7 +488,6 @@ class TestRuntimeChangeBanner:
 class TestSaveFlow:
 
     def test_save_writes_config_file(self, tmp_path):
-        from mutagent.webui._settings_mcp import _save_edits, _start_add
         panel, app = _make_panel(tmp_path=tmp_path)
         _start_add("stdio", view=panel)
         panel.form_command = "echo"
@@ -493,7 +496,6 @@ class TestSaveFlow:
         # 配置已写盘
         cfg_path = tmp_path / "config.json"
         assert cfg_path.exists()
-        import json
         data = json.loads(cfg_path.read_text(encoding="utf-8"))
         assert "echo-source" in data["mcp_sources"]
         assert data["mcp_sources"]["echo-source"]["command"] == "echo"
@@ -501,7 +503,6 @@ class TestSaveFlow:
         assert panel.error == ""
 
     def test_save_rejects_empty_command_for_stdio(self, tmp_path):
-        from mutagent.webui._settings_mcp import _save_edits, _start_add
         panel, _ = _make_panel(tmp_path=tmp_path)
         _start_add("stdio", view=panel)
         panel.form_name = "noop"
@@ -512,7 +513,6 @@ class TestSaveFlow:
         assert not (tmp_path / "config.json").exists()
 
     def test_save_rejects_empty_url_for_http(self, tmp_path):
-        from mutagent.webui._settings_mcp import _save_edits, _start_add
         panel, _ = _make_panel(tmp_path=tmp_path)
         _start_add("http", view=panel)
         panel.form_name = "noop"
@@ -521,7 +521,6 @@ class TestSaveFlow:
         assert "url" in panel.error.lower()
 
     def test_save_rejects_invalid_env(self, tmp_path):
-        from mutagent.webui._settings_mcp import _save_edits, _start_add
         panel, _ = _make_panel(tmp_path=tmp_path)
         _start_add("stdio", view=panel)
         panel.form_command = "echo"
@@ -531,7 +530,6 @@ class TestSaveFlow:
         assert "env" in panel.error.lower()
 
     def test_save_rejects_sanitized_conflict(self, tmp_path):
-        from mutagent.webui._settings_mcp import _save_edits, _start_add
         panel, _ = _make_panel(
             tmp_path=tmp_path,
             mcp_sources={"my-fs": {"transport": "stdio", "command": "x"}},
@@ -543,10 +541,6 @@ class TestSaveFlow:
         assert "Sanitized" in panel.error
 
     def test_delete_removes_source_and_writes_config(self, tmp_path):
-        from mutagent.webui._settings_mcp import (
-            _delete_source,
-            _edit_source,
-        )
         panel, app = _make_panel(
             tmp_path=tmp_path,
             mcp_sources={"a": {"transport": "stdio", "command": "x"}},
@@ -557,12 +551,10 @@ class TestSaveFlow:
         assert panel.current_step == "list"
         assert panel.notice.startswith("Removed")
         cfg_path = tmp_path / "config.json"
-        import json
         data = json.loads(cfg_path.read_text(encoding="utf-8"))
         assert data["mcp_sources"] == {}
 
     def test_rename_updates_dict_key(self, tmp_path):
-        from mutagent.webui._settings_mcp import _edit_source, _save_edits
         panel, app = _make_panel(
             tmp_path=tmp_path,
             mcp_sources={"a": {"transport": "stdio", "command": "x"}},
@@ -573,13 +565,11 @@ class TestSaveFlow:
         assert "a" not in panel._drafts
         assert "b" in panel._drafts
         cfg_path = tmp_path / "config.json"
-        import json
         data = json.loads(cfg_path.read_text(encoding="utf-8"))
         assert "b" in data["mcp_sources"]
         assert "a" not in data["mcp_sources"]
 
     def test_rename_with_running_conn_unregisters_old(self, tmp_path):
-        from mutagent.webui._settings_mcp import _edit_source, _save_edits
         conn = _FakeConn("a", state="connected")
         panel, app = _make_panel(
             tmp_path=tmp_path,
@@ -668,7 +658,6 @@ class TestFunctionDetailRendering:
         panel, _ = _make_panel(mcp_sources={
             "fs": {"transport": "stdio", "command": "echo"},
         })
-        from mutagent.webui._settings_mcp import _edit_source
         _edit_source("fs", view=panel)
         block = panel.render()
         children = block.items[0]["$children"]
@@ -685,7 +674,6 @@ class TestFunctionDetailRendering:
         panel, _ = _make_panel(mcp_sources={
             "svc": {"transport": "http", "url": "http://x/mcp"},
         })
-        from mutagent.webui._settings_mcp import _edit_source
         _edit_source("svc", view=panel)
         block = panel.render()
         children = block.items[0]["$children"]
@@ -708,7 +696,6 @@ class TestFunctionDetailRendering:
             mcp_sources={"fs": {"transport": "stdio", "command": "echo"}},
             conns={"fs": conn},
         )
-        from mutagent.webui._settings_mcp import _edit_source
         _edit_source("fs", view=panel)
         # 改 command
         panel.form_command = "different"
@@ -721,7 +708,6 @@ class TestFunctionDetailRendering:
         panel, _ = _make_panel(mcp_sources={
             "fs": {"transport": "stdio", "command": "echo"},
         })
-        from mutagent.webui._settings_mcp import _edit_source
         _edit_source("fs", view=panel)
         block = panel.render()
         children = block.items[0]["$children"]

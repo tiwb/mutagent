@@ -11,6 +11,8 @@ import mutagent
 import mutobj
 from mutagent.app.config import Config
 from mutagent.core.messages import ToolUseBlock, ToolSchema
+from mutagent.toolkits._web_toolkit_impl_jina import JinaSearchImpl, JinaFetchImpl
+from mutagent.toolkits._web_toolkit_impl_local import LocalFetchImpl
 from mutagent.toolkits.web_toolkit import FetchImpl, SearchImpl, WebToolkit
 from mutagent.core.tools import ToolSet
 from mutobj import get_declaration_func
@@ -107,7 +109,6 @@ class TestSearchImplDeclaration:
         assert issubclass(SearchImpl, mutobj.Declaration)
 
     def test_has_name_and_description(self):
-        from mutagent.toolkits._web_toolkit_impl_jina import JinaSearchImpl
         assert JinaSearchImpl.name == "jina"
         assert JinaSearchImpl.description == "Jina Search API"
 
@@ -118,12 +119,10 @@ class TestFetchImplDeclaration:
         assert issubclass(FetchImpl, mutobj.Declaration)
 
     def test_local_impl_has_name(self):
-        from mutagent.toolkits._web_toolkit_impl_local import LocalFetchImpl
         assert LocalFetchImpl.name == "local"
         assert LocalFetchImpl.description == "Local extraction"
 
     def test_jina_impl_has_name(self):
-        from mutagent.toolkits._web_toolkit_impl_jina import JinaFetchImpl
         assert JinaFetchImpl.name == "jina"
         assert JinaFetchImpl.description == "Jina Reader API"
 
@@ -135,13 +134,11 @@ class TestFetchImplDeclaration:
 class TestProviderDiscovery:
 
     def test_discover_search_impls(self):
-        import mutobj
         impls = mutobj.discover_subclasses(SearchImpl)
         names = {cls.name for cls in impls}
         assert "jina" in names
 
     def test_discover_fetch_impls(self):
-        import mutobj
         impls = mutobj.discover_subclasses(FetchImpl)
         names = {cls.name for cls in impls}
         assert "local" in names

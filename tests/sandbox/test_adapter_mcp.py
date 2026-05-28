@@ -1,4 +1,4 @@
-"""mutagent.sandbox._adapter_mcp 单元测试。
+"""mutagent.sandbox._mcp_impl 单元测试。
 
 覆盖:
 - _extract_content 各分支（isError / 单 text JSON / 单 text 非 JSON / 多 text / 无 text）
@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
+import threading
 from typing import cast
 
 import mutobj
+import httpx
 import pytest
 
-from mutagent.sandbox import _mcp_impl as _adapter_mcp
+from mutagent.sandbox import _mcp_impl
 from mutagent.sandbox._mcp_impl import (
     HTTPMCPClient,
     MCPConnection,
@@ -346,8 +349,6 @@ class TestToolFuncCrossThread:
         修复后：tool_func 走 run_coroutine_threadsafe(main_loop)，在原 loop 执行。
         验证：client.call_tool 收到的 loop 必须是 setup 时的 main_loop。
         """
-        import threading
-
         client = _BridgeClient(
             tools=[{"name": "echo", "description": "", "inputSchema": {}}],
             call_tool_result={"content": [{"type": "text", "text": "ok"}]},
@@ -434,29 +435,24 @@ class TestIsTransportError:
         assert _is_transport_error(EOFError()) is True
 
     def test_httpx_connect_error(self):
-        import httpx
         assert _is_transport_error(httpx.ConnectError("x")) is True
 
     def test_httpx_read_error(self):
-        import httpx
         assert _is_transport_error(httpx.ReadError("x")) is True
 
     def test_httpx_status_404_is_transport(self):
-        import httpx
         req = httpx.Request("POST", "http://x/")
         resp = httpx.Response(404, request=req)
         exc = httpx.HTTPStatusError("not found", request=req, response=resp)
         assert _is_transport_error(exc) is True
 
     def test_httpx_status_410_is_transport(self):
-        import httpx
         req = httpx.Request("POST", "http://x/")
         resp = httpx.Response(410, request=req)
         exc = httpx.HTTPStatusError("gone", request=req, response=resp)
         assert _is_transport_error(exc) is True
 
     def test_httpx_status_500_is_not_transport(self):
-        import httpx
         req = httpx.Request("POST", "http://x/")
         resp = httpx.Response(500, request=req)
         exc = httpx.HTTPStatusError("oops", request=req, response=resp)
@@ -905,7 +901,6 @@ class TestStdioEnvPassthrough:
     @pytest.mark.asyncio
     async def test_make_client_forwards_env_to_stdio(self, monkeypatch):
         """make_client 把 server_config['env'] 传给 StdioMCPClient.__init__。"""
-        from mutagent.sandbox._mcp_impl import make_client
 
         captured: dict = {}
 
@@ -926,7 +921,6 @@ class TestStdioEnvPassthrough:
     @pytest.mark.asyncio
     async def test_make_client_omits_env_when_missing(self, monkeypatch):
         """无 env 字段时传 None，保持子进程继承父 env。"""
-        from mutagent.sandbox._mcp_impl import make_client
 
         captured: dict = {}
 
@@ -943,9 +937,6 @@ class TestStdioEnvPassthrough:
     @pytest.mark.asyncio
     async def test_stdio_popen_receives_merged_env(self, monkeypatch):
         """StdioMCPClient.connect 把 os.environ | env 合并后传 Popen.env。"""
-        import os
-        from mutagent.sandbox import _mcp_impl as adapter
-
         captured: dict = {}
 
         class _FakeProc:
@@ -969,14 +960,14 @@ class TestStdioEnvPassthrough:
         def _fake_send_notification(self, method, params):
             return None
 
-        monkeypatch.setattr(adapter.subprocess, "Popen", _FakeProc)
-        monkeypatch.setattr(adapter.StdioMCPClient, "_request", _fake_request)
-        monkeypatch.setattr(adapter.StdioMCPClient, "_send_notification",
+        monkeypatch.setattr(_mcp_impl.subprocess, "Popen", _FakeProc)
+        monkeypatch.setattr(_mcp_impl.StdioMCPClient, "_request", _fake_request)
+        monkeypatch.setattr(_mcp_impl.StdioMCPClient, "_send_notification",
                             _fake_send_notification)
 
         os.environ["__MCP_TEST_BASE__"] = "base"
         try:
-            client = adapter.StdioMCPClient(
+            client = _mcp_impl.StdioMCPClient(
                 "echo", env={"X": "1", "Y": "2"})
             await client.connect()
         finally:
@@ -992,7 +983,6 @@ class TestStdioEnvPassthrough:
     @pytest.mark.asyncio
     async def test_stdio_popen_env_none_when_no_env_config(self, monkeypatch):
         """env 配置缺省 → Popen 收到 env=None（继承父进程）。"""
-        from mutagent.sandbox import _mcp_impl as adapter
 
         captured: dict = {}
 
@@ -1015,12 +1005,12 @@ class TestStdioEnvPassthrough:
         def _fake_send_notification(self, method, params):
             return None
 
-        monkeypatch.setattr(adapter.subprocess, "Popen", _FakeProc)
-        monkeypatch.setattr(adapter.StdioMCPClient, "_request", _fake_request)
-        monkeypatch.setattr(adapter.StdioMCPClient, "_send_notification",
+        monkeypatch.setattr(_mcp_impl.subprocess, "Popen", _FakeProc)
+        monkeypatch.setattr(_mcp_impl.StdioMCPClient, "_request", _fake_request)
+        monkeypatch.setattr(_mcp_impl.StdioMCPClient, "_send_notification",
                             _fake_send_notification)
 
-        client = adapter.StdioMCPClient("echo")
+        client = _mcp_impl.StdioMCPClient("echo")
         await client.connect()
         assert captured["kwargs"]["env"] is None
 
@@ -1031,7 +1021,6 @@ class TestListToolsMetadata:
     @pytest.mark.asyncio
     async def test_list_tools_metadata_returns_schema(self, monkeypatch):
         """list_tools_metadata 应返回 name/description/input_schema/source_namespace。"""
-        from mutagent.sandbox._mcp_impl import MCPConnection
 
         # mock 一个 client，返回带 inputSchema 的 tools
         class _FakeClient:
@@ -1095,7 +1084,6 @@ class TestListToolsMetadata:
     @pytest.mark.asyncio
     async def test_list_tools_metadata_empty_when_disconnected(self):
         """未连接时返回空列表。"""
-        from mutagent.sandbox._mcp_impl import MCPConnection
         loop = asyncio.get_running_loop()
         conn = MCPConnection("fs", {"transport": "stdio", "command": "x"})
         # 还未 reconnect
@@ -1112,10 +1100,6 @@ class TestMakeToolFuncSignature:
     def _make_func(self, tool_name: str, schema: dict, *,
                     call_result: object = "ok"):
         """构造 tool_func，不真启事件循环（把 call_with_retry 替换成 stub）。"""
-        import inspect as _inspect
-
-        from mutagent.sandbox import _mcp_impl
-
         # 伪造 MCPConnection：_make_tool_func 只在调用时用到 conn._sandbox._async_loop /
         # conn.client / conn.ensure_connected；本组测试不触发调用分支，所以
         # 可以直接传最小对象。
@@ -1130,9 +1114,9 @@ class TestMakeToolFuncSignature:
             def mark_disconnected(self, *a, **kw): return None
             async def reconnect(self): return None
 
-        fn = _adapter_mcp._make_tool_func(
+        fn = _mcp_impl._make_tool_func(
             _DummyConn(), tool_name, "desc", schema)  # type: ignore[arg-type]
-        return fn, _inspect
+        return fn, inspect
 
     def test_required_only_positional_signature(self):
         schema = {
@@ -1140,10 +1124,10 @@ class TestMakeToolFuncSignature:
             "properties": {"path": {"type": "string"}},
             "required": ["path"],
         }
-        fn, _inspect = self._make_func("read_file", schema)
-        sig = _inspect.signature(fn)
+        fn, inspect = self._make_func("read_file", schema)
+        sig = inspect.signature(fn)
         assert list(sig.parameters) == ["path"]
-        assert sig.parameters["path"].kind == _inspect.Parameter.POSITIONAL_OR_KEYWORD
+        assert sig.parameters["path"].kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
         assert sig.parameters["path"].annotation == "str"
         # help 看到的是单份真签名（不依赖 doc 拼接）
         assert "(**kwargs" not in str(sig)
@@ -1158,8 +1142,8 @@ class TestMakeToolFuncSignature:
             },
             "required": ["path"],
         }
-        fn, _inspect = self._make_func("read", schema)
-        sig = _inspect.signature(fn)
+        fn, inspect = self._make_func("read", schema)
+        sig = inspect.signature(fn)
         assert list(sig.parameters) == ["path", "offset", "limit"]
         assert sig.parameters["offset"].default == 0
         assert sig.parameters["limit"].default == 100
@@ -1174,10 +1158,10 @@ class TestMakeToolFuncSignature:
             "properties": {"path": {"type": "string"}},
             "required": ["path"],
         }
-        fn, _inspect = self._make_func("read", schema)
+        fn, inspect = self._make_func("read", schema)
         # sig.bind 层抛 TypeError；wrapper 内部用 bind,所以调用时也会抛。
         with pytest.raises(TypeError):
-            _inspect.signature(fn).bind(bogus=1)
+            inspect.signature(fn).bind(bogus=1)
 
     def test_malformed_schema_downgrades_to_keyword_only(self):
         # required 夹在 optional 后 → 降级为 kw-only（保证可构造）
@@ -1188,9 +1172,9 @@ class TestMakeToolFuncSignature:
             },
             "required": ["b"],
         }
-        fn, _inspect = self._make_func("weird", schema)
-        sig = _inspect.signature(fn)
-        assert sig.parameters["b"].kind == _inspect.Parameter.KEYWORD_ONLY
+        fn, inspect = self._make_func("weird", schema)
+        sig = inspect.signature(fn)
+        assert sig.parameters["b"].kind == inspect.Parameter.KEYWORD_ONLY
 
     def test_preserves_mcp_metadata_attributes(self):
         schema = {
@@ -1204,8 +1188,8 @@ class TestMakeToolFuncSignature:
         assert callable(getattr(fn, "_async_original"))
 
     def test_empty_schema_has_empty_signature(self):
-        fn, _inspect = self._make_func("ping", {"type": "object"})
-        sig = _inspect.signature(fn)
+        fn, inspect = self._make_func("ping", {"type": "object"})
+        sig = inspect.signature(fn)
         assert list(sig.parameters) == []
 
     def test_optional_no_default_signature_uses_omitted_default(self):
@@ -1218,8 +1202,8 @@ class TestMakeToolFuncSignature:
             },
             "required": [],
         }
-        fn, _inspect = self._make_func("browser_console_messages", schema)
-        sig = _inspect.signature(fn)
+        fn, inspect = self._make_func("browser_console_messages", schema)
+        sig = inspect.signature(fn)
         assert sig.parameters["all"].default is _MISSING
         assert sig.parameters["filename"].default is _MISSING
         assert str(sig) == (
@@ -1228,7 +1212,6 @@ class TestMakeToolFuncSignature:
         )
 
     def test_browser_console_messages_filters_omitted_params(self, monkeypatch):
-        from mutagent.sandbox import _mcp_impl
 
         class _DoneFuture:
             def __init__(self, value):
@@ -1241,7 +1224,7 @@ class TestMakeToolFuncSignature:
             return _DoneFuture(asyncio.run(coro))
 
         monkeypatch.setattr(
-            _adapter_mcp.asyncio, "run_coroutine_threadsafe", _run_now)
+            _mcp_impl.asyncio, "run_coroutine_threadsafe", _run_now)
 
         class _DummyClient:
             def __init__(self):
@@ -1266,7 +1249,7 @@ class TestMakeToolFuncSignature:
                 return None
 
         conn = _DummyConn()
-        fn = _adapter_mcp._make_tool_func(
+        fn = _mcp_impl._make_tool_func(
             conn,
             "browser_console_messages",
             "desc",
@@ -1289,7 +1272,6 @@ class TestMakeToolFuncSignature:
         ]
 
     def test_browser_click_accepts_required_only_call(self, monkeypatch):
-        from mutagent.sandbox import _mcp_impl
 
         class _DoneFuture:
             def __init__(self, value):
@@ -1302,7 +1284,7 @@ class TestMakeToolFuncSignature:
             return _DoneFuture(asyncio.run(coro))
 
         monkeypatch.setattr(
-            _adapter_mcp.asyncio, "run_coroutine_threadsafe", _run_now)
+            _mcp_impl.asyncio, "run_coroutine_threadsafe", _run_now)
 
         class _DummyClient:
             def __init__(self):
@@ -1327,7 +1309,7 @@ class TestMakeToolFuncSignature:
                 return None
 
         conn = _DummyConn()
-        fn = _adapter_mcp._make_tool_func(
+        fn = _mcp_impl._make_tool_func(
             conn,
             "browser_click",
             "desc",
@@ -1353,7 +1335,6 @@ class TestMakeToolFuncSignature:
         assert conn.client.call_log == [("browser_click", {"target": "test"})]
 
     def test_browser_wait_for_accepts_all_params_omitted(self, monkeypatch):
-        from mutagent.sandbox import _mcp_impl
 
         class _DoneFuture:
             def __init__(self, value):
@@ -1366,7 +1347,7 @@ class TestMakeToolFuncSignature:
             return _DoneFuture(asyncio.run(coro))
 
         monkeypatch.setattr(
-            _adapter_mcp.asyncio, "run_coroutine_threadsafe", _run_now)
+            _mcp_impl.asyncio, "run_coroutine_threadsafe", _run_now)
 
         class _DummyClient:
             def __init__(self):
@@ -1391,7 +1372,7 @@ class TestMakeToolFuncSignature:
                 return None
 
         conn = _DummyConn()
-        fn = _adapter_mcp._make_tool_func(
+        fn = _mcp_impl._make_tool_func(
             conn,
             "browser_wait_for",
             "desc",

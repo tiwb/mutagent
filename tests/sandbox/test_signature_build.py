@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import inspect
+import operator
 
 import pytest
 
@@ -458,7 +459,6 @@ class TestDisplayFormatting:
             __signature__ = property(lambda self: 1 / 0)
 
         # builtins 不可 inspect 的例子
-        import operator
         # operator.add 的 signature 不一定报错，改用一个手造逆向
         class _Bad:
             def __call__(self):
