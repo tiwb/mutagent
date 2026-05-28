@@ -205,6 +205,7 @@ class TestResolveModel:
         assert model is not None
         assert model["model_id"] == "claude-sonnet-4"
         assert model["type"] == "CopilotProvider"
+        assert model["provider_name"] == "copilot"
 
     def test_dict_form_value_no_match(self):
         config = _make_config({
@@ -236,6 +237,7 @@ class TestResolveModel:
         model = config.resolve_model("claude-sonnet-4")
         assert model is not None
         assert model["type"] == "CopilotProvider"
+        assert model["provider_name"] == "copilot"
 
     def test_default_model_from_config(self):
         config = _make_config({

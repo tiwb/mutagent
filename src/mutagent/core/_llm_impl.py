@@ -73,6 +73,7 @@ def _get_provider_aliases() -> dict[str, type]:
     aliases: dict[str, type] = {}
     # 确保内置 provider 已注册
     from mutagent.core import _llm_impl_anthropic  # noqa: F401
+    from mutagent.core import _llm_impl_copilot  # noqa: F401
     from mutagent.core import _llm_impl_openai  # noqa: F401
     for sub_cls in discover_subclasses(LLMApiClient):
         if sub_cls is LLMApiClient:
@@ -80,9 +81,44 @@ def _get_provider_aliases() -> dict[str, type]:
         api_type = sub_cls.api_type
         if api_type:
             aliases[api_type.lower()] = sub_cls
+            aliases[f"{api_type.lower()}provider"] = sub_cls
+            aliases[f"{api_type.lower()}apiclient"] = sub_cls
+        aliases[sub_cls.__name__.lower()] = sub_cls
     _provider_aliases = aliases
     _provider_aliases_gen = gen
     return aliases
+
+
+def _iter_provider_lookup_keys(name: str) -> list[str]:
+    raw = name.strip()
+    if not raw:
+        return []
+
+    keys = [raw.lower()]
+    if "." in raw:
+        keys.append(raw.rsplit(".", 1)[-1].lower())
+
+    index = 0
+    while index < len(keys):
+        key = keys[index]
+        if key.endswith("provider"):
+            stripped = key[:-8]
+            if stripped:
+                keys.append(stripped)
+        if key.endswith("apiclient"):
+            stripped = key[:-9]
+            if stripped:
+                keys.append(stripped)
+        index += 1
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for key in keys:
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(key)
+    return deduped
 
 
 def _resolve_provider(name: str) -> type:
@@ -92,11 +128,11 @@ def _resolve_provider(name: str) -> type:
     空字符串默认为 AnthropicApiClient。
     """
     aliases = _get_provider_aliases()
-    key = name.lower()
-    if key and key in aliases:
-        return aliases[key]
     if not name:
         return aliases.get("anthropic", LLMApiClient)
+    for key in _iter_provider_lookup_keys(name):
+        if key in aliases:
+            return aliases[key]
     raise ValueError(f"Unknown provider type '{name}'")
 
 

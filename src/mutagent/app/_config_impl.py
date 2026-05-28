@@ -181,17 +181,19 @@ def config_resolve_model(self: Config, name: str | None = None) -> dict | None:
     providers = self.get("providers", default={})
     if not providers:
         return None
-    for _prov_name, prov_conf in providers.items():
+    for prov_name, prov_conf in providers.items():
         models = prov_conf.get("models", [])
         if isinstance(models, list):
             if name in models:
                 result = {k: v for k, v in prov_conf.items() if k != "models"}
                 result["model_id"] = name
+                result["provider_name"] = prov_name
                 return result
         elif isinstance(models, dict):
             if name in models:
                 model_val = models[name]
                 result = {k: v for k, v in prov_conf.items() if k != "models"}
+                result["provider_name"] = prov_name
                 if isinstance(model_val, str):
                     result["model_id"] = model_val
                 elif isinstance(model_val, dict):

@@ -33,7 +33,7 @@ class LLMApiClient(Declaration):
     def from_spec(spec: dict) -> LLMApiClient:
         """从模型 spec 创建 provider 实例。
 
-        支持 api_type 短名（``"Anthropic"`` / ``"OpenAI"``）。
+        支持 api_type 短名（``"Anthropic"`` / ``"OpenAI"`` / ``"Copilot"``）。
         不指定时默认使用 AnthropicApiClient。
         """
         ...
