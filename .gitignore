@@ -32,6 +32,9 @@ env/
 Thumbs.db
 nul
 
+# Package manager
+uv.lock
+
 # AI
 /CLAUDE.md
 /.claude
