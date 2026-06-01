@@ -6,7 +6,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mutagent.core.messages import Message, Response, StreamEvent, TextBlock, ToolUseBlock, ToolSchema
+from mutagent.core.messages import (
+    Message,
+    Response,
+    StreamEvent,
+    TextBlock,
+    ToolResultBlock,
+    ToolSchema,
+    ToolUseBlock,
+)
 from mutagent.core._llm_impl_anthropic import (
     AnthropicApiClient,
     _messages_to_claude,
@@ -65,11 +73,16 @@ class TestMessagesToClaude:
         assert len(content) == 1
         assert content[0]["type"] == "tool_use"
 
-    def test_assistant_with_completed_tool_calls(self):
-        """Completed ToolUseBlock generates tool_result in a user message."""
-        tc = ToolUseBlock(id="tc_1", name="run_code", input={"code": "1+1"},
-                          status="done", result="42")
-        msgs = [Message(role="assistant", blocks=[tc])]
+    def test_user_with_tool_result(self):
+        """User ToolResultBlock becomes tool_result content."""
+        msgs = [
+            Message(role="assistant", blocks=[
+                ToolUseBlock(id="tc_1", name="run_code", input={"code": "1+1"}),
+            ]),
+            Message(role="user", blocks=[
+                ToolResultBlock(tool_use_id="tc_1", tool_name="run_code", content="42"),
+            ]),
+        ]
         result = _messages_to_claude(msgs)
 
         assert len(result) == 2
@@ -84,14 +97,18 @@ class TestMessagesToClaude:
         }
 
     def test_tool_result_with_error(self):
-        tc = ToolUseBlock(id="tc_1", name="run_code", input={},
-                          status="done", result="Error: not found", is_error=True)
-        msgs = [Message(role="assistant", blocks=[tc])]
+        msgs = [Message(role="user", blocks=[
+            ToolResultBlock(
+                tool_use_id="tc_1",
+                tool_name="run_code",
+                content="Error: not found",
+                is_error=True,
+            ),
+        ])]
         result = _messages_to_claude(msgs)
 
-        # assistant message + user tool_result message
-        assert len(result) == 2
-        block = result[1]["content"][0]
+        assert len(result) == 1
+        block = result[0]["content"][0]
         assert block["is_error"] is True
 
     def test_multi_turn_conversation(self):

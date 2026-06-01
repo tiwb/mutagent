@@ -10,7 +10,7 @@ from typing import Any, Callable
 import mutobj
 from mutio.schema.docstring import extract_description, parse_google_args
 from mutio.schema.jsonschema import annotation_to_json_schema
-from .messages import ToolSchema, ToolUseBlock
+from .messages import ToolResultBlock, ToolSchema, ToolUseBlock
 from .tools import Toolkit, ToolSet
 
 logger = logging.getLogger(__name__)
@@ -446,37 +446,51 @@ def tool_set_get_tools(self: ToolSet) -> list[ToolSchema]:
 
 
 @mutobj.impl(ToolSet.dispatch)
-async def tool_set_dispatch(self: ToolSet, tool_call: ToolUseBlock) -> None:
-    """Dispatch a tool call, updating the ToolUseBlock in-place."""
+async def tool_set_dispatch(
+    self: ToolSet, tool_call: ToolUseBlock
+) -> ToolResultBlock:
+    """Dispatch a tool call and return its result block."""
     if self.auto_discover:
         _refresh_discovered(self)
     all_entries = _all_entries(self)
     entry = all_entries.get(tool_call.name)
     if entry is None:
-        tool_call.status = "done"
-        tool_call.result = f"Unknown tool: {tool_call.name}"
-        tool_call.is_error = True
-        return
+        return ToolResultBlock(
+            tool_use_id=tool_call.id,
+            tool_name=tool_call.name,
+            content=f"Unknown tool: {tool_call.name}",
+            is_error=True,
+        )
 
     # 跟踪当前 tool_call（供 UIToolkit 等使用）
     object.__setattr__(self, '_current_tool_call', tool_call)
+    duration = 0.0
+    started_at = asyncio.get_running_loop().time()
     try:
         fn = entry.callable
         if inspect.iscoroutinefunction(fn):
             result = await fn(**tool_call.input)
         else:
             result = await asyncio.to_thread(fn, **tool_call.input)
-        tool_call.status = "done"
-        tool_call.result = str(result)
+        duration = asyncio.get_running_loop().time() - started_at
+        return ToolResultBlock(
+            tool_use_id=tool_call.id,
+            tool_name=tool_call.name,
+            content=str(result),
+            duration=duration,
+        )
     except asyncio.CancelledError:
-        tool_call.status = "done"
-        tool_call.result = "(cancelled)"
-        tool_call.is_error = False
         raise
     except Exception as e:
-        tool_call.status = "done"
-        tool_call.result = f"{type(e).__name__}: {e}"
-        tool_call.is_error = True
+        if duration == 0.0:
+            duration = asyncio.get_running_loop().time() - started_at
+        return ToolResultBlock(
+            tool_use_id=tool_call.id,
+            tool_name=tool_call.name,
+            content=f"{type(e).__name__}: {e}",
+            is_error=True,
+            duration=duration,
+        )
     finally:
         # 通用清理：如果工具执行期间创建了 UIContext，关闭它
         active_ui = getattr(self, '_active_ui', None)

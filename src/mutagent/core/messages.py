@@ -62,21 +62,24 @@ class ThinkingBlock(ContentBlock):
 
 @dataclass
 class ToolUseBlock(ContentBlock):
-    """工具调用块，合并调用请求与执行结果。
-
-    生命周期：请求(name/input) → 调度(status="running") → 完成(status="done")。
-    status: "" = 未调度, "running" = 执行中, "done" = 已完成。
-    """
+    """工具调用请求块。"""
 
     type: str = "tool_use"
     id: str = ""                # 工具调用标识（LLM 生成）
     name: str = ""
     input: dict[str, Any] = field(default_factory=dict)
-    # 执行状态与结果（框架执行后更新）
-    status: str = ""
-    result: str = ""
+
+
+@dataclass
+class ToolResultBlock(ContentBlock):
+    """工具执行结果块。"""
+
+    type: str = "tool_result"
+    tool_use_id: str = ""
+    tool_name: str = ""
+    content: str = ""
     is_error: bool = False
-    duration: float = 0         # 执行耗时（秒，0 = 未执行）
+    duration: float = 0.0
 
 
 @dataclass
@@ -161,7 +164,7 @@ class StreamEvent:
         "tool_use_delta"  - 增量 JSON（工具参数）
         "tool_use_end"    - LLM 完成工具调用块
         "tool_exec_start" - Agent 开始执行工具（tool_call = ToolUseBlock）
-        "tool_exec_end"   - Agent 完成执行工具（tool_call = 已更新的 ToolUseBlock）
+        "tool_exec_end"   - Agent 完成执行工具（tool_call = ToolResultBlock）
         "response_done"   - 一次 LLM 调用完成，携带 Response
         "turn_done"       - Agent 完成处理一条用户消息
         "error"           - 错误
@@ -169,11 +172,10 @@ class StreamEvent:
 
     type: str
     text: str = ""
-    tool_call: Optional[ToolUseBlock] = None
+    tool_call: Optional[ToolUseBlock | ToolResultBlock] = None
     tool_json_delta: str = ""
     response: Optional[Response] = None
     turn_id: str = ""
     error: str = ""
     timestamp: float = 0.0
-
 

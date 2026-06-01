@@ -8,7 +8,7 @@ import mutobj
 
 if TYPE_CHECKING:
     from .context import AgentContext
-    from .messages import StreamEvent, ToolUseBlock
+    from .messages import StreamEvent, ToolResultBlock, ToolUseBlock
     from .llm import LLMApiClient
     from .tools import ToolSet
 
@@ -37,8 +37,10 @@ class Agent(mutobj.Declaration):
     context: AgentContext
     session: Any  # 运行时由上层（如 mutbot）注入
 
-    async def handle_tool_calls(self, tool_calls: list[ToolUseBlock]) -> None:
-        """Execute tool calls, updating each ToolUseBlock in-place.
+    async def handle_tool_calls(
+        self, tool_calls: list[ToolUseBlock]
+    ) -> list[ToolResultBlock]:
+        """Execute tool calls and return their result blocks.
 
         Args:
             tool_calls: List of ToolUseBlock from the LLM response.

@@ -8,7 +8,7 @@ import mutobj
 
 if TYPE_CHECKING:
     from .agent import Agent
-    from .messages import ToolSchema, ToolUseBlock
+    from .messages import ToolResultBlock, ToolSchema, ToolUseBlock
 
 
 class ToolSet(mutobj.Declaration):
@@ -76,10 +76,8 @@ class ToolSet(mutobj.Declaration):
         """
         ...
 
-    async def dispatch(self, tool_call: ToolUseBlock) -> None:
-        """Dispatch a tool call, updating the ToolUseBlock in-place.
-
-        Sets status/result/is_error/duration on the block.
+    async def dispatch(self, tool_call: ToolUseBlock) -> ToolResultBlock:
+        """Dispatch a tool call and return a result block.
 
         Args:
             tool_call: The ToolUseBlock from the LLM.

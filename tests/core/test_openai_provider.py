@@ -6,7 +6,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mutagent.core.messages import Message, Response, StreamEvent, TextBlock, ToolUseBlock, ToolSchema
+from mutagent.core.messages import (
+    Message,
+    Response,
+    StreamEvent,
+    TextBlock,
+    ToolResultBlock,
+    ToolSchema,
+    ToolUseBlock,
+)
 from mutagent.core.llm import LLMApiClient
 from mutagent.core._llm_impl_openai import (
     OpenAIApiClient,
@@ -81,11 +89,20 @@ class TestMessagesToOpenAI:
         assert result[0]["tool_calls"][0]["id"] == "call_1"
         assert result[0]["tool_calls"][1]["id"] == "call_2"
 
-    def test_assistant_with_completed_tool_calls(self):
-        """Completed ToolUseBlock generates 'tool' role messages in OpenAI format."""
-        tc = ToolUseBlock(id="call_1", name="get_weather", input={"city": "Tokyo"},
-                          status="done", result="42")
-        msgs = [Message(role="assistant", blocks=[tc])]
+    def test_user_with_tool_result(self):
+        """User ToolResultBlock generates 'tool' role messages in OpenAI format."""
+        msgs = [
+            Message(role="assistant", blocks=[
+                ToolUseBlock(id="call_1", name="get_weather", input={"city": "Tokyo"}),
+            ]),
+            Message(role="user", blocks=[
+                ToolResultBlock(
+                    tool_use_id="call_1",
+                    tool_name="get_weather",
+                    content="42",
+                ),
+            ]),
+        ]
         result = _messages_to_openai(msgs)
 
         # assistant message + tool result message
@@ -97,13 +114,18 @@ class TestMessagesToOpenAI:
             "content": "42",
         }
 
-    def test_assistant_with_multiple_completed_tool_calls(self):
-        """Multiple completed ToolUseBlocks generate multiple 'tool' role messages."""
-        tc1 = ToolUseBlock(id="call_1", name="tool_a", input={},
-                           status="done", result="result_1")
-        tc2 = ToolUseBlock(id="call_2", name="tool_b", input={},
-                           status="done", result="result_2")
-        msgs = [Message(role="assistant", blocks=[tc1, tc2])]
+    def test_user_with_multiple_tool_results(self):
+        """Multiple ToolResultBlocks generate multiple 'tool' role messages."""
+        msgs = [
+            Message(role="assistant", blocks=[
+                ToolUseBlock(id="call_1", name="tool_a", input={}),
+                ToolUseBlock(id="call_2", name="tool_b", input={}),
+            ]),
+            Message(role="user", blocks=[
+                ToolResultBlock(tool_use_id="call_1", tool_name="tool_a", content="result_1"),
+                ToolResultBlock(tool_use_id="call_2", tool_name="tool_b", content="result_2"),
+            ]),
+        ]
         result = _messages_to_openai(msgs)
 
         # assistant message + 2 tool result messages

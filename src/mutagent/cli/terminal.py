@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+from pathlib import Path
 import queue
 
 import sys
@@ -20,12 +21,41 @@ from mutagent.cli.ansi import (
     bold_cyan, bold_red, dim, _format_tool_call, _format_tool_result,
     highlight_markdown_line,
 )
+from mutagent.core.messages import ToolResultBlock, ToolUseBlock
+from mutagent.core.session import AgentSession
 
 if TYPE_CHECKING:
     from mutagent.core.messages import StreamEvent
 
 
 logger = logging.getLogger(__name__)
+
+
+def _default_session_dir() -> Path:
+    return Path.home() / ".mutagent" / "sessions"
+
+
+def _build_agent_session(app: App, resume: str | None = None) -> AgentSession:
+    session = AgentSession()
+    session.start_new(
+        session_dir=_default_session_dir(),
+        cwd=str(Path.cwd()),
+        model=app.agent.model,
+    )
+    if resume:
+        session.resume(resume, app.agent.context)
+    object.__setattr__(app.agent, "session", session)
+    return session
+
+
+def _make_session_persist_callback(app: App, session: AgentSession):
+    def _persist(_event: StreamEvent) -> None:
+        try:
+            session.sync(app.agent.context)
+        except Exception:
+            logger.exception("Failed to persist session increment")
+
+    return _persist
 
 
 class TerminalRenderer:
@@ -35,18 +65,17 @@ class TerminalRenderer:
         """Render a single StreamEvent."""
         if event.type == "text_delta":
             print(highlight_markdown_line(event.text), end="", flush=True)
-        elif event.type == "tool_exec_start":
-            name = event.tool_call.name if event.tool_call else "?"
-            args = event.tool_call.input if event.tool_call else {}
+        elif event.type == "tool_exec_start" and isinstance(event.tool_call, ToolUseBlock):
+            name = event.tool_call.name
+            args = event.tool_call.input
             call_str = _format_tool_call(name, args)
             print(f"\n{dim(call_str)}", flush=True)
-        elif event.type == "tool_exec_end":
-            if event.tool_call:
-                is_error = event.tool_call.is_error
-                result_str = _format_tool_result(
-                    event.tool_call.result, is_error,
-                )
-                print(result_str, flush=True)
+        elif event.type == "tool_exec_end" and isinstance(event.tool_call, ToolResultBlock):
+            is_error = event.tool_call.is_error
+            result_str = _format_tool_result(
+                event.tool_call.content, is_error,
+            )
+            print(result_str, flush=True)
         elif event.type == "error":
             print(f"\n{bold_red('[Error: ' + event.error + ']')}",
                   file=sys.stderr, flush=True)
@@ -87,6 +116,10 @@ def add_terminal_subcommand(subparsers: Any) -> argparse.ArgumentParser:
         action="store_true",
         help="Force headless mode (ignored, no TUI)",
     )
+    parser.add_argument(
+        "--resume",
+        help="Resume a session by path or session id",
+    )
     return parser
 
 
@@ -95,6 +128,7 @@ def dispatch_terminal(parser: argparse.ArgumentParser, args: argparse.Namespace)
     app = App()
     app.load_config(args.config)
     app.setup_agent()
+    session = _build_agent_session(app, getattr(args, "resume", None))
     spec = app.config.resolve_model()
     print(f"mutagent ready  (model: {spec.get('model_id', '?') if spec else '?'})")
     print("Type your message. 'exit' or Ctrl+C to quit.\n")
@@ -117,6 +151,7 @@ def dispatch_terminal(parser: argparse.ArgumentParser, args: argparse.Namespace)
 
     # 订阅 agent 事件（线程安全的 queue.put）
     event_q: queue.Queue[StreamEvent] = queue.Queue()
+    app.agent.subscribe(_make_session_persist_callback(app, session))
     app.agent.subscribe(event_q.put)
 
     waiting_for_input = True  # True when blocked on read_input()
@@ -174,6 +209,10 @@ def dispatch_terminal(parser: argparse.ArgumentParser, args: argparse.Namespace)
 
     # 清理 sandbox + event loop
     sandbox = getattr(app, "sandbox", None)
+    try:
+        session.sync(app.agent.context)
+    except Exception:
+        logger.exception("Failed to persist final session state")
     if sandbox is not None:
         try:
             asyncio.run_coroutine_threadsafe(sandbox.close(), loop).result(timeout=5)

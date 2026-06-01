@@ -11,8 +11,13 @@ from uuid import uuid4
 import mutobj
 from .agent import Agent, CancelFn
 from .messages import (
-    Message, Response, StreamEvent, TextBlock, ToolUseBlock,
-    TurnEndBlock, TurnStartBlock,
+    Message,
+    Response,
+    StreamEvent,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    TurnStartBlock,
 )
 
 # ContextVar for tool log capture (activated per-tool-call during agent loop)
@@ -101,7 +106,6 @@ async def agent_run(
                 continue
 
             turn_id = turn_start.turn_id or _gen_id()
-            turn_start_time = time.monotonic()
 
             # 计算用户消息文本长度用于日志
             text_len = sum(len(b.text) for b in msg.blocks if isinstance(b, TextBlock))
@@ -203,6 +207,7 @@ async def agent_run(
 
                     # Execute tool calls
                     capture = _get_tool_capture_enabled(self)
+                    tool_results: list[ToolResultBlock] = []
                     for block in tool_calls:
                         logger.info("Executing tool: %s", block.name)
                         args_str = str(block.input)
@@ -210,30 +215,36 @@ async def agent_run(
                             args_str = args_str[:200] + f"...({len(args_str)} chars total)"
                         logger.debug("Tool args: %s", args_str)
 
-                        block.status = "running"
                         yield StreamEvent(type="tool_exec_start", tool_call=block, timestamp=time.time())
-
-                        t0 = time.monotonic()
                         if capture:
                             buf: list[str] = []
                             token = _tool_log_buffer.set(buf)
                             try:
-                                await self.tools.dispatch(block)
+                                result_block = await self.tools.dispatch(block)
                             finally:
                                 _tool_log_buffer.reset(token)
                             if buf:
-                                block.result += "\n\n[Tool Logs]\n" + "\n".join(buf)
+                                suffix = "\n\n[Tool Logs]\n" + "\n".join(buf)
+                                result_block.content += suffix
                         else:
-                            await self.tools.dispatch(block)
-
-                        block.duration = time.monotonic() - t0
+                            result_block = await self.tools.dispatch(block)
 
                         logger.info("Tool %s result: %s (%d chars)",
                                     block.name,
-                                    "error" if block.is_error else "ok",
-                                    len(block.result))
-                        logger.debug("Tool result content: %.200s", block.result)
-                        yield StreamEvent(type="tool_exec_end", tool_call=block, timestamp=time.time())
+                                    "error" if result_block.is_error else "ok",
+                                    len(result_block.content))
+                        logger.debug("Tool result content: %.200s", result_block.content)
+                        tool_results.append(result_block)
+                        yield StreamEvent(
+                            type="tool_exec_end",
+                            tool_call=result_block,
+                            timestamp=time.time(),
+                        )
+
+                    if tool_results:
+                        self.context.messages.append(
+                            Message(role="user", blocks=list(tool_results))
+                        )
 
                     # Natural checkpoint: check for pending user input
                     if check_pending and check_pending():
@@ -243,14 +254,6 @@ async def agent_run(
                     break
 
             # --- Turn 结束 ---
-            turn_duration = time.monotonic() - turn_start_time
-
-            # 追加 TurnEndBlock 到最后一条 assistant Message
-            if self.context.messages and self.context.messages[-1].role == "assistant":
-                self.context.messages[-1].blocks.append(
-                    TurnEndBlock(turn_id=turn_id, duration=turn_duration)
-                )
-
             yield StreamEvent(type="turn_done", turn_id=turn_id)
 
     finally:
@@ -261,15 +264,6 @@ async def agent_run(
                 role="assistant",
                 blocks=[TextBlock(text="".join(_partial_text) + "\n\n[interrupted]")],
             ))
-        # 标记未完成 ToolUseBlock（正常退出时全部 done，no-op）
-        if self.context.messages and self.context.messages[-1].role == "assistant":
-            for b in self.context.messages[-1].blocks:
-                if isinstance(b, ToolUseBlock) and b.status != "done":
-                    b.status = "done"
-                    b.result = "[interrupted]"
-                    b.is_error = True
-
-
 async def agent_step(
     self: Agent, stream: bool = True
 ) -> AsyncIterator[StreamEvent]:
@@ -286,11 +280,12 @@ async def agent_step(
 @mutobj.impl(Agent.handle_tool_calls)
 async def agent_handle_tool_calls(
     self: Agent, tool_calls: list[ToolUseBlock]
-) -> None:
-    """Dispatch tool calls through the tool set, updating blocks in-place."""
+) -> list[ToolResultBlock]:
+    """Dispatch tool calls through the tool set and return result blocks."""
+    results: list[ToolResultBlock] = []
     for block in tool_calls:
-        block.status = "running"
-        await self.tools.dispatch(block)
+        results.append(await self.tools.dispatch(block))
+    return results
 
 
 @mutobj.impl(Agent.subscribe)
@@ -395,6 +390,3 @@ def agent_cancel(self: Agent) -> bool:
     logger.info("Cancelling current submit task")
     task.cancel()
     return True
-
-
-

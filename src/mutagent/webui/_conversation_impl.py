@@ -8,7 +8,13 @@ import logging
 from typing import Any
 
 import mutobj
-from mutagent.core.messages import Message, StreamEvent, TextBlock
+from mutagent.core.messages import (
+    Message,
+    StreamEvent,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 from mutagent.core.llm import LLMApiClient
 from mutagent.webui.chat_input import ChatInput
 from mutagent.webui.conversation import Conversation
@@ -374,7 +380,7 @@ async def handle_agent_event(self: Conversation, event: StreamEvent) -> None:
         item = _ensure_current_assistant(self, event)
         item.text += event.text
         _touch_item(self, item.id)
-    elif event.type == "tool_exec_start" and event.tool_call is not None:
+    elif event.type == "tool_exec_start" and isinstance(event.tool_call, ToolUseBlock):
         logger.info("Tool execution started: %s", event.tool_call.name)
         tool_call = event.tool_call
         item_id = ext.tool_item_ids.get(tool_call.id)
@@ -398,14 +404,14 @@ async def handle_agent_event(self: Conversation, event: StreamEvent) -> None:
             tool_item.input_text = str(tool_call.input)
             _touch_item(self, item_id)
         self.status = "tool_calling"
-    elif event.type == "tool_exec_end" and event.tool_call is not None:
-        logger.info("Tool execution finished: %s", event.tool_call.name)
+    elif event.type == "tool_exec_end" and isinstance(event.tool_call, ToolResultBlock):
+        logger.info("Tool execution finished: %s", event.tool_call.tool_name)
         tool_call = event.tool_call
-        item_id = ext.tool_item_ids.get(tool_call.id)
+        item_id = ext.tool_item_ids.get(tool_call.tool_use_id)
         tool_item = _find_item(self, item_id) if item_id else None
         if isinstance(tool_item, ToolCallItem):
             tool_item.status = "error" if tool_call.is_error else "success"
-            tool_item.result_text = tool_call.result
+            tool_item.result_text = tool_call.content
             tool_item.duration = tool_call.duration
             tool_item.is_error = tool_call.is_error
             _touch_item(self, tool_item.id)

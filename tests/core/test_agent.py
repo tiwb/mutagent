@@ -14,8 +14,8 @@ from mutagent.core.messages import (
     Response,
     StreamEvent,
     TextBlock,
+    ToolResultBlock,
     ToolUseBlock,
-    TurnEndBlock,
 )
 from mutagent.core.tools import ToolSet, Toolkit
 
@@ -228,8 +228,8 @@ class TestToolCalls:
             "response_done", "tool_exec_start", "tool_exec_end",
             "response_start", "text_delta", "response_done", "turn_done",
         ]
-        # user + assistant(tool) + assistant(final)
-        assert len(agent.context.messages) == 3
+        # user + assistant(tool) + user(tool_result) + assistant(final)
+        assert len(agent.context.messages) == 4
 
     async def test_multiple_tool_calls_in_one_response(self, agent):
         """Agent handles multiple tool calls in a single response."""
@@ -268,7 +268,10 @@ class TestToolCalls:
         assert len(exec_ends) == 2
         tc_blocks = [b for b in agent.context.messages[1].blocks if isinstance(b, ToolUseBlock)]
         assert len(tc_blocks) == 2
-        assert all(b.status == "done" for b in tc_blocks)
+        result_blocks = [
+            b for b in agent.context.messages[2].blocks if isinstance(b, ToolResultBlock)
+        ]
+        assert len(result_blocks) == 2
 
     async def test_tool_call_without_text(self, agent):
         """Tool call response with no text block."""
@@ -464,10 +467,10 @@ class TestHandleToolCalls:
         blocks = [
             ToolUseBlock(id="tc_1", name="Test-echo", input={"text": "direct"}),
         ]
-        await agent.handle_tool_calls(blocks)
+        results = await agent.handle_tool_calls(blocks)
 
-        assert blocks[0].status == "done"
-        assert blocks[0].result == "echo: direct"
+        assert results[0].tool_use_id == "tc_1"
+        assert results[0].content == "echo: direct"
 
     async def test_dispatches_multiple_blocks(self, agent):
         """Multiple tool blocks all get dispatched."""
@@ -475,23 +478,20 @@ class TestHandleToolCalls:
             ToolUseBlock(id="tc_1", name="Test-echo", input={"text": "a"}),
             ToolUseBlock(id="tc_2", name="Test-inspect", input={"target": "mod"}),
         ]
-        await agent.handle_tool_calls(blocks)
+        results = await agent.handle_tool_calls(blocks)
 
-        assert blocks[0].status == "done"
-        assert blocks[0].result == "echo: a"
-        assert blocks[1].status == "done"
-        assert "OK" in blocks[1].result
+        assert results[0].content == "echo: a"
+        assert "OK" in results[1].content
 
     async def test_unknown_tool_sets_error_flag(self, agent):
         """Unknown tool name results in done status with is_error flag."""
         blocks = [
             ToolUseBlock(id="tc_1", name="Test-nonexistent", input={}),
         ]
-        await agent.handle_tool_calls(blocks)
+        results = await agent.handle_tool_calls(blocks)
 
-        assert blocks[0].status == "done"
-        assert blocks[0].is_error is True
-        assert "Unknown" in blocks[0].result
+        assert results[0].is_error is True
+        assert "Unknown" in results[0].content
 
 
 # ---------------------------------------------------------------------------
@@ -588,8 +588,8 @@ class TestEdgeCases:
         types = [e.type for e in events]
         assert "tool_exec_start" in types
         assert types[-1] == "turn_done"
-        # user + assistant(tool) + assistant(final)
-        assert len(agent.context.messages) == 3
+        # user + assistant(tool) + user(tool_result) + assistant(final)
+        assert len(agent.context.messages) == 4
 
     async def test_end_turn_without_tool_calls_ends_normally(self, agent):
         """stop_reason=end_turn, no tool_calls → normal end."""
@@ -605,8 +605,8 @@ class TestEdgeCases:
         assert types == ["response_start", "text_delta", "response_done", "turn_done"]
         assert len(agent.context.messages) == 2
 
-    async def test_turn_end_block_appended(self, agent):
-        """TurnEndBlock is appended to the last assistant message."""
+    async def test_turn_done_does_not_append_turn_block(self, agent):
+        """turn_done 由 runtime 事件表达，不修改 assistant transcript。"""
         response = _make_response("Done.")
         async def mock_send(messages, tools, prompts=None, stream=True):
             yield StreamEvent(type="text_delta", text="Done.")
@@ -617,5 +617,5 @@ class TestEdgeCases:
         await _collect_events(agent)
         last_msg = agent.context.messages[-1]
         assert last_msg.role == "assistant"
-        turn_end_blocks = [b for b in last_msg.blocks if isinstance(b, TurnEndBlock)]
-        assert len(turn_end_blocks) == 1
+        assert all(not isinstance(b, ToolResultBlock) for b in last_msg.blocks)
+        assert len(last_msg.blocks) == 1

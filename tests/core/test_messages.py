@@ -9,6 +9,7 @@ from mutagent.core.messages import (
     TextBlock,
     ThinkingBlock,
     ToolSchema,
+    ToolResultBlock,
     ToolUseBlock,
 )
 
@@ -50,20 +51,19 @@ class TestContentBlocks:
         b = ToolUseBlock(id="tc_1", name="search", input={"q": "test"})
         assert b.type == "tool_use"
         assert b.id == "tc_1"
-        assert b.status == ""
-        assert b.result == ""
-        assert b.is_error is False
-        assert b.duration == 0
 
-    def test_tool_use_block_lifecycle(self):
-        b = ToolUseBlock(id="tc_1", name="search", input={"q": "test"})
-        b.status = "running"
-        assert b.status == "running"
-        b.status = "done"
-        b.result = "found it"
-        b.duration = 0.5
-        assert b.status == "done"
-        assert b.result == "found it"
+    def test_tool_result_block(self):
+        b = ToolResultBlock(
+            tool_use_id="tc_1",
+            tool_name="search",
+            content="found it",
+            duration=0.5,
+        )
+        assert b.type == "tool_result"
+        assert b.tool_use_id == "tc_1"
+        assert b.content == "found it"
+        assert b.is_error is False
+        assert b.duration == 0.5
 
 
 class TestMessage:

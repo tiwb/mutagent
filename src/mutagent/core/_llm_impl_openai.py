@@ -15,6 +15,7 @@ from .messages import (
     Response,
     StreamEvent,
     TextBlock,
+    ToolResultBlock,
     ToolSchema,
     ToolUseBlock,
 )
@@ -94,7 +95,7 @@ def _messages_to_openai(messages: list[Message]) -> list[dict[str, Any]]:
 
     处理 blocks 模型：
     - assistant 消息中 ToolUseBlock → tool_calls 字段
-    - 已完成的 ToolUseBlock → 生成 role:"tool" 结果消息
+    - user 消息中 ToolResultBlock → 生成 role:"tool" 结果消息
     - ThinkingBlock 忽略
     """
     result: list[dict[str, Any]] = []
@@ -103,7 +104,6 @@ def _messages_to_openai(messages: list[Message]) -> list[dict[str, Any]]:
             # 构建 assistant 消息
             content_parts: list[str] = []
             tool_calls_list: list[dict[str, Any]] = []
-            tool_results: list[dict[str, Any]] = []
 
             for block in msg.blocks:
                 if isinstance(block, TextBlock) and block.text:
@@ -117,12 +117,6 @@ def _messages_to_openai(messages: list[Message]) -> list[dict[str, Any]]:
                             "arguments": json.dumps(block.input),
                         },
                     })
-                    if block.status == "done":
-                        tool_results.append({
-                            "role": "tool",
-                            "tool_call_id": block.id,
-                            "content": block.result,
-                        })
                 # ThinkingBlock, ImageBlock 等 → 忽略
 
             entry: dict[str, Any] = {"role": "assistant"}
@@ -131,13 +125,11 @@ def _messages_to_openai(messages: list[Message]) -> list[dict[str, Any]]:
             if tool_calls_list:
                 entry["tool_calls"] = tool_calls_list
             result.append(entry)
-
-            # 追加 tool results
-            result.extend(tool_results)
         else:
-            # user 消息
+            # user / system 消息
             content_parts = []
             image_parts: list[dict[str, Any]] = []
+            tool_results: list[dict[str, Any]] = []
             for block in msg.blocks:
                 if isinstance(block, TextBlock) and block.text:
                     content_parts.append(block.text)
@@ -153,6 +145,12 @@ def _messages_to_openai(messages: list[Message]) -> list[dict[str, Any]]:
                             "type": "image_url",
                             "image_url": {"url": data_uri},
                         })
+                elif isinstance(block, ToolResultBlock):
+                    tool_results.append({
+                        "role": "tool",
+                        "tool_call_id": block.tool_use_id,
+                        "content": block.content,
+                    })
 
             if image_parts:
                 # 多模态：content 是 array
@@ -161,8 +159,10 @@ def _messages_to_openai(messages: list[Message]) -> list[dict[str, Any]]:
                     parts.append({"type": "text", "text": "\n".join(content_parts)})
                 parts.extend(image_parts)
                 result.append({"role": msg.role, "content": parts})
-            else:
+            elif content_parts:
                 result.append({"role": msg.role, "content": "\n".join(content_parts)})
+
+            result.extend(tool_results)
 
     return _merge_consecutive_openai(result)
 

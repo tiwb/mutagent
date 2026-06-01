@@ -145,9 +145,9 @@ class TestToolSetRemove:
     async def test_remove_then_dispatch_fails(self, populated_set):
         populated_set.remove("Mock-inspect")
         block = ToolUseBlock(id="tc_1", name="Mock-inspect", input={})
-        await populated_set.dispatch(block)
-        assert block.is_error
-        assert "Unknown tool" in block.result
+        result = await populated_set.dispatch(block)
+        assert result.is_error
+        assert "Unknown tool" in result.content
 
 
 # ---------------------------------------------------------------------------
@@ -189,36 +189,33 @@ class TestToolSetDispatch:
             id="tc_1", name="Mock-inspect",
             input={"module_path": "mutagent"},
         )
-        await tool_set.dispatch(block)
-        assert not block.is_error
-        assert block.status == "done"
-        assert "mutagent" in block.result
+        result = await tool_set.dispatch(block)
+        assert not result.is_error
+        assert result.tool_use_id == "tc_1"
+        assert "mutagent" in result.content
 
     async def test_dispatch_define(self, tool_set):
         block = ToolUseBlock(
             id="tc_2", name="Mock-define",
             input={"module_path": "test.mod", "source": "x = 42\n"},
         )
-        await tool_set.dispatch(block)
-        assert not block.is_error
-        assert block.status == "done"
-        assert "OK" in block.result
+        result = await tool_set.dispatch(block)
+        assert not result.is_error
+        assert "OK" in result.content
 
     async def test_dispatch_unknown_tool(self, tool_set):
         block = ToolUseBlock(id="tc_3", name="nonexistent_tool", input={})
-        await tool_set.dispatch(block)
-        assert block.is_error
-        assert block.status == "done"
-        assert "Unknown tool" in block.result
+        result = await tool_set.dispatch(block)
+        assert result.is_error
+        assert "Unknown tool" in result.content
 
     async def test_dispatch_with_error(self, tool_set):
         block = ToolUseBlock(
             id="tc_4", name="Mock-save",
             input={"module_path": "nonexistent.mod"},
         )
-        await tool_set.dispatch(block)
-        assert block.status == "done"
-        assert "Error" in block.result
+        result = await tool_set.dispatch(block)
+        assert "Error" in result.content
 
     async def test_dispatch_async_method(self, tool_set):
         """Async Toolkit methods are properly awaited."""
@@ -236,10 +233,9 @@ class TestToolSetDispatch:
             id="tc_async", name="Async-fetch",
             input={"url": "https://example.com"},
         )
-        await tool_set.dispatch(block)
-        assert not block.is_error
-        assert block.status == "done"
-        assert "fetched: https://example.com" in block.result
+        result = await tool_set.dispatch(block)
+        assert not result.is_error
+        assert "fetched: https://example.com" in result.content
 
 
 # ---------------------------------------------------------------------------
@@ -255,8 +251,8 @@ class TestToolSetEmptyState:
     async def test_empty_dispatch_fails(self):
         ts = ToolSet()
         block = ToolUseBlock(id="tc_1", name="anything", input={})
-        await ts.dispatch(block)
-        assert block.is_error
+        result = await ts.dispatch(block)
+        assert result.is_error
 
     def test_empty_query_returns_none(self):
         ts = ToolSet()
@@ -383,10 +379,9 @@ class TestToolNamingConvention:
             id="tc_1", name="Web-search",
             input={"query": "python"},
         )
-        await ts.dispatch(block)
-        assert not block.is_error
-        assert block.status == "done"
-        assert "found: python" in block.result
+        result = await ts.dispatch(block)
+        assert not result.is_error
+        assert "found: python" in result.content
 
     async def test_bare_method_name_dispatch_fails(self):
         """使用不带前缀的方法名 dispatch 会失败。"""
@@ -401,9 +396,9 @@ class TestToolNamingConvention:
             id="tc_1", name="search",
             input={"query": "test"},
         )
-        await ts.dispatch(block)
-        assert block.is_error
-        assert "Unknown tool" in block.result
+        result = await ts.dispatch(block)
+        assert result.is_error
+        assert "Unknown tool" in result.content
 
     def test_query_uses_prefixed_name(self):
         """query() 使用前缀工具名。"""
@@ -555,9 +550,9 @@ class TestDispatchStateTracking:
         ts.add(FailToolkit())
 
         block = ToolUseBlock(id="tc_fail", name="Fail-fail", input={})
-        await ts.dispatch(block)
+        result = await ts.dispatch(block)
 
-        assert block.is_error
+        assert result.is_error
         assert ts._current_tool_call is None
 
     async def test_active_ui_cleanup_on_dispatch_end(self):
@@ -578,9 +573,9 @@ class TestDispatchStateTracking:
         ts.add(UIToolkit())
 
         block = ToolUseBlock(id="tc_ui", name="UI-with_ui", input={})
-        await ts.dispatch(block)
+        result = await ts.dispatch(block)
 
-        assert not block.is_error
+        assert not result.is_error
         assert getattr(ts, '_active_ui', None) is None
 
     async def test_active_ui_cleanup_on_error(self):
@@ -603,9 +598,9 @@ class TestDispatchStateTracking:
         ts.add(UIToolkit())
 
         block = ToolUseBlock(id="tc_fail_ui", name="UI-fail_with_ui", input={})
-        await ts.dispatch(block)
+        result = await ts.dispatch(block)
 
-        assert block.is_error
+        assert result.is_error
         assert mock_ui.closed
         assert getattr(ts, '_active_ui', None) is None
 

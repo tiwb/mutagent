@@ -18,6 +18,7 @@ from .messages import (
     StreamEvent,
     TextBlock,
     ThinkingBlock,
+    ToolResultBlock,
     ToolSchema,
     ToolUseBlock,
 )
@@ -122,6 +123,15 @@ def _block_to_claude(block: ContentBlock) -> dict[str, Any] | None:
             "name": block.name,
             "input": block.input,
         }
+    if isinstance(block, ToolResultBlock):
+        result: dict[str, Any] = {
+            "type": "tool_result",
+            "tool_use_id": block.tool_use_id,
+            "content": block.content,
+        }
+        if block.is_error:
+            result["is_error"] = True
+        return result
     # 未知类型跳过
     return None
 
@@ -130,44 +140,21 @@ def _messages_to_claude(messages: list[Message]) -> list[dict[str, Any]]:
     """Convert internal Message list to Claude API messages format.
 
     处理 blocks 模型：
-    - assistant 消息中已完成的 ToolUseBlock → 拆分为 tool_use(assistant) + tool_result(user)
+    - assistant 消息中的 ToolUseBlock → tool_use content
+    - user 消息中的 ToolResultBlock → tool_result content
     - 保证 user/assistant 严格交替（通过 merge）
     """
     result: list[dict[str, Any]] = []
     for msg in messages:
         if msg.role == "assistant":
-            # 分离 assistant 内容块和已完成的 tool results
             assistant_content: list[dict[str, Any]] = []
-            tool_results: list[dict[str, Any]] = []
-
             for block in msg.blocks:
-                if isinstance(block, ToolUseBlock):
-                    # 工具调用 → assistant content
-                    assistant_content.append({
-                        "type": "tool_use",
-                        "id": block.id,
-                        "name": block.name,
-                        "input": block.input,
-                    })
-                    # 已完成的工具 → 生成 tool_result
-                    if block.status == "done":
-                        tr: dict[str, Any] = {
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": block.result,
-                        }
-                        if block.is_error:
-                            tr["is_error"] = True
-                        tool_results.append(tr)
-                else:
-                    api_block = _block_to_claude(block)
-                    if api_block:
-                        assistant_content.append(api_block)
+                api_block = _block_to_claude(block)
+                if api_block:
+                    assistant_content.append(api_block)
 
             if assistant_content:
                 result.append({"role": "assistant", "content": assistant_content})
-            if tool_results:
-                result.append({"role": "user", "content": tool_results})
         else:
             # user / system 消息
             content: list[dict[str, Any]] = []

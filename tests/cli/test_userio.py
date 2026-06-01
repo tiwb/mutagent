@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from mutagent.cli.terminal import TerminalRenderer
-from mutagent.core.messages import StreamEvent, ToolUseBlock
+from mutagent.core.messages import StreamEvent, ToolResultBlock, ToolUseBlock
 
 
 # ---------------------------------------------------------------------------
@@ -39,25 +39,34 @@ class TestTerminalRendererRenderEvent:
         assert "Module-inspect()" in captured.out
 
     def test_tool_exec_end(self, r, capsys):
-        tc = ToolUseBlock(id="tc_1", name="Module-inspect", input={},
-                          status="done", result="Success result")
+        tc = ToolResultBlock(
+            tool_use_id="tc_1",
+            tool_name="Module-inspect",
+            content="Success result",
+        )
         r.render_event(StreamEvent(type="tool_exec_end", tool_call=tc))
         captured = capsys.readouterr()
         assert "\u2192" in captured.out
         assert "Success result" in captured.out
 
     def test_tool_exec_end_error(self, r, capsys):
-        tc = ToolUseBlock(id="tc_1", name="Module-inspect", input={},
-                          status="done", result="Failed", is_error=True)
+        tc = ToolResultBlock(
+            tool_use_id="tc_1",
+            tool_name="Module-inspect",
+            content="Failed",
+            is_error=True,
+        )
         r.render_event(StreamEvent(type="tool_exec_end", tool_call=tc))
         captured = capsys.readouterr()
         assert "\u2192" in captured.out
         assert "Failed" in captured.out
 
     def test_tool_exec_end_long_content_truncated(self, r, capsys):
-        tc = ToolUseBlock(id="tc_1", name="Module-inspect", input={},
-                          status="done",
-                          result="\n".join(f"line {i}" for i in range(20)))
+        tc = ToolResultBlock(
+            tool_use_id="tc_1",
+            tool_name="Module-inspect",
+            content="\n".join(f"line {i}" for i in range(20)),
+        )
         r.render_event(StreamEvent(type="tool_exec_end", tool_call=tc))
         captured = capsys.readouterr()
         assert "..." in captured.out
