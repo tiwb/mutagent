@@ -432,6 +432,15 @@ def agent_session_start_new(
 
 def _resolve_resume_path(session: AgentSession, value: str | Path) -> Path:
     value_str = str(value)
+
+    # 空字符串 = 取最新 session
+    if value_str == "":
+        session_dir = session.dir or _normalize_path(Path.home() / ".mutagent" / "sessions")
+        matches = sorted(session_dir.glob("*.jsonl"))
+        if not matches:
+            raise FileNotFoundError(f"No sessions found in {session_dir}")
+        return matches[-1]
+
     candidate = _normalize_path(value_str)
     if ("\\" in value_str or "/" in value_str or value_str.endswith(".jsonl")):
         if not candidate.exists():

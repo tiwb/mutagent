@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from mutagent.cli.terminal import TerminalRenderer
-from mutagent.core.messages import StreamEvent, ToolResultBlock, ToolUseBlock
+from mutagent.core.messages import Message, StreamEvent, TextBlock, ToolResultBlock, ToolUseBlock
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +86,30 @@ class TestTerminalRendererRenderEvent:
         r.render_event(StreamEvent(type="response_done"))
         captured = capsys.readouterr()
         assert captured.out == ""
+
+    def test_render_history(self, r, capsys):
+        r.render_history([
+            Message(role="user", blocks=[TextBlock(text="Inspect x.py")]),
+            Message(
+                role="assistant",
+                blocks=[ToolUseBlock(id="tool_1", name="read_file", input={"path": "x.py"})],
+            ),
+            Message(
+                role="user",
+                blocks=[ToolResultBlock(tool_use_id="tool_1", tool_name="read_file", content="file content")],
+            ),
+            Message(role="assistant", blocks=[TextBlock(text="Done.")]),
+            Message(role="user", blocks=[TextBlock(text="Next")]),
+            Message(role="assistant", blocks=[TextBlock(text="OK")]),
+        ])
+
+        captured = capsys.readouterr()
+        assert "Inspect x.py" in captured.out
+        assert "read_file" in captured.out
+        assert "file content" in captured.out
+        assert "Done.\n" in captured.out
+        assert "Next" in captured.out
+        assert "OK\n" in captured.out
 
 
 # ---------------------------------------------------------------------------

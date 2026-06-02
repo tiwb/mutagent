@@ -14,18 +14,15 @@ import queue
 
 import sys
 import threading
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from mutagent.app.app import App
 from mutagent.cli.ansi import (
     bold_cyan, bold_red, dim, _format_tool_call, _format_tool_result,
     highlight_markdown_line,
 )
-from mutagent.core.messages import ToolResultBlock, ToolUseBlock
+from mutagent.core.messages import Message, StreamEvent, TextBlock, ToolResultBlock, ToolUseBlock
 from mutagent.core.session import AgentSession
-
-if TYPE_CHECKING:
-    from mutagent.core.messages import StreamEvent
 
 
 logger = logging.getLogger(__name__)
@@ -42,7 +39,7 @@ def _build_agent_session(app: App, resume: str | None = None) -> AgentSession:
         cwd=str(Path.cwd()),
         model=app.agent.model,
     )
-    if resume:
+    if resume is not None:
         session.resume(resume, app.agent.context)
     object.__setattr__(app.agent, "session", session)
     return session
@@ -82,6 +79,35 @@ class TerminalRenderer:
         elif event.type == "turn_done":
             print()
 
+    def render_history(self, messages: list[Message]) -> None:
+        """Replay persisted messages with the same formatting as live events."""
+        turn_active = False
+        for message in messages:
+            if self._starts_new_turn(message):
+                if turn_active:
+                    self.render_event(StreamEvent(type="turn_done"))
+                turn_active = True
+            self._render_message(message)
+        if turn_active:
+            self.render_event(StreamEvent(type="turn_done"))
+
+    def _render_message(self, message: Message) -> None:
+        for block in message.blocks:
+            if isinstance(block, TextBlock):
+                if message.role == "user":
+                    print(f"{bold_cyan('> ')}{block.text}", flush=True)
+                elif message.role == "assistant":
+                    self.render_event(StreamEvent(type="text_delta", text=block.text))
+            elif isinstance(block, ToolUseBlock):
+                self.render_event(StreamEvent(type="tool_exec_start", tool_call=block))
+            elif isinstance(block, ToolResultBlock):
+                self.render_event(StreamEvent(type="tool_exec_end", tool_call=block))
+
+    def _starts_new_turn(self, message: Message) -> bool:
+        return message.role == "user" and any(
+            isinstance(block, TextBlock) for block in message.blocks
+        )
+
     def read_input(self) -> str:
         """Read a line of user input with a prompt.
 
@@ -118,7 +144,9 @@ def add_terminal_subcommand(subparsers: Any) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--resume",
-        help="Resume a session by path or session id",
+        nargs="?",
+        const="",
+        help="Resume a session by path or session id. Without value, resumes the latest session.",
     )
     return parser
 
@@ -134,6 +162,7 @@ def dispatch_terminal(parser: argparse.ArgumentParser, args: argparse.Namespace)
     print("Type your message. 'exit' or Ctrl+C to quit.\n")
 
     renderer = TerminalRenderer()
+    renderer.render_history(app.agent.context.messages)
 
     # 启动 asyncio event loop 线程
     loop = asyncio.new_event_loop()
