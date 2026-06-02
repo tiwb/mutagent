@@ -7,8 +7,7 @@ from typing import Any, TYPE_CHECKING, ClassVar
 from mutgui import View, ViewBlock
 
 if TYPE_CHECKING:
-    from mutagent.core.agent import Agent
-    from mutagent.app.app import App
+    from mutagent.webui.conversation import Conversation
 
 
 class SettingsPage(View):
@@ -18,27 +17,14 @@ class SettingsPage(View):
     panel 切换通过 ``activate(panel_id)`` / ``deactivate()`` 由
     Conversation 显式驱动。
 
-    构造时通过两个回调把"想要切换路由"的请求委派回上层：
-
-    - ``on_request_close`` — 用户点「← 返回对话」或保存后等场景，等价于
-      ``Conversation.navigate_to("")``。
-    - ``on_request_navigate(route)`` — 左侧菜单切换 panel，等价于
-      ``Conversation.navigate_to(f"settings/{panel_id}")``。
-
-
+    通过与 Conversation 的级联引用直接完成导航：
+    ``self.conversation.navigate_to(route)``。
     """
 
     active_panel_id: str
+    conversation: Conversation | None
 
-    def __init__(
-        self,
-        *,
-        app: App,
-        agent: Agent,
-        on_models_changed=None,
-        on_request_close=None,
-        on_request_navigate=None,
-    ) -> None: ...
+    def __init__(self, *, conversation: Conversation | None = None) -> None: ...
 
     def render(self) -> ViewBlock: ...
 
@@ -47,7 +33,6 @@ class SettingsPage(View):
     async def close(self) -> None: ...
 
     def list_panels(self) -> list[SettingsPanel]: ...
-    async def notify_models_changed(self, preferred_model: str = "") -> None: ...
 
 
 class SettingsPanel(View):
@@ -61,6 +46,7 @@ class SettingsPanel(View):
     panel_title: ClassVar[str] = ""
     panel_placement: ClassVar[str] = ""
     panel_width: ClassVar[int] = 560
+    conversation: Conversation | None  # 由 SettingsPage.__init__ 注入
     page: Any  # SettingsPage 实例，由 SettingsPage.__init__ 注入
 
     def render(self) -> ViewBlock: ...

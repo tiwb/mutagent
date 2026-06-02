@@ -27,6 +27,7 @@ from mutagent.webui.messages import (
     TurnSeparatorItem,
     UserTextItem,
 )
+from mutagent.webui._session_page import ResumeSessionPage
 from mutagent.webui.toolbar import AgentStatusBar
 from mutagent.webui.settings import SettingsPage
 from mutgui import ActionContext, ActionToolbar, Callback, ViewBlock
@@ -44,7 +45,9 @@ class ConversationExt(mutobj.Extension[Conversation]):
     status_bar: Any = None
     chat_input: Any = None
     toolbar: Any = None
+    resume_page: Any = None
     settings_page: Any = None
+    session: Any = None
     cancel_requested: bool = False
     current_assistant_id: str = ""
     tool_item_ids: dict[str, str] = mutobj.field(default_factory=dict)
@@ -57,6 +60,8 @@ class ConversationExt(mutobj.Extension[Conversation]):
     handle_cancel: Any = None
     handle_agent_event: Any = None
     subscription: Any = None
+    pending_model: str = ""
+    config_dirty: bool = False
 
 
 def _cext(self: Conversation) -> ConversationExt:
@@ -75,19 +80,141 @@ def _extract_text(message: Message) -> str:
     )
 
 
-def _resolve_current_model_name(agent: Any, models: list[dict[str, Any]]) -> str:
-    current_id = getattr(getattr(agent, "llm", None), "model", "")
-    for model in models:
-        if model.get("name") == current_id or model.get("model_id") == current_id:
-            return str(model.get("name", current_id))
-    return current_id
-
-
 def _find_last_assistant(items: list[Any]) -> AssistantTextItem | None:
     for item in reversed(items):
         if isinstance(item, AssistantTextItem):
             return item
     return None
+
+
+def _reset_context_usage(context: Any) -> None:
+    if context is None:
+        return
+    rt = ContextRuntime.get_or_create(context)
+    rt.total_input_tokens = 0
+    rt.total_output_tokens = 0
+    rt.total_cache_read_tokens = 0
+    rt.total_cache_write_tokens = 0
+
+
+def _replace_items(self: Conversation, items: list[Any]) -> None:
+    ext = _cext(self)
+    ext.items[:] = items
+    ext.message_list.refresh()
+
+
+def _message_has_user_text(message: Message) -> bool:
+    return message.role == "user" and any(
+        isinstance(block, TextBlock) and block.text
+        for block in message.blocks
+    )
+
+
+def _message_text(message: Message) -> str:
+    return "".join(
+        block.text for block in message.blocks
+        if isinstance(block, TextBlock) and block.text
+    )
+
+
+def _assistant_turn_ends(messages: list[Message], index: int) -> bool:
+    if messages[index].role != "assistant":
+        return False
+    if index == len(messages) - 1:
+        return True
+    return _message_has_user_text(messages[index + 1])
+
+
+def _rebuild_items_from_messages(messages: list[Message]) -> list[Any]:
+    items: list[Any] = []
+    tool_item_ids: dict[str, str] = {}
+    turn_input_tokens = 0
+    turn_output_tokens = 0
+    turn_duration = 0.0
+
+    for index, message in enumerate(messages):
+        text = _message_text(message)
+        if message.role == "user":
+            if text:
+                items.append(UserTextItem(
+                    id=message.id or _now_item_id("user"),
+                    kind="user.text",
+                    text=text,
+                    timestamp=message.timestamp,
+                ))
+                turn_input_tokens = 0
+                turn_output_tokens = 0
+                turn_duration = 0.0
+            for block in message.blocks:
+                if not isinstance(block, ToolResultBlock):
+                    continue
+                item_id = tool_item_ids.get(block.tool_use_id)
+                tool_item = next(
+                    (
+                        existing for existing in items
+                        if isinstance(existing, ToolCallItem) and existing.id == item_id
+                    ),
+                    None,
+                )
+                if tool_item is None:
+                    tool_item = ToolCallItem(
+                        id=item_id or f"tool-{block.tool_use_id or time.time_ns()}",
+                        kind="assistant.tool_group",
+                        tool_id=block.tool_use_id,
+                        name=block.tool_name or "(unknown tool)",
+                        status="error" if block.is_error else "success",
+                        result_text=block.content,
+                        is_error=block.is_error,
+                        duration=block.duration,
+                    )
+                    items.append(tool_item)
+                else:
+                    tool_item.status = "error" if block.is_error else "success"
+                    tool_item.result_text = block.content
+                    tool_item.is_error = block.is_error
+                    tool_item.duration = block.duration
+        elif message.role == "assistant":
+            turn_input_tokens += message.input_tokens
+            turn_output_tokens += message.output_tokens
+            turn_duration += message.duration
+            if text:
+                items.append(AssistantTextItem(
+                    id=message.id or _now_item_id("assistant"),
+                    kind="assistant.text",
+                    text=text,
+                    model=message.model,
+                    timestamp=message.timestamp,
+                    duration=message.duration,
+                    input_tokens=message.input_tokens,
+                    output_tokens=message.output_tokens,
+                ))
+            for block in message.blocks:
+                if not isinstance(block, ToolUseBlock):
+                    continue
+                item_id = f"tool-{block.id or time.time_ns()}"
+                tool_item_ids[block.id] = item_id
+                items.append(ToolCallItem(
+                    id=item_id,
+                    kind="assistant.tool_group",
+                    tool_id=block.id,
+                    name=block.name,
+                    input_text=str(block.input),
+                    status="pending",
+                ))
+            if _assistant_turn_ends(messages, index):
+                items.append(TurnSeparatorItem(
+                    id=f"turn-{message.id or time.time_ns()}",
+                    kind="turn_done",
+                    turn_id=message.id,
+                    duration=turn_duration,
+                    input_tokens=turn_input_tokens,
+                    output_tokens=turn_output_tokens,
+                ))
+                turn_input_tokens = 0
+                turn_output_tokens = 0
+                turn_duration = 0.0
+                tool_item_ids = {}
+    return items
 
 
 # ── 路由解析 / 构造 ───────────────────────────────────────────
@@ -106,6 +233,17 @@ def _hash_for_route(route: str) -> str:
     return f"#/{route}" if route else "#/"
 
 
+def _normalize_route(route: str) -> str:
+    normalized = route.strip().strip("/")
+    if not normalized:
+        return ""
+    if normalized == "resume" or normalized.startswith("resume/"):
+        return "resume"
+    if normalized == "settings" or normalized.startswith("settings/"):
+        return normalized
+    return ""
+
+
 # ── @impl: __init__ ──────────────────────────────────────────────
 
 
@@ -118,8 +256,7 @@ def conversation_init__(self: Conversation, *, agent: Any, app: Any = None) -> N
     ext.items = []
     ext.message_list = MessageList(items=ext.items)
     ext.message_list.id = "message-list"
-    self.models = app.config.list_models()
-    self.current_model = _resolve_current_model_name(agent, self.models)
+    self.current_model = getattr(agent, "model", "")
     self.status = "idle"
     self.is_busy = False
     ext.cancel_requested = False
@@ -146,15 +283,8 @@ def conversation_init__(self: Conversation, *, agent: Any, app: Any = None) -> N
     )
     ext.chat_input.id = "chat-input"
     ext.chat_input.conversation = self
-    self.refresh_models = partial(_refresh_models_from_config, self)
-    # SettingsPage：注入两个 request 回调，由它请求 Conversation 切换路由
-    ext.settings_page = SettingsPage(
-        app=app,
-        agent=agent,
-        on_models_changed=self.refresh_models,
-        on_request_close=partial(_on_settings_request_close, self),
-        on_request_navigate=partial(_on_settings_request_navigate, self),
-    )
+    ext.resume_page = ResumeSessionPage(conversation=self)
+    ext.settings_page = SettingsPage(conversation=self)
     ext.toolbar = ActionToolbar(
         id="conversation-toolbar",
         categories=["mutagent.conversation.toolbar"],
@@ -163,6 +293,8 @@ def conversation_init__(self: Conversation, *, agent: Any, app: Any = None) -> N
         ),
         label_mode="auto",
     )
+    from ._session_page import _start_session
+    _start_session(self)
     ext.subscription = agent.subscribe(ext.handle_agent_event)
 
 
@@ -208,6 +340,18 @@ def _refresh_shell(self: Conversation) -> None:
     ext.toolbar.invalidate()
 
 
+def _reset_runtime_state(self: Conversation) -> None:
+    ext = _cext(self)
+    self.is_busy = False
+    self.status = "idle"
+    ext.cancel_requested = False
+    ext.current_assistant_id = ""
+    ext.tool_item_ids = {}
+    ext.turn_input_tokens = 0
+    ext.turn_output_tokens = 0
+    ext.turn_started_at = 0.0
+
+
 def _append_item(self: Conversation, item: Any) -> None:
     ext = _cext(self)
     ext.items.append(item)
@@ -227,41 +371,22 @@ def _find_item(self: Conversation, item_id: str) -> Any | None:
     return None
 
 
-async def _refresh_models_from_config(self: Conversation, preferred_model: str = "") -> None:
-    if self.app is None:
-        return
-    self.models = self.app.config.list_models()
-    available = [str(model.get("name", "")) for model in self.models if model.get("name")]
-    desired = preferred_model or str(self.app.config.get("default_model", default="") or "")
-    if not desired or desired not in available:
-        desired = available[0] if available else ""
-    if desired and not self.is_busy:
-        try:
-            spec = self.app.config.resolve_model(desired)
-            if spec:
-                llm = LLMApiClient.from_spec(spec)
-                self.agent.llm = llm
-                self.agent.model = llm.model_id
-        except Exception as exc:
-            _append_item(
-                self,
-                AssistantErrorItem(
-                    id=_now_item_id("error"),
-                    kind="assistant.error",
-                    error=str(exc),
-                    timestamp=time.time(),
-                ),
-            )
-        else:
-            self.current_model = desired
-    else:
-        self.current_model = _resolve_current_model_name(self.agent, self.models)
-    _refresh_shell(self)
-    self.invalidate()
-
 
 async def handle_send(self: Conversation, text: str) -> None:
     ext = _cext(self)
+    if (ext.pending_model or ext.config_dirty) and self.app is not None:
+        model = ext.pending_model or getattr(self.agent, "model", "")
+        if model:
+            try:
+                spec = self.app.config.resolve_model(model)
+                if spec:
+                    llm = LLMApiClient.from_spec(spec)
+                    self.agent.llm = llm
+                    self.agent.model = llm.model_id
+            except Exception:
+                logger.exception("Failed to rebuild LLM")
+        ext.pending_model = ""
+        ext.config_dirty = False
     if self.is_busy:
         logger.info("Conversation send ignored while busy")
         return
@@ -318,25 +443,9 @@ async def handle_model_change(self: Conversation, name: str) -> None:
     logger.info("Conversation model change requested: %s", name)
     if self.app is None:
         return
-    try:
-        spec = self.app.config.resolve_model(name)
-        if spec:
-            llm = LLMApiClient.from_spec(spec)
-            self.agent.llm = llm
-            self.agent.model = llm.model_id
-    except Exception as exc:
-        _append_item(
-            self,
-            AssistantErrorItem(
-                id=_now_item_id("error"),
-                kind="assistant.error",
-                error=str(exc),
-                timestamp=time.time(),
-            ),
-        )
-    else:
-        self.models = self.app.config.list_models()
-        self.current_model = name
+    ext = _cext(self)
+    ext.pending_model = name
+    self.current_model = name
     _refresh_shell(self)
     self.invalidate()
 
@@ -471,6 +580,19 @@ async def handle_agent_event(self: Conversation, event: StreamEvent) -> None:
         ext.cancel_requested = False
         ext.current_assistant_id = ""
         ext.tool_item_ids = {}
+        try:
+            ext.session.sync(self.agent.context)
+        except Exception as exc:
+            logger.exception("Conversation session sync failed")
+            _append_item(
+                self,
+                AssistantErrorItem(
+                    id=_now_item_id("error"),
+                    kind="assistant.error",
+                    error=str(exc),
+                    timestamp=time.time(),
+                ),
+            )
     _refresh_shell(self)
     self.invalidate()
 
@@ -484,9 +606,12 @@ async def _apply_route(self: Conversation, route: str) -> None:
     最后写入 ``self.current_route``。``invalidate`` 由调用方负责。
     """
     ext = _cext(self)
+    route = _normalize_route(route)
     prev = self.current_route
     prev_in_settings = prev.startswith("settings")
     new_in_settings = route.startswith("settings")
+    prev_in_resume = prev == "resume"
+    new_in_resume = route == "resume"
 
     if new_in_settings:
         # 解析目标 panel_id；空则用默认（SettingsPage.activate 内部兜底）
@@ -498,6 +623,10 @@ async def _apply_route(self: Conversation, route: str) -> None:
     elif prev_in_settings:
         # 离开 settings → close 当前 panel
         await ext.settings_page.deactivate()
+    if new_in_resume:
+        await ext.resume_page.activate()
+    elif prev_in_resume:
+        pass
     # 其他象限（conversation → conversation）无需做 panel 生命周期处理
 
     self.current_route = route
@@ -510,6 +639,7 @@ async def conversation_navigate_to(self: Conversation, route: str) -> None:
     防循环：``mutgui.setHash`` 走 ``pushState/replaceState``，W3C 规定
     不触发 ``hashchange`` 事件 → 不会回传后端 → 不会循环。
     """
+    route = _normalize_route(route)
     if route == self.current_route:
         return
     await _apply_route(self, route)
@@ -523,11 +653,11 @@ async def conversation_on_hash_change(self: Conversation, hash_value: str) -> No
 
     **不**回发 setHash —— URL 已经在前端是新值。
     """
-    route = _parse_hash(hash_value)
+    route = _normalize_route(_parse_hash(hash_value))
     if route == self.current_route:
         return
     await _apply_route(self, route)
-    await self.broadcast_command("mutgui.setHash", hash=hash_value)
+    await self.broadcast_command("mutgui.setHash", hash=_hash_for_route(route))
     self.invalidate()
 
 
@@ -553,6 +683,8 @@ def conversation_render(self: Conversation) -> ViewBlock:
     in_settings = self.current_route.startswith("settings")
     if in_settings:
         children: list[Any] = [ext.settings_page]
+    elif self.current_route == "resume":
+        children = [ext.resume_page]
     else:
         children = [
             {

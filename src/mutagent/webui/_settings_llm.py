@@ -4,12 +4,14 @@ Replaces old settings.py (LLMSettingsPanel Declaration) + _settings_impl.py (916
 LLMSettingsPanel now extends SettingsPanel from webui.settings.
 """
 
+# pyright: reportOptionalMemberAccess=false
+
 from __future__ import annotations
 
 import inspect
 import re
 from copy import deepcopy
-from typing import Any, ClassVar
+from typing import Any, ClassVar, TYPE_CHECKING
 
 import httpx
 import mutobj
@@ -17,6 +19,9 @@ from mutagent.core.llm import LLMApiClient
 from mutagent.webui.settings import SettingsPanel
 from mutgui import Bind, Callback, Expr, ViewBlock
 from mutgui.view import ViewId
+
+if TYPE_CHECKING:
+    from mutagent.webui.conversation import Conversation
 
 _CHAT_MODEL_PREFIXES = ("gpt-", "o1", "o3", "o4", "chatgpt-")
 _VARIANT_SUFFIXES = ("-mini", "-nano", "-turbo", "-latest", "-preview", "-realtime")
@@ -54,8 +59,7 @@ class LLMSettingsPanel(SettingsPanel):
     panel_title: ClassVar[str] = "LLM API 设置"
     panel_placement: ClassVar[str] = "settings:10/10"
 
-    _app: Any = None
-    _agent: Any = None
+    conversation: Conversation | None = None
     _drafts: dict[str, dict[str, Any]] = mutobj.field(default_factory=dict)
 
     id: ViewId = "llm-settings-panel"
@@ -75,10 +79,10 @@ class LLMSettingsPanel(SettingsPanel):
     error: str = ""
     notice: str = ""
 
-    def __init__(self, *, app: Any, agent: Any) -> None:
+    def __init__(self, *, conversation: Conversation | None = None) -> None:
         super(LLMSettingsPanel, self).__init__()
-        self._app = app
-        self._agent = agent
+        self.conversation = conversation
+        assert self.conversation is not None, "conversation is required for LLM panel"
         _load_from_config(self)
 
     def render(self: LLMSettingsPanel) -> ViewBlock:
@@ -387,7 +391,7 @@ async def _discover_remote_models(
 
 
 def _write_config(self: LLMSettingsPanel, providers: dict[str, dict[str, Any]], default_model: str) -> None:
-    config = self._app.config
+    config = self.conversation.app.config
     config.set("providers", providers, source="webui")
     config.set("default_model", default_model, source="webui")
     config.save()
@@ -399,13 +403,13 @@ def _set_message(self: LLMSettingsPanel, *, error: str = "", notice: str = "") -
 
 
 def _load_from_config(self: LLMSettingsPanel) -> None:
-    providers = self._app.config.get("providers", default={}) or {}
+    providers = self.conversation.app.config.get("providers", default={}) or {}
     self._drafts = {
         key: _draft_from_config(key, deepcopy(config))
         for key, config in providers.items()
         if isinstance(config, dict)
     }
-    self.default_model = str(self._app.config.get("default_model", default="") or "")
+    self.default_model = str(self.conversation.app.config.get("default_model", default="") or "")
     self.current_step = "list"
     self.editing_key = ""
     self.editing_is_new = False
@@ -610,7 +614,8 @@ async def _save_all_settings(*, view: LLMSettingsPanel) -> None:
     default_model = view.default_model if view.default_model in all_models else all_models[0]
     try:
         _write_config(view, providers, default_model)
-        await view.page.notify_models_changed(default_model)
+        if view.conversation is not None:
+            view.conversation.config_dirty = True
         await view.page.close()
     except Exception as exc:
         _set_message(view, error=str(exc))
@@ -769,7 +774,7 @@ def _render_list(self: LLMSettingsPanel) -> list[dict[str, Any]]:
                 "fontSize": "12px",
                 "color": "var(--mutgui-text-dim)",
             },
-            "children": f"Config file: {self._app.config.path or '(not saved)'}",
+            "children": f"Config file: {self.conversation.app.config.path or '(not saved)'}",
         },
         {
             "$component": "antd.Button",

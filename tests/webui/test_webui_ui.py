@@ -15,13 +15,17 @@ from mutagent.webui.chat_input import ChatInput
 from mutagent.webui.messages import AssistantMessage, AssistantTextItem
 from mutagent.webui._server_impl import _render_root_html
 from mutagent.app.config import Config
+from mutagent.core.context import AgentContext
 
 
 class _DummyAgent:
     def __init__(self) -> None:
         self.llm = type("LLM", (), {"model": "model-alpha"})()
+        self.model = "model-alpha"
+        self.context = AgentContext()
         self.config = Config()
         self.config.load_from_dict({})
+        self.app = self  # 兼容 conversation.app 级联访问
 
     def list_models(self) -> list[dict[str, str]]:
         return [{"name": "alpha", "model_id": "model-alpha"}]
@@ -42,11 +46,12 @@ def test_conversation_child_views_have_stable_ids():
         ext.message_list.id,
         ext.chat_input.id,
         ext.chat_input.toolbar.id,
+        ext.resume_page.id,
         ext.settings_page.id,
     }
 
     assert "" not in child_ids
-    assert len(child_ids) == 6
+    assert len(child_ids) == 7
 
 
 def test_assistant_message_block_renderer_has_id():
@@ -144,7 +149,7 @@ def test_settings_page_excluded_from_conversation_mode_render():
 
 def test_settings_panel_list_page_only_offers_anthropic_and_openai():
     agent = _DummyAgent()
-    panel = LLMSettingsPanel(app=agent, agent=agent)
+    panel = LLMSettingsPanel(conversation=agent)
 
     root = panel.render().items[0]
     children = root["$children"]
@@ -158,7 +163,7 @@ def test_settings_panel_list_page_only_offers_anthropic_and_openai():
 
 def test_settings_panel_provider_list_shows_name_type_and_full_models():
     agent = _DummyAgent()
-    panel = LLMSettingsPanel(app=agent, agent=agent)
+    panel = LLMSettingsPanel(conversation=agent)
     panel._drafts = {
         "volcengine": {
             "name": "volcengine",
@@ -197,7 +202,7 @@ def test_settings_panel_provider_list_shows_name_type_and_full_models():
 
 def test_settings_panel_edit_page_keeps_discover_button_inline_with_models():
     agent = _DummyAgent()
-    panel = LLMSettingsPanel(app=agent, agent=agent)
+    panel = LLMSettingsPanel(conversation=agent)
     panel.current_step = "edit"
     panel.provider_name = "volcengine"
     panel.provider_type = _ANTHROPIC_API_TYPE

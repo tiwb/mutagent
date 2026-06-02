@@ -7,13 +7,15 @@
 详见 `mutagent/docs/specifications/feature-mcp-source-config.md`。
 """
 
+# pyright: reportOptionalMemberAccess=false
+
 from __future__ import annotations
 
 import asyncio
 import logging
 import re
 from copy import deepcopy
-from typing import Any, ClassVar
+from typing import Any, ClassVar, TYPE_CHECKING
 
 import mutagent
 import mutobj
@@ -25,6 +27,9 @@ from mutagent.webui.settings import SettingsPanel
 from mutgui import Bind, Callback, ViewBlock
 from mutgui.view import ViewId
 from mutobj import field
+
+if TYPE_CHECKING:
+    from mutagent.webui.conversation import Conversation
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +68,7 @@ class MCPSettingsPanel(SettingsPanel):
     panel_placement: ClassVar[str] = "settings:10/20"
     panel_width: ClassVar[int] = 640
 
-    _app: Any = None
-    _agent: Any = None
+    conversation: Conversation | None = None
     _drafts: dict[str, dict[str, Any]] = field(default_factory=dict[str, Any])
     _conns: dict[str, MCPConnection] = field(default_factory=dict[str, MCPConnection])
     _async_error: str = ""
@@ -91,10 +95,9 @@ class MCPSettingsPanel(SettingsPanel):
     expanded_ns: set = field(default_factory=set)
     expanded_fn: set = field(default_factory=set)
 
-    def __init__(self: MCPSettingsPanel, *, app: Any, agent: Any) -> None:
+    def __init__(self: MCPSettingsPanel, *, conversation: Conversation | None = None) -> None:
         super(MCPSettingsPanel, self).__init__()
-        self._app = app
-        self._agent = agent
+        self.conversation = conversation
         _load_from_config(self)
 
     def render(self: MCPSettingsPanel) -> ViewBlock:
@@ -275,7 +278,7 @@ def _apply_draft_to_form(self: MCPSettingsPanel, draft: dict[str, Any]) -> None:
 
 def _write_config(self: MCPSettingsPanel,
                   mcp_sources: dict[str, dict[str, Any]]) -> None:
-    config = self._app.config
+    config = self.conversation.app.config
     config.set("mcp_sources", mcp_sources, source="webui")
     config.save()
 
@@ -287,13 +290,13 @@ def _load_from_config(self: MCPSettingsPanel) -> None:
     conns: dict[原始 key, MCPConnection]
     两者按原始 key 对齐；conn 可能没有（rename/未启动）。
     """
-    cfg_sources = self._app.config.get("mcp_sources", default={}) or {}
+    cfg_sources = self.conversation.app.config.get("mcp_sources", default={}) or {}
     self._drafts = {
         key: _draft_from_config(key, deepcopy(cfg))
         for key, cfg in cfg_sources.items()
         if isinstance(cfg, dict)
     }
-    sandbox = getattr(self._app, "sandbox", None)
+    sandbox = getattr(self.conversation.app, "sandbox", None)
     if sandbox is not None and hasattr(sandbox, "list_sources"):
         self._conns = sandbox.list_sources()
     else:
@@ -429,7 +432,7 @@ def _config_changed_at_runtime(draft: dict[str, Any],
 def _sandbox_loop(self: MCPSettingsPanel) -> asyncio.AbstractEventLoop | None:
     from mutagent.sandbox._env_impl import _get_async_loop
 
-    sandbox = getattr(self._app, "sandbox", None)
+    sandbox = getattr(self.conversation.app, "sandbox", None)
     if sandbox is None:
         return None
     return _get_async_loop(sandbox)
@@ -488,7 +491,7 @@ def _submit_async(self: MCPSettingsPanel, coro: Any,
         else:
             _set_message(self)
         # 反查 sandbox conns（autostart 后端自动新增的 conn 也能拿到）
-        sandbox = getattr(self._app, "sandbox", None)
+        sandbox = getattr(self.conversation.app, "sandbox", None)
         if sandbox is not None and hasattr(sandbox, "list_sources"):
             self._conns = sandbox.list_sources()
         self.invalidate()
@@ -501,7 +504,7 @@ async def _do_connect(self: MCPSettingsPanel, key: str) -> None:
     conn = _ensure_conn(self, key)
     if conn is None:
         raise RuntimeError(f"Connection '{key}' could not be created.")
-    sandbox = getattr(self._app, "sandbox", None)
+    sandbox = getattr(self.conversation.app, "sandbox", None)
     if sandbox is not None:
         sandbox.connect_source(conn)
     await conn.reconnect()
@@ -616,7 +619,7 @@ def _save_edits(*, view: MCPSettingsPanel) -> None:
     # rename → 删旧 conn（摘 namespace 触发 close），新 conn 等用户点 Connect
     if is_rename:
         old_conn = view._conns.pop(old_key, None)
-        sandbox = getattr(view._app, "sandbox", None)
+        sandbox = getattr(view.conversation.app, "sandbox", None)
         if old_conn is not None and sandbox is not None:
             try:
                 sandbox.disconnect_source(old_key)
@@ -653,7 +656,7 @@ def _delete_source(*, view: MCPSettingsPanel) -> None:
         return
     # 摘 conn + namespace
     conn = view._conns.pop(key, None)
-    sandbox = getattr(view._app, "sandbox", None)
+    sandbox = getattr(view.conversation.app, "sandbox", None)
     if conn is not None and sandbox is not None:
         try:
             sandbox.disconnect_source(key)
@@ -878,7 +881,7 @@ def _render_list(self: MCPSettingsPanel) -> list[dict[str, Any]]:
             "fontSize": "12px",
             "color": "var(--mutgui-text-dim)",
         },
-        "children": f"Config file: {self._app.config.path or '(not saved)'}",
+        "children": f"Config file: {self.conversation.app.config.path or '(not saved)'}",
     })
 
 

@@ -1,6 +1,7 @@
 """mutagent.webui -- built-in WebUI: agent widgets, actions, server, and CLI."""
 
 from .conversation import Conversation
+from ._session_page import ResumeSessionPage
 from .settings import SettingsPanel, SettingsPage
 from .toolbar import AgentStatusBar
 from .messages import (
@@ -24,6 +25,7 @@ from .server import WebUIServer
 
 __all__ = [
     "Conversation",
+    "ResumeSessionPage",
     "SettingsPanel",
     "SettingsPage",
     "AgentStatusBar",

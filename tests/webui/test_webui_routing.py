@@ -15,11 +15,14 @@ from mutagent.webui._settings_page_impl import _spext
 from mutagent.webui._conversation_impl import _cext, _parse_hash, _hash_for_route
 from mutgui.events import Event
 from mutagent.app.config import Config
+from mutagent.core.context import AgentContext
 
 
 class _DummyAgent:
     def __init__(self) -> None:
         self.llm = type("LLM", (), {"model": "model-alpha"})()
+        self.model = "model-alpha"
+        self.context = AgentContext()
         self.config = Config()
         self.config.load_from_dict({})
 
@@ -29,6 +32,12 @@ class _DummyAgent:
     def subscribe(self, callback):
         self._callback = callback
         return lambda: None
+
+    async def submit(self, text: str) -> None:
+        self.last_submit = text
+
+    def cancel(self) -> bool:
+        return True
 
 
 # ── route 解析 / 构造 ─────────────────────────────────────────
@@ -43,6 +52,7 @@ class _DummyAgent:
         ("#/settings", "settings"),
         ("#/settings/llm", "settings/llm"),
         ("#/settings/mcp", "settings/mcp"),
+        ("#/resume", "resume"),
     ],
 )
 def test_parse_hash_handles_all_forms(hash_value: str, expected: str) -> None:
@@ -53,6 +63,7 @@ def test_parse_hash_handles_all_forms(hash_value: str, expected: str) -> None:
     "route,expected",
     [
         ("", "#/"),
+        ("resume", "#/resume"),
         ("settings", "#/settings"),
         ("settings/llm", "#/settings/llm"),
     ],
@@ -137,6 +148,23 @@ def test_navigate_to_settings_panel_id_activates_specific_panel() -> None:
     assert conv.current_route == "settings/mcp"
     assert _cext(conv).settings_page.active_panel_id == "mcp"
     assert events == [("open", "mcp")]
+
+
+def test_navigate_to_resume_activates_resume_page() -> None:
+    conv = _make_conversation()
+    calls = _patch_commands(conv)
+    events: list[str] = []
+
+    async def _activate() -> None:
+        events.append("activate")
+
+    _cext(conv).resume_page.activate = _activate  # type: ignore[method-assign]
+
+    asyncio.run(conv.navigate_to("resume"))
+
+    assert conv.current_route == "resume"
+    assert calls == [("mutgui.setHash", {"hash": "#/resume"})]
+    assert events == ["activate"]
 
 
 def test_navigate_between_panels_closes_old_opens_new() -> None:
@@ -226,6 +254,20 @@ def test_conversation_mode_render_excludes_settings_page() -> None:
     assert all(child is not _cext(conv).settings_page for child in children)
 
 
+def test_resume_mode_render_only_shows_resume_page() -> None:
+    conv = _make_conversation()
+    _patch_commands(conv)
+    asyncio.run(conv.navigate_to("resume"))
+
+    root = conv.render().items[0]
+    children = root["$children"]
+
+    assert len(children) == 1
+    assert children[0] is _cext(conv).resume_page
+    assert _cext(conv).settings_page not in children
+    assert _cext(conv).chat_input not in children
+
+
 # ── on_event 路由 ────────────────────────────────────────────
 
 
@@ -253,6 +295,16 @@ def test_on_event_falls_through_for_other_events() -> None:
 
     # 没有匹配 handler，走默认实现返回 False
     assert consumed is False
+
+
+def test_on_hash_change_normalizes_resume_subroute() -> None:
+    conv = _make_conversation()
+    calls = _patch_commands(conv)
+
+    asyncio.run(conv.on_hash_change("#/resume/ignored"))
+
+    assert conv.current_route == "resume"
+    assert calls == [("mutgui.setHash", {"hash": "#/resume"})]
 
 
 # ── 防循环（W3C 天然行为，但用测试 lock 住后端不会主动回发） ──────────

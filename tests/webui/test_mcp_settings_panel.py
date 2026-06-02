@@ -80,9 +80,11 @@ class _FakeApp:
         self.sandbox = sandbox
 
 
-class _FakeAgent:
-    def __init__(self, config: Config) -> None:
-        self.config = config
+class _FakeConversation:
+    """模拟 Conversation — 仅提供 panels 需要的级联属性。"""
+    def __init__(self, app: _FakeApp) -> None:
+        self.app = app
+        self.agent = None
 
 
 class _FakeConn:
@@ -127,8 +129,7 @@ def _make_panel(*, mcp_sources: dict | None = None,
         for k, c in conns.items():
             sandbox.connect_source(c)
     app = _FakeApp(config, sandbox)
-    agent = _FakeAgent(config)
-    panel = MCPSettingsPanel(app=app, agent=agent)
+    panel = MCPSettingsPanel(conversation=_FakeConversation(app=app))
     return panel, app
 
 

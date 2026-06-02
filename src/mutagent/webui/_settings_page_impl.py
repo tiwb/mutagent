@@ -2,32 +2,29 @@
 
 全页面式 SettingsPage —— 替代旧的 SettingsDrawer 浮层。
 
-路由由 Conversation 驱动：
-- Conversation.navigate_to / on_hash_change → SettingsPage.activate / deactivate
-- 左侧菜单点击 → on_request_navigate(f"settings/{panel_id}") → Conversation 决定走 navigate_to
-- 「← 返回对话」按钮 → on_request_close() → Conversation.navigate_to("")
+通过 ``self.conversation`` 级联引用直接访问 Conversation 的路由/模型刷新能力，
+不再需要回调注入。
 """
 
 from __future__ import annotations
 
 import inspect
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import mutobj
 from mutobj import AttributeDescriptor
 from mutagent.webui.settings import SettingsPage, SettingsPanel
 from mutgui import Action, ActionContext, Callback, Expr, ViewBlock
 
+if TYPE_CHECKING:
+    from mutagent.webui.conversation import Conversation
+
 
 # ── Extension ─────────────────────────────────────────────────
 
 class SettingsPageExt(mutobj.Extension[SettingsPage]):
     """SettingsPage 的运行时私有状态。"""
-    app: Any = None
-    agent: Any = None
-    on_models_changed: Any = None
-    on_request_close: Any = None
-    on_request_navigate: Any = None
+    conversation: Conversation | None = None
     panels: dict[str, SettingsPanel] = mutobj.field(default_factory=dict)
     ordered_panel_ids: list[str] = mutobj.field(default_factory=list)
     active: bool = False
@@ -70,20 +67,13 @@ async def _call_maybe_async(handler: Any, *args: Any) -> None:
 def settings_page_init__(
     self: SettingsPage,
     *,
-    app: Any,
-    agent: Any,
-    on_models_changed: Any = None,
-    on_request_close: Any = None,
-    on_request_navigate: Any = None,
+    conversation: Conversation | None = None,
 ) -> None:
     super(SettingsPage, self).__init__()
     ext = _spext(self)
     self.id = "settings-page"
-    ext.app = app
-    ext.agent = agent
-    ext.on_models_changed = on_models_changed
-    ext.on_request_close = on_request_close
-    ext.on_request_navigate = on_request_navigate
+    self.conversation = conversation
+    ext.conversation = conversation
     self.active_panel_id = ""
 
     # ── 发现并实例化全部 SettingsPanel 子类 ─────
@@ -95,7 +85,7 @@ def settings_page_init__(
         panel_id = _resolve_panel_attr(cls, "panel_id")
         if not panel_id:
             continue
-        panel = cls(app=app, agent=agent)
+        panel = cls(conversation=conversation)
         setattr(panel, "page", self)
         ext.panels[panel_id] = panel
 
@@ -291,9 +281,8 @@ async def settings_page_deactivate(self: SettingsPage) -> None:
 
 @mutobj.impl(SettingsPage.close)
 async def settings_page_close(self: SettingsPage) -> None:
-    ext = _spext(self)
-    if ext.on_request_close is not None:
-        await _call_maybe_async(ext.on_request_close)
+    if self.conversation is not None:
+        await self.conversation.navigate_to("")
 
 
 @mutobj.impl(SettingsPage.list_panels)
@@ -302,69 +291,33 @@ def settings_page_list_panels(self: SettingsPage) -> list[SettingsPanel]:
     return [ext.panels[pid] for pid in ext.ordered_panel_ids]
 
 
-@mutobj.impl(SettingsPage.notify_models_changed)
-async def settings_page_notify_models_changed(self: SettingsPage, preferred_model: str = "") -> None:
-    ext = _spext(self)
-    cb = ext.on_models_changed
-    if cb is not None:
-        result = cb(preferred_model)
-        if inspect.isawaitable(result):
-            await result
-
 
 # ── Callback handlers ─────────────────────────────────────────
 
 
 async def _on_menu_click(view: SettingsPage, panel_id: str = "") -> None:
-    ext = _spext(view)
-    if not panel_id:
+    if not panel_id or view.conversation is None:
         return
-    if ext.on_request_navigate is not None:
-        await _call_maybe_async(ext.on_request_navigate, f"settings/{panel_id}")
+    await view.conversation.navigate_to(f"settings/{panel_id}")
 
 
 async def _on_back_click(view: SettingsPage, *_: Any) -> None:
-    ext = _spext(view)
-    if ext.on_request_close is not None:
-        await _call_maybe_async(ext.on_request_close)
+    if view.conversation is not None:
+        await view.conversation.navigate_to("")
 
 
 # ── Settings 域 Actions ────────────────────────────
 
 
 class OpenSettingsAction(Action):
-    """通用设置面板入口 — 一个类支撑所有 SettingsPanel 子类。
-
-    新版：不再读 ``settings_drawer``，改为通过 ``conversation.navigate_to``
-    让路由 + URL 一起切换。
-    """
-
-    def __init__(self, panel_id: str, label: str, placement: str) -> None:
-        super().__init__()
-        self._panel_id = panel_id
-        self.label = label
-        self.placement = placement
-
-    def resolved_action_id(self) -> str:
-        return f"mutagent.menu.settings.{self._panel_id}" if self._panel_id else "mutagent.menu.settings"
+    action_id = "mutagent.menu.settings"
+    categories = ("mutagent.main_menu",)
+    label = "Settings"
+    placement = "settings:10/10"
 
     async def execute(self, context: ActionContext) -> None:
         conv = context.get("conversation")
         if conv is not None:
-            route = f"settings/{self._panel_id}" if self._panel_id else "settings"
-            await conv.navigate_to(route)
+            await conv.navigate_to("settings")
 
 
-class RefreshModelsAction(Action):
-    action_id = "mutagent.menu.refresh_models"
-    label = "Refresh Models"
-    placement = "settings:10/20"
-
-    async def execute(self, context: ActionContext) -> None:
-        conv = context.get("conversation")
-        handler = getattr(conv, "refresh_models", None) if conv is not None else None
-        if handler is None:
-            return
-        result = handler()
-        if inspect.isawaitable(result):
-            await result

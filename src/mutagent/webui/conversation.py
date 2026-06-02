@@ -18,6 +18,7 @@ class Conversation(View):
     路由权威集中在此类。``current_route`` 是单一真相源：
 
     - ``""``                — 对话主页
+    - ``"resume"``          — 历史 session 恢复页
     - ``"settings"``        — 设置页（默认 panel）
     - ``"settings/<id>"``   — 设置页的指定 panel
 
@@ -30,11 +31,9 @@ class Conversation(View):
     current_route: str
     agent: Agent
     app: App | None
-    models: list[dict[str, Any]]
     current_model: str
     status: str
     is_busy: bool
-    refresh_models: Any
 
     def __init__(self, *, agent: Agent, app: App | None = None) -> None: ...
 

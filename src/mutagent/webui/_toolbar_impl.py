@@ -238,7 +238,8 @@ class ModelSelectorAction(Action):
 
     def menu_actions(self, context: ActionContext) -> list[ActionRef]:
         conv = _conversation(context)
-        models = getattr(conv, "models", [])
+        app = getattr(conv, "app", None)
+        models = app.config.list_models() if app else []
         return [
             ActionRef(action=SelectModelAction(str(m.get("name", ""))))
             for m in models
@@ -290,13 +291,4 @@ class MainMenuAction(Action):
     variant = "dropdown"
 
     def menu_actions(self, context: ActionContext) -> list[ActionRef]:
-        # 延迟 import 规避 _toolbar_impl ↔ _settings_page_impl 启动期循环
-        from mutagent.webui._settings_page_impl import OpenSettingsAction
-
-        return [
-            ActionRef(action=OpenSettingsAction(
-                panel_id="",
-                label="Settings",
-                placement="settings:10/10",
-            )),
-        ]
+        return [ActionRef(category="mutagent.main_menu")]
