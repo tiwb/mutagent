@@ -11,6 +11,7 @@ from mutagent.core.messages import (
     ToolSchema,
     ToolResultBlock,
     ToolUseBlock,
+    Usage,
 )
 
 
@@ -157,16 +158,16 @@ class TestResponse:
         resp = Response(
             message=msg,
             stop_reason="end_turn",
-            usage={"input_tokens": 100, "output_tokens": 50},
+            usage=Usage(input_tokens=100, output_tokens=50),
         )
         assert resp.stop_reason == "end_turn"
-        assert resp.usage["input_tokens"] == 100
+        assert resp.usage.input_tokens == 100
 
     def test_default_values(self):
         msg = Message(role="assistant", blocks=[TextBlock(text="Hi")])
         resp = Response(message=msg)
         assert resp.stop_reason == ""
-        assert resp.usage == {}
+        assert resp.usage == Usage()
 
     def test_tool_use_response(self):
         msg = Message(role="assistant", blocks=[

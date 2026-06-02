@@ -14,6 +14,7 @@ from mutagent.core.messages import (
     ToolResultBlock,
     ToolSchema,
     ToolUseBlock,
+    Usage,
 )
 from mutagent.core._llm_impl_anthropic import (
     AnthropicApiClient,
@@ -166,7 +167,7 @@ class TestResponseFromClaude:
         assert resp.message.role == "assistant"
         assert _get_text(resp.message) == "Hello!"
         assert resp.stop_reason == "end_turn"
-        assert resp.usage == {"input_tokens": 10, "output_tokens": 5}
+        assert resp.usage == Usage(input_tokens=10, output_tokens=5)
 
     def test_tool_use_response(self):
         data = {
@@ -248,7 +249,7 @@ class TestSendMessageIntegration:
         response = Response(
             message=Message(role="assistant", blocks=[TextBlock(text="Hello from Claude!")]),
             stop_reason="end_turn",
-            usage={"input_tokens": 5, "output_tokens": 3},
+            usage=Usage(input_tokens=5, output_tokens=3),
         )
 
         mock_events = _async_events(
@@ -274,7 +275,7 @@ class TestSendMessageIntegration:
         response = Response(
             message=Message(role="assistant", blocks=[tc]),
             stop_reason="tool_use",
-            usage={"input_tokens": 10, "output_tokens": 8},
+            usage=Usage(input_tokens=10, output_tokens=8),
         )
 
         mock_events = _async_events(
@@ -349,8 +350,8 @@ class TestClaudeRealAPI:
         assert resp.message.role == "assistant"
         assert _get_text(resp.message)
         assert resp.stop_reason == "end_turn"
-        assert resp.usage.get("input_tokens", 0) > 0
-        assert resp.usage.get("output_tokens", 0) > 0
+        assert resp.usage.input_tokens > 0
+        assert resp.usage.output_tokens > 0
 
     async def test_real_send_message_with_tool_use(self):
         """Send a real message with tools and verify tool_use response."""

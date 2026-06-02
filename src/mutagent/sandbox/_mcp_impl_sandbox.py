@@ -119,9 +119,12 @@ def _make_namespace_func(
         return await call_with_retry(kwargs)
 
     # conn._sandbox 推断为 Any | None，但此函数仅在 sandbox 已挂时调用，
-    # 闭包内用到 _async_loop 时 sandbox 必然存在
+    # 闭包内用到 runtime loop 时 sandbox 必然存在
     sandbox = conn._sandbox
     assert sandbox is not None
+    from mutagent.sandbox._env_impl import _require_async_loop
+
+    loop = _require_async_loop(sandbox)
 
     # 构真签名：仅在 server 提供结构化 params 时尝试
     # 注意：空列表亦是合法入参（无参函数），用 is not None 而非真值测试
@@ -137,14 +140,14 @@ def _make_namespace_func(
             bound = _bind_sig.bind(*args, **kwargs)
             bound.apply_defaults()
             future = asyncio.run_coroutine_threadsafe(
-                call_with_retry(dict(bound.arguments)), sandbox._async_loop)
+                call_with_retry(dict(bound.arguments)), loop)
             return future.result(timeout=120)
 
         ns_func.__signature__ = sig  # type: ignore[attr-defined]
     else:
         def ns_func(**kwargs: Any) -> Any:  # type: ignore[misc, reportRedeclaration]
             future = asyncio.run_coroutine_threadsafe(
-                call_with_retry(kwargs), sandbox._async_loop)
+                call_with_retry(kwargs), loop)
             return future.result(timeout=120)
 
     ns_func.__name__ = fn_name

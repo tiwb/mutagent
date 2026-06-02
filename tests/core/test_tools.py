@@ -2,6 +2,7 @@
 
 import pytest
 
+from mutagent.core._tools_impl import ToolSetRuntime, _get_current_tool_call
 from mutagent.core.tools import ToolSet, Toolkit
 from mutagent.core.messages import ToolUseBlock, ToolSchema
 import mutobj
@@ -526,7 +527,7 @@ class TestDispatchStateTracking:
             def spy(self) -> str:
                 """Capture current tool call."""
                 nonlocal captured_tool_call
-                captured_tool_call = self.owner._current_tool_call
+                captured_tool_call = _get_current_tool_call(self.owner)
                 return "spied"
 
         ts = ToolSet()
@@ -537,7 +538,7 @@ class TestDispatchStateTracking:
         await ts.dispatch(block)
 
         assert captured_tool_call is block
-        assert ts._current_tool_call is None
+        assert _get_current_tool_call(ts) is None
 
     async def test_current_tool_call_cleared_on_error(self):
         """工具抛异常后 _current_tool_call 仍被清除。"""
@@ -553,7 +554,7 @@ class TestDispatchStateTracking:
         result = await ts.dispatch(block)
 
         assert result.is_error
-        assert ts._current_tool_call is None
+        assert _get_current_tool_call(ts) is None
 
     async def test_active_ui_cleanup_on_dispatch_end(self):
         """dispatch 结束后清理 _active_ui。"""
@@ -566,7 +567,7 @@ class TestDispatchStateTracking:
         class UIToolkit(Toolkit):
             def with_ui(self) -> str:
                 """Tool that creates UI."""
-                object.__setattr__(self.owner, '_active_ui', MockUI())
+                ToolSetRuntime.get_or_create(self.owner).active_ui = MockUI()
                 return "done"
 
         ts = ToolSet()
@@ -576,7 +577,7 @@ class TestDispatchStateTracking:
         result = await ts.dispatch(block)
 
         assert not result.is_error
-        assert getattr(ts, '_active_ui', None) is None
+        assert ToolSetRuntime.get(ts) is None or ToolSetRuntime.get(ts).active_ui is None
 
     async def test_active_ui_cleanup_on_error(self):
         """工具抛异常后 _active_ui 仍被清理。"""
@@ -591,7 +592,7 @@ class TestDispatchStateTracking:
         class UIToolkit(Toolkit):
             def fail_with_ui(self) -> str:
                 """Tool that creates UI then fails."""
-                object.__setattr__(self.owner, '_active_ui', mock_ui)
+                ToolSetRuntime.get_or_create(self.owner).active_ui = mock_ui
                 raise RuntimeError("boom")
 
         ts = ToolSet()
@@ -602,7 +603,7 @@ class TestDispatchStateTracking:
 
         assert result.is_error
         assert mock_ui.closed
-        assert getattr(ts, '_active_ui', None) is None
+        assert ToolSetRuntime.get(ts) is None or ToolSetRuntime.get(ts).active_ui is None
 
 
 # ---------------------------------------------------------------------------

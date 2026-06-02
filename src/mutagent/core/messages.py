@@ -145,12 +145,22 @@ class ToolSchema:
 
 
 @dataclass
+class Usage:
+    """Normalized LLM token usage."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+
+
+@dataclass
 class Response:
     """LLM response wrapper."""
 
     message: Message
     stop_reason: str = ""
-    usage: dict[str, int] = field(default_factory=dict)
+    usage: Usage = field(default_factory=Usage)
 
 
 @dataclass

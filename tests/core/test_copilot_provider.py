@@ -14,7 +14,7 @@ from mutagent.core._llm_impl_copilot import (
     CopilotAuth,
 )
 from mutagent.core.llm import LLMApiClient
-from mutagent.core.messages import Message, Response, StreamEvent, TextBlock
+from mutagent.core.messages import Message, Response, StreamEvent, TextBlock, Usage
 
 
 async def _collect_events(stream) -> list[StreamEvent]:
@@ -87,7 +87,7 @@ class TestCopilotApiClient:
         response = Response(
             message=Message(role="assistant", blocks=[TextBlock(text="OK")]),
             stop_reason="end_turn",
-            usage={"input_tokens": 1, "output_tokens": 1},
+            usage=Usage(input_tokens=1, output_tokens=1),
         )
         expected_events = [
             StreamEvent(type="text_delta", text="OK"),

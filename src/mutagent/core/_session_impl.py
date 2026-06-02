@@ -452,8 +452,6 @@ def agent_session_resume(self: AgentSession, value: str | Path, context: AgentCo
     data = _load(path)
     context.prompts = list(data.context.prompts)
     context.messages = list(data.context.messages)
-    if context.context_window == 0 and data.context.context_window:
-        context.context_window = data.context.context_window
 
     rt.path = path
     self.dir = path.parent

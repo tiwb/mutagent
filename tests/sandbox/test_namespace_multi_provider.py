@@ -20,6 +20,8 @@ from mutagent.sandbox import SandboxEnv, _mcp_impl, _mcp_impl_sandbox
 from mutagent.sandbox._mcp_share import _all_namespaces
 from mutagent.sandbox._mcp_impl import MCPConnectionImpl
 from mutagent.sandbox._env_impl import (
+    SandboxEnvRuntime,
+    _get_registry,
     sandbox_env_add_namespace,
     sandbox_env_remove_provider,
 )
@@ -327,7 +329,7 @@ class TestSandboxEnvMultiProvider:
         sandbox_env_add_namespace(sandbox, a)
         sandbox_env_add_namespace(sandbox, b)
         # _registry 下应有 2 providers
-        assert len(sandbox._registry._namespaces["foo"]) == 2
+        assert len(_get_registry(sandbox)._namespaces["foo"]) == 2
 
     def test_remove_provider_by_instance(self):
         sandbox = SandboxEnv()
@@ -339,7 +341,7 @@ class TestSandboxEnvMultiProvider:
         # 仅移除 a
         ok = sandbox_env_remove_provider(sandbox, a)
         assert ok is True
-        assert sandbox._registry._namespaces["foo"] == [b]
+        assert _get_registry(sandbox)._namespaces["foo"] == [b]
         # a 的 cleanup 被调用，b 未被触发
         assert cleanups == ["a"]
 
@@ -630,6 +632,7 @@ class TestRefreshNamespaceInvalidatesView:
         sandbox = SandboxEnv()
         loop = asyncio.new_event_loop()
         try:
+            SandboxEnvRuntime.get_or_create(sandbox).async_loop = loop
             conn = _mcp_impl.MCPConnection(
                 "mysrv", {"transport": "http", "url": "http://x"})
             # 添加两个同名 provider，打出 MergedNamespaceView
@@ -641,7 +644,7 @@ class TestRefreshNamespaceInvalidatesView:
             sandbox_env_add_namespace(sandbox, conn.namespace)
             _impl(conn)._sandbox = sandbox
             sandbox_env_add_namespace(sandbox, other)
-            view = sandbox._registry.get("mysrv")
+            view = _get_registry(sandbox).get("mysrv")
             assert isinstance(view, MergedNamespaceView)
             # 初始：conn.namespace 空壳 → displayed = [other]，primary = other
             assert view.displayed == [other]
@@ -667,4 +670,3 @@ class TestRefreshNamespaceInvalidatesView:
             assert view._description == "tool-desc"
         finally:
             loop.close()
-

@@ -21,6 +21,7 @@ from .messages import (
     ToolResultBlock,
     ToolSchema,
     ToolUseBlock,
+    Usage,
 )
 from .llm import LLMApiClient
 
@@ -226,10 +227,25 @@ def _tools_to_claude(tools: list[ToolSchema]) -> list[dict[str, Any]]:
 # Claude API → 内部模型转换
 # ---------------------------------------------------------------------------
 
+def _normalize_cache_creation(value: Any) -> int:
+    """Normalize cache_creation_input_tokens from Anthropic (may be plain int or nested dict)."""
+    if isinstance(value, dict):
+        return int(value.get("input_tokens", 0))
+    if isinstance(value, (int, float)):
+        return int(value)
+    return 0
+
+
 def _response_from_claude(data: dict[str, Any]) -> Response:
     """Convert Claude API response to internal Response."""
     stop_reason = data.get("stop_reason", "")
-    usage = data.get("usage", {})
+    raw_usage = data.get("usage", {})
+    usage = Usage(
+        input_tokens=raw_usage.get("input_tokens", 0),
+        output_tokens=raw_usage.get("output_tokens", 0),
+        cache_read_input_tokens=raw_usage.get("cache_read_input_tokens", 0),
+        cache_creation_input_tokens=_normalize_cache_creation(raw_usage.get("cache_creation_input_tokens", 0)),
+    )
 
     blocks: list[ContentBlock] = []
     for block_data in data.get("content", []):
@@ -355,7 +371,7 @@ async def _send_stream(
             # Accumulate blocks for final Response
             blocks: list[ContentBlock] = []
             stop_reason = ""
-            usage: dict[str, Any] = {}
+            usage = Usage()
 
             current_block_type: str = ""
             current_tool_id: str = ""
@@ -387,7 +403,11 @@ async def _send_stream(
                     try:
                         if event_type == "message_start":
                             msg_data = data.get("message", {})
-                            usage.update(msg_data.get("usage", {}))
+                            raw = msg_data.get("usage", {})
+                            usage.input_tokens = max(usage.input_tokens, raw.get("input_tokens", 0))
+                            usage.output_tokens = max(usage.output_tokens, raw.get("output_tokens", 0))
+                            usage.cache_read_input_tokens = max(usage.cache_read_input_tokens, raw.get("cache_read_input_tokens", 0))
+                            usage.cache_creation_input_tokens = max(usage.cache_creation_input_tokens, _normalize_cache_creation(raw.get("cache_creation_input_tokens", 0)))
 
                         elif event_type == "content_block_start":
                             block = data.get("content_block", {})
@@ -473,20 +493,14 @@ async def _send_stream(
                             # 但某些代理会在 message_delta 中附带 input_tokens=0，
                             # 用 max 避免错误覆盖。
                             for k, v in data.get("usage", {}).items():
-                                if isinstance(v, (int, float)):
-                                    usage[k] = max(usage.get(k, 0), v)
-                                elif isinstance(v, dict):
-                                    # 嵌套 usage（如 cache_creation）
-                                    existing = usage.get(k, {})
-                                    if isinstance(existing, dict):
-                                        for sk, sv in v.items():
-                                            if isinstance(sv, (int, float)):
-                                                existing[sk] = max(existing.get(sk, 0), sv)
-                                        usage[k] = existing
-                                    else:
-                                        usage[k] = v
-                                else:
-                                    usage[k] = v
+                                if k == "input_tokens" and isinstance(v, (int, float)):
+                                    usage.input_tokens = max(usage.input_tokens, int(v))
+                                elif k == "output_tokens" and isinstance(v, (int, float)):
+                                    usage.output_tokens = max(usage.output_tokens, int(v))
+                                elif k == "cache_read_input_tokens" and isinstance(v, (int, float)):
+                                    usage.cache_read_input_tokens = max(usage.cache_read_input_tokens, int(v))
+                                elif k == "cache_creation_input_tokens":
+                                    usage.cache_creation_input_tokens = max(usage.cache_creation_input_tokens, _normalize_cache_creation(v))
 
                         elif event_type == "message_stop":
                             message = Message(role="assistant", blocks=blocks)

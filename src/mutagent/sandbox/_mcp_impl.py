@@ -814,7 +814,9 @@ class MCPConnectionImpl(mutobj.Implementation[MCPConnection]):
         # 导致 view.displayed / primary / _description 拿到旧结果。
         sandbox = getattr(self, "_sandbox", None)
         if sandbox is not None:
-            registry = getattr(sandbox, "_registry", None)
+            from mutagent.sandbox._env_impl import _peek_registry
+
+            registry = _peek_registry(sandbox)
             if registry is not None:
                 view = registry._views.get(ns.name)
                 if view is not None:
@@ -877,9 +879,12 @@ def _make_tool_func(conn: MCPConnectionImpl, tool_name: str,
     doc = "\n\n".join(sections)
 
     # conn._sandbox 推断为 Any | None，但此函数仅在 sandbox 已挂时调用，
-    # 闭包内用到 _async_loop 时 sandbox 必然存在
+    # 闭包内用到 runtime loop 时 sandbox 必然存在
     sandbox = conn._sandbox
     assert sandbox is not None
+    from mutagent.sandbox._env_impl import _require_async_loop
+
+    loop = _require_async_loop(sandbox)
 
     async def call_with_retry(kwargs: dict[str, Any]) -> Any:
         from mutagent.sandbox._signature import _MISSING
@@ -920,14 +925,14 @@ def _make_tool_func(conn: MCPConnectionImpl, tool_name: str,
             bound = _bind_sig.bind(*args, **kwargs)
             bound.apply_defaults()
             future = asyncio.run_coroutine_threadsafe(
-                call_with_retry(dict(bound.arguments)), sandbox._async_loop)
+                call_with_retry(dict(bound.arguments)), loop)
             return future.result(timeout=120)
 
         tool_func.__signature__ = sig  # type: ignore[attr-defined]
     else:
         def tool_func(**kwargs: Any) -> Any:  # type: ignore[misc, reportRedeclaration]
             future = asyncio.run_coroutine_threadsafe(
-                call_with_retry(kwargs), sandbox._async_loop)
+                call_with_retry(kwargs), loop)
             return future.result(timeout=120)
 
     tool_func.__name__ = tool_name

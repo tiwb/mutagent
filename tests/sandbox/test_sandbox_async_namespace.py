@@ -20,6 +20,8 @@ import pytest
 from mutio.mcp.protocol import JsonRpcDispatcher
 from mutagent.sandbox import SandboxEnv
 from mutagent.sandbox._env_impl import (
+    _get_async_loop,
+    _get_async_loop_thread_id,
     _wrap_async,
     sandbox_env_add_namespace,
 )
@@ -189,14 +191,14 @@ class TestBindMainLoop:
         sandbox = SandboxEnv()
         sandbox.bind_main_loop()
 
-        assert getattr(sandbox, "_async_loop") is asyncio.get_running_loop()
-        assert getattr(sandbox, "_async_loop_thread_id") == threading.get_ident()
+        assert _get_async_loop(sandbox) is asyncio.get_running_loop()
+        assert _get_async_loop_thread_id(sandbox) == threading.get_ident()
 
     @pytest.mark.asyncio
     async def test_bind_main_loop_is_idempotent(self):
         sandbox = SandboxEnv()
         sandbox.bind_main_loop()
-        loop1 = sandbox._async_loop  # type: ignore[attr-defined]
+        loop1 = _get_async_loop(sandbox)
         sandbox.bind_main_loop()
-        loop2 = sandbox._async_loop  # type: ignore[attr-defined]
+        loop2 = _get_async_loop(sandbox)
         assert loop1 is loop2

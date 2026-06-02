@@ -14,6 +14,7 @@ from mutagent.core.messages import (
     ToolResultBlock,
     ToolSchema,
     ToolUseBlock,
+    Usage,
 )
 from mutagent.core.llm import LLMApiClient
 from mutagent.core._llm_impl_openai import (
@@ -218,7 +219,7 @@ class TestResponseFromOpenAI:
         assert resp.message.role == "assistant"
         assert _get_text(resp.message) == "Hello!"
         assert resp.stop_reason == "end_turn"
-        assert resp.usage == {"input_tokens": 10, "output_tokens": 5}
+        assert resp.usage == Usage(input_tokens=10, output_tokens=5)
 
     def test_tool_use_response(self):
         data = {
@@ -350,8 +351,8 @@ class TestResponseFromOpenAI:
             "usage": {"prompt_tokens": 100, "completion_tokens": 50},
         }
         resp = _response_from_openai(data)
-        assert resp.usage["input_tokens"] == 100
-        assert resp.usage["output_tokens"] == 50
+        assert resp.usage.input_tokens == 100
+        assert resp.usage.output_tokens == 50
 
     def test_usage_missing_fields(self):
         data = {
@@ -362,7 +363,7 @@ class TestResponseFromOpenAI:
             "usage": {},
         }
         resp = _response_from_openai(data)
-        assert resp.usage == {}
+        assert resp.usage == Usage()
 
     def test_invalid_tool_call_arguments_json(self):
         """Malformed JSON in tool call arguments should default to empty dict."""
@@ -426,7 +427,7 @@ class TestSendMessageIntegration:
         response = Response(
             message=Message(role="assistant", blocks=[TextBlock(text="Hello from OpenAI!")]),
             stop_reason="end_turn",
-            usage={"input_tokens": 5, "output_tokens": 3},
+            usage=Usage(input_tokens=5, output_tokens=3),
         )
         mock_events = [
             StreamEvent(type="text_delta", text="Hello from OpenAI!"),
@@ -442,8 +443,8 @@ class TestSendMessageIntegration:
         resp = resp_event.response
         assert _get_text(resp.message) == "Hello from OpenAI!"
         assert resp.stop_reason == "end_turn"
-        assert resp.usage["input_tokens"] == 5
-        assert resp.usage["output_tokens"] == 3
+        assert resp.usage.input_tokens == 5
+        assert resp.usage.output_tokens == 3
 
     async def test_send_message_with_tools(self):
         """Test provider.send() includes tools in the request."""
@@ -451,7 +452,7 @@ class TestSendMessageIntegration:
         response = Response(
             message=Message(role="assistant", blocks=[tc]),
             stop_reason="tool_use",
-            usage={"input_tokens": 10, "output_tokens": 8},
+            usage=Usage(input_tokens=10, output_tokens=8),
         )
         mock_events = [
             StreamEvent(type="tool_use_start", tool_call=tc),
@@ -499,7 +500,7 @@ class TestSendMessageIntegration:
         response = Response(
             message=Message(role="assistant", blocks=[TextBlock(text="Some text reply")]),
             stop_reason="end_turn",
-            usage={"input_tokens": 5, "output_tokens": 4},
+            usage=Usage(input_tokens=5, output_tokens=4),
         )
         mock_events = [
             StreamEvent(type="text_delta", text="Some text reply"),
@@ -523,7 +524,7 @@ class TestSendMessageIntegration:
         response = Response(
             message=Message(role="assistant", blocks=[tc1, tc2]),
             stop_reason="tool_use",
-            usage={"input_tokens": 10, "output_tokens": 12},
+            usage=Usage(input_tokens=10, output_tokens=12),
         )
         mock_events = [
             StreamEvent(type="tool_use_start", tool_call=tc1),
@@ -551,7 +552,7 @@ class TestSendMessageIntegration:
         response = Response(
             message=Message(role="assistant", blocks=[TextBlock(text="OK")]),
             stop_reason="end_turn",
-            usage={"input_tokens": 15, "output_tokens": 1},
+            usage=Usage(input_tokens=15, output_tokens=1),
         )
         mock_events = [
             StreamEvent(type="response_done", response=response),
@@ -581,7 +582,7 @@ class TestSendMessageIntegration:
         response = Response(
             message=Message(role="assistant", blocks=[TextBlock(text="OK")]),
             stop_reason="end_turn",
-            usage={"input_tokens": 5, "output_tokens": 1},
+            usage=Usage(input_tokens=5, output_tokens=1),
         )
         mock_events = [
             StreamEvent(type="response_done", response=response),
@@ -651,8 +652,8 @@ class TestOpenAIRealAPI:
         assert resp.message.role == "assistant"
         assert _get_text(resp.message)
         assert resp.stop_reason == "end_turn"
-        assert resp.usage.get("input_tokens", 0) > 0
-        assert resp.usage.get("output_tokens", 0) > 0
+        assert resp.usage.input_tokens > 0
+        assert resp.usage.output_tokens > 0
 
     async def test_real_send_message_with_tool_use(self):
         """Send a real message with tools and verify tool_use response."""

@@ -5,7 +5,7 @@ import asyncio
 import inspect
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 import mutobj
 from mutio.schema.docstring import extract_description, parse_google_args
@@ -19,6 +19,12 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Internal state helpers
 # ---------------------------------------------------------------------------
+
+class _HasClose(Protocol):
+    """Protocol for objects with a close() method (e.g. UIContext)."""
+
+    def close(self) -> Any: ...
+
 
 @dataclass
 class ToolEntry:
@@ -37,25 +43,42 @@ class ToolEntry:
     source: Any
 
 
+class ToolSetRuntime(mutobj.Extension[ToolSet]):
+    """ToolSet internal runtime state."""
+
+    entries: dict[str, ToolEntry] | None = None
+    added_classes: set[type] | None = None
+    discovered: dict[type, dict[str, Any]] | None = None
+    last_registry_generation: int | None = None
+    current_tool_call: ToolUseBlock | None = None
+    active_ui: _HasClose | None = None
+
+
+def _runtime(tool_set: ToolSet) -> ToolSetRuntime:
+    return ToolSetRuntime.get_or_create(tool_set)
+
+
 def _get_entries(self: ToolSet) -> dict[str, ToolEntry]:
     """Get or initialize the internal entries dict (manually added tools)."""
-    entries = getattr(self, '_entries', None)
+    rt = _runtime(self)
+    entries = rt.entries
     if entries is None:
         entries = {}
-        object.__setattr__(self, '_entries', entries)
+        rt.entries = entries
     return entries
 
 
 def _get_added_classes(self: ToolSet) -> set[type]:
     """Get or initialize the set of classes added via add()."""
-    added = getattr(self, '_added_classes', None)
+    rt = _runtime(self)
+    added = rt.added_classes
     if added is None:
         added = set()
-        object.__setattr__(self, '_added_classes', added)
+        rt.added_classes = added
     return added
 
 
-def _get_discovered(self: ToolSet) -> dict[type, dict]:
+def _get_discovered(self: ToolSet) -> dict[type, dict[str, Any]]:
     """Get or initialize the auto-discovered toolkit state.
 
     Returns dict mapping toolkit class -> {
@@ -65,11 +88,22 @@ def _get_discovered(self: ToolSet) -> dict[type, dict]:
         'module': str,       # module name for version tracking
     }
     """
-    discovered = getattr(self, '_discovered', None)
+    rt = _runtime(self)
+    discovered = rt.discovered
     if discovered is None:
         discovered = {}
-        object.__setattr__(self, '_discovered', discovered)
+        rt.discovered = discovered
     return discovered
+
+
+def _get_current_tool_call(tool_set: ToolSet) -> ToolUseBlock | None:
+    rt = ToolSetRuntime.get(tool_set)
+    return None if rt is None else rt.current_tool_call
+
+
+def _get_active_ui(tool_set: ToolSet) -> _HasClose | None:
+    rt = ToolSetRuntime.get(tool_set)
+    return None if rt is None else rt.active_ui
 
 
 # ---------------------------------------------------------------------------
@@ -192,10 +226,11 @@ def _refresh_discovered(self: ToolSet) -> None:
 
     # 短路：注册表无变化时跳过完整扫描
     current_gen = mutobj.get_registry_generation()
-    last_gen = getattr(self, '_last_registry_generation', None)
+    rt = _runtime(self)
+    last_gen = rt.last_registry_generation
     if last_gen is not None and last_gen == current_gen:
         return
-    object.__setattr__(self, '_last_registry_generation', current_gen)
+    rt.last_registry_generation = current_gen
 
     added_classes = _get_added_classes(self)
     discovered = _get_discovered(self)
@@ -463,7 +498,8 @@ async def tool_set_dispatch(
         )
 
     # 跟踪当前 tool_call（供 UIToolkit 等使用）
-    object.__setattr__(self, '_current_tool_call', tool_call)
+    rt = _runtime(self)
+    rt.current_tool_call = tool_call
     duration = 0.0
     started_at = asyncio.get_running_loop().time()
     try:
@@ -493,11 +529,11 @@ async def tool_set_dispatch(
         )
     finally:
         # 通用清理：如果工具执行期间创建了 UIContext，关闭它
-        active_ui = getattr(self, '_active_ui', None)
+        active_ui = rt.active_ui
         if active_ui:
             active_ui.close()
-            object.__setattr__(self, '_active_ui', None)
-        object.__setattr__(self, '_current_tool_call', None)
+            rt.active_ui = None
+        rt.current_tool_call = None
 
 
 # ---------------------------------------------------------------------------

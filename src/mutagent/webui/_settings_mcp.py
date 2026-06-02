@@ -427,10 +427,12 @@ def _config_changed_at_runtime(draft: dict[str, Any],
 
 
 def _sandbox_loop(self: MCPSettingsPanel) -> asyncio.AbstractEventLoop | None:
+    from mutagent.sandbox._env_impl import _get_async_loop
+
     sandbox = getattr(self._app, "sandbox", None)
     if sandbox is None:
         return None
-    return getattr(sandbox, "_async_loop", None)
+    return _get_async_loop(sandbox)
 
 
 def _ensure_conn(self: MCPSettingsPanel, key: str) -> MCPConnection | None:

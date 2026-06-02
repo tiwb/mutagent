@@ -17,6 +17,7 @@ from mutagent.sandbox._mcp_share import _all_namespaces
 from mutagent.sandbox._env_impl import (
     _build_namespace_dict,
     _collect_namespaces,
+    _get_registry,
     sandbox_env_add_namespace,
     sandbox_env_get_namespace,
     sandbox_env_iter_namespaces,
@@ -42,9 +43,9 @@ def _make_ns(name: str, *, kind: str = "tool",
     return ns
 
 
-def _external_names(sandbox: Any) -> set[str]:
+def _external_names(sandbox: SandboxEnv) -> set[str]:
     """抽出 sandbox 上「非 NamespaceTools decl 发现」的外部注入 namespace 名。"""
-    return set(sandbox._registry._namespaces.keys())
+    return set(_get_registry(sandbox)._namespaces.keys())
 
 
 # ---------------------------------------------------------------------------

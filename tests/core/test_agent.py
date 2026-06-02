@@ -7,7 +7,7 @@ import pytest
 import mutobj
 from mutagent.core.agent import Agent
 from mutagent.core.context import AgentContext
-from mutagent.core._agent_impl import MAX_TOOL_ROUNDS
+from mutagent.core._agent_impl import MAX_TOOL_ROUNDS, _get_current_task
 from mutagent.core._llm_impl_anthropic import AnthropicApiClient
 from mutagent.core.messages import (
     Message,
@@ -81,7 +81,7 @@ def _make_tool_response(tool_blocks: list[ToolUseBlock],
 
 async def _await_turn(agent: Agent) -> None:
     """Wait for the current submit task to complete."""
-    task = getattr(agent, "_current_task", None)
+    task = _get_current_task(agent)
     if task is not None:
         try:
             await task
@@ -359,7 +359,7 @@ class TestErrorHandling:
             await agent.submit("second")
 
         # Clean up
-        task = getattr(agent, "_current_task")
+        task = _get_current_task(agent)
         if task is not None:
             task.cancel()
             try:

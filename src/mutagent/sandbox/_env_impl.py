@@ -8,15 +8,20 @@
 - NamespaceTools (Declaration 自动发现) 仍然按需懒加载
 """
 
+from __future__ import annotations
+
 import asyncio
 import inspect
 import logging
 import threading
 import time
-from typing import Any, Callable, Iterator, cast
+from typing import TYPE_CHECKING, Any, Callable, Iterator, cast
 
 import mutobj
 from mutagent.sandbox.env import SandboxEnv
+
+if TYPE_CHECKING:
+    from mutagent.sandbox.mcp import MCPConnection
 
 # 类型别名：on_remove 回调可以是 sync 或 async（从 app.py 移入）
 CleanupCallback = Callable[[], Any]
@@ -30,46 +35,92 @@ from mutagent.sandbox._namespace_impl import (
 logger = logging.getLogger(__name__)
 
 
+class SandboxEnvRuntime(mutobj.Extension[SandboxEnv]):
+    """SandboxEnv internal runtime state."""
+
+    registry: NamespaceRegistry | None = None
+    cleanups: dict[int, tuple[Namespace, CleanupCallback]] | None = None
+    mcp_conns: dict[str, MCPConnection] | None = None
+    start_time: float | None = None
+    async_loop: asyncio.AbstractEventLoop | None = None
+    async_loop_thread_id: int | None = None
+    cached_ns: dict[str, Any] | None = None
+    cached_gen: int = -1
+
+
+def _runtime(sandbox: SandboxEnv) -> SandboxEnvRuntime:
+    return SandboxEnvRuntime.get_or_create(sandbox)
+
+
 # ---------------------------------------------------------------------------
 # 内部状态 helpers
 # ---------------------------------------------------------------------------
 
-def _get_registry(self: SandboxEnv) -> NamespaceRegistry:
-    registry = getattr(self, '_registry', None)
+def _get_registry(sandbox: SandboxEnv) -> NamespaceRegistry:
+    rt = _runtime(sandbox)
+    registry = rt.registry
     if registry is None:
         registry = NamespaceRegistry()
-        object.__setattr__(self, '_registry', registry)
+        rt.registry = registry
     return registry
 
 
-def _get_cleanups(self: SandboxEnv) -> dict[int, tuple[Namespace, CleanupCallback]]:
+def _peek_registry(sandbox: SandboxEnv) -> NamespaceRegistry | None:
+    rt = SandboxEnvRuntime.get(sandbox)
+    return None if rt is None else rt.registry
+
+
+def _get_cleanups(sandbox: SandboxEnv) -> dict[int, tuple[Namespace, CleanupCallback]]:
     """id(ns) -> (ns, on_remove)。
 
     multi-provider 下同名 ns 有多个实例，按名存会互盖。
     改为按实例 id 存，remove 时才能唯一定位。
     为了能从 name 反查 cleanup，同时保存 ns 引用。
     """
-    cleanups = getattr(self, '_cleanups', None)
+    rt = _runtime(sandbox)
+    cleanups = rt.cleanups
     if cleanups is None:
         cleanups = {}
-        object.__setattr__(self, '_cleanups', cleanups)
+        rt.cleanups = cleanups
     return cleanups
 
 
-def _get_mcp_conns(self: SandboxEnv) -> dict[str, Any]:
-    conns = getattr(self, '_mcp_conns', None)
+def _get_mcp_conns(sandbox: SandboxEnv) -> dict[str, MCPConnection]:
+    rt = _runtime(sandbox)
+    conns = rt.mcp_conns
     if conns is None:
         conns = {}
-        object.__setattr__(self, '_mcp_conns', conns)
+        rt.mcp_conns = conns
     return conns
 
 
-def _get_start_time(self: SandboxEnv) -> float:
-    t = getattr(self, '_start_time', None)
+def _get_start_time(sandbox: SandboxEnv) -> float:
+    rt = _runtime(sandbox)
+    t = rt.start_time
     if t is None:
         t = time.time()
-        object.__setattr__(self, '_start_time', t)
+        rt.start_time = t
     return t
+
+
+def _get_async_loop(sandbox: SandboxEnv) -> asyncio.AbstractEventLoop | None:
+    rt = SandboxEnvRuntime.get(sandbox)
+    return None if rt is None else rt.async_loop
+
+
+def _require_async_loop(sandbox: SandboxEnv) -> asyncio.AbstractEventLoop:
+    loop = _get_async_loop(sandbox)
+    if loop is None:
+        raise RuntimeError(
+            "SandboxEnv._async_loop not set; "
+            "caller must call sandbox.bind_main_loop() before exec_code"
+        )
+    return loop
+
+
+def _get_async_loop_thread_id(sandbox: SandboxEnv) -> int | None:
+    rt = SandboxEnvRuntime.get(sandbox)
+    return None if rt is None else rt.async_loop_thread_id
 
 
 # ---------------------------------------------------------------------------
@@ -155,15 +206,10 @@ def _wrap_async(sandbox: SandboxEnv, coro_fn: Any) -> Any:
     fn_name = coro_fn.__name__
 
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        loop = getattr(sandbox, '_async_loop', None)
-        if loop is None:
-            raise RuntimeError(
-                "SandboxEnv._async_loop not set; "
-                "caller must call sandbox.bind_main_loop() before exec_code"
-            )
+        loop = _require_async_loop(sandbox)
 
         # 同线程死锁保护
-        loop_thread_id = getattr(sandbox, '_async_loop_thread_id', None)
+        loop_thread_id = _get_async_loop_thread_id(sandbox)
         if loop_thread_id is not None and threading.get_ident() == loop_thread_id:
             raise RuntimeError(
                 "Cannot synchronously call async NamespaceTools from "
@@ -232,8 +278,9 @@ def sandbox_env_bind_main_loop(self: SandboxEnv) -> None:
     时只需 ``self.app.bind_main_loop()`` 一行，避免遗漏。
     """
     loop = asyncio.get_running_loop()
-    object.__setattr__(self, '_async_loop', loop)
-    object.__setattr__(self, '_async_loop_thread_id', threading.get_ident())
+    rt = _runtime(self)
+    rt.async_loop = loop
+    rt.async_loop_thread_id = threading.get_ident()
 
 
 # ---------------------------------------------------------------------------
@@ -301,8 +348,9 @@ def _build_namespace_dict(self: SandboxEnv) -> dict[str, Any]:
     ``help`` 键走 sandbox 视角：闭包捕获 sandbox，通过 ``iter_namespaces`` /
     ``get_namespace`` 访问当前可见集，与 exec_code 路径严格一致。
     """
-    cached = getattr(self, '_cached_ns', None)
-    cached_gen = getattr(self, '_cached_gen', -1)
+    rt = _runtime(self)
+    cached = rt.cached_ns
+    cached_gen = rt.cached_gen
     current_gen = mutobj.get_registry_generation()
 
     if cached is not None and cached_gen == current_gen:
@@ -313,8 +361,8 @@ def _build_namespace_dict(self: SandboxEnv) -> dict[str, Any]:
     ns_dict['help'] = _make_sandbox_help(self)
 
     # 缓存
-    object.__setattr__(self, '_cached_ns', ns_dict)
-    object.__setattr__(self, '_cached_gen', current_gen)
+    rt.cached_ns = ns_dict
+    rt.cached_gen = current_gen
     return ns_dict
 
 
@@ -369,8 +417,9 @@ def _make_sandbox_help(sandbox: SandboxEnv) -> Callable:
 
 
 def _invalidate_cache(self: SandboxEnv) -> None:
-    object.__setattr__(self, '_cached_ns', None)
-    object.__setattr__(self, '_cached_gen', -1)
+    rt = _runtime(self)
+    rt.cached_ns = None
+    rt.cached_gen = -1
 
 
 async def _invoke_cleanup(name: str, cb: CleanupCallback) -> None:

@@ -117,8 +117,6 @@ def app_setup_agent(self, system_prompt: str = "") -> Agent:
     context.prompts.append(
         Message(role="system", blocks=[TextBlock(text=system_prompt)], label="base")
     )
-    if provider.context_window:
-        context.context_window = provider.context_window
     self.agent = Agent(
         llm=provider,
         model=provider.model_id,

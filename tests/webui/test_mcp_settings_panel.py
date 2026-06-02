@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 
+from mutagent.sandbox._env_impl import SandboxEnvRuntime
 from mutagent.app.config import Config
 from mutagent.webui._settings_mcp import (
     MCPSettingsPanel,
@@ -58,7 +59,7 @@ class _FakeSandbox:
         self._added: list[tuple[Any, Any]] = []
         self._connected: list[Any] = []
         self._registry = _FakeRegistry()
-        self._async_loop = None
+        SandboxEnvRuntime.get_or_create(self).async_loop = None  # type: ignore[arg-type]
 
     def list_sources(self) -> dict[str, Any]:
         return dict(self._mcp_conns)

@@ -16,13 +16,13 @@ from __future__ import annotations
 import asyncio
 import inspect
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 import mutobj
 import pytest
 
 from mutagent.sandbox import SandboxEnv, _mcp_impl, _mcp_impl_sandbox
-from mutagent.sandbox._env_impl import _wrap_async
+from mutagent.sandbox._env_impl import SandboxEnvRuntime, _get_registry, _wrap_async
 from mutagent.sandbox._mcp_impl import MCPConnectionImpl
 from mutagent.sandbox._mcp_impl_sandbox import (
     _make_namespace_func,
@@ -54,17 +54,27 @@ def _impl(conn):
 
 
 class _FakeSandbox:
-    """最小 SandboxEnv 替身 —— _mcp_share.py 只摸 ``_registry._namespaces``。
+    """最小 SandboxEnv 替身 —— _mcp_share.py 只需要 runtime registry。
 
     不走完整 SandboxEnv Declaration 路径，避免引入 NamespaceTools 自动发现
     干扰；只验证 share 协议本身的行为。
     """
 
     def __init__(self) -> None:
-        self._registry = NamespaceRegistry()
+        SandboxEnvRuntime.get_or_create(self).registry = NamespaceRegistry()  # type: ignore[arg-type]
 
 
-def _make_server_dispatch(sandbox: _FakeSandbox) -> JsonRpcDispatcher:
+class _LoopSandbox:
+    """最小 loop carrier，用于挂载 SandboxEnvRuntime。"""
+
+
+def _sandbox_with_loop(loop: asyncio.AbstractEventLoop | None) -> _LoopSandbox:
+    sandbox = _LoopSandbox()
+    SandboxEnvRuntime.get_or_create(sandbox).async_loop = loop  # type: ignore[arg-type]
+    return sandbox
+
+
+def _make_server_dispatch(sandbox: SandboxEnv) -> JsonRpcDispatcher:
     dispatch = JsonRpcDispatcher()
     register_pysandbox_methods(dispatch, sandbox)  # type: ignore[arg-type]
     return dispatch
@@ -134,8 +144,8 @@ class _FakeHTTPClient:
 class TestServerProtocol:
 
     def setup_method(self) -> None:
-        self.sandbox = _FakeSandbox()
-        self.sandbox._registry.add(_build_mutbot_namespace())
+        self.sandbox = cast(SandboxEnv, _FakeSandbox())
+        _get_registry(self.sandbox).add(_build_mutbot_namespace())
         self.dispatch = _make_server_dispatch(self.sandbox)
 
     def _call(self, method: str, params: dict | None = None) -> Any:
@@ -207,8 +217,8 @@ class TestPeerBuild:
 
     def test_builds_namespace_with_callable_functions(self) -> None:
 
-        sandbox = _FakeSandbox()
-        sandbox._registry.add(_build_mutbot_namespace())
+        sandbox = cast(SandboxEnv, _FakeSandbox())
+        _get_registry(sandbox).add(_build_mutbot_namespace())
         dispatch = _make_server_dispatch(sandbox)
 
         # 构造一个最小 conn 占位 —— build_peer_namespaces 只读 ns_name / state /
@@ -217,7 +227,9 @@ class TestPeerBuild:
             name = "mutbot_local"
             state = "connected"
             last_error = None
-            _sandbox = type('_S', (), {'_async_loop': None})()  # ns_func 不会被调用就不需要
+            _sandbox = _sandbox_with_loop(
+                cast(asyncio.AbstractEventLoop, object()),
+            )  # ns_func 不会被调用就不需要
 
         conn = _FakeConn()
         client = _FakeHTTPClient(dispatch)
@@ -279,8 +291,8 @@ class TestMCPConnectionPeerIntegration:
     def _setup_conn(self, capabilities: dict, tools: list[dict],
                     monkeypatch: pytest.MonkeyPatch):
 
-        sandbox = _FakeSandbox()
-        sandbox._registry.add(_build_mutbot_namespace())
+        sandbox = cast(SandboxEnv, _FakeSandbox())
+        _get_registry(sandbox).add(_build_mutbot_namespace())
         dispatch = _make_server_dispatch(sandbox)
 
         fake_client = _FakeHTTPClientForConn(dispatch, capabilities, tools)
@@ -303,7 +315,7 @@ class TestMCPConnectionPeerIntegration:
         try:
             conn = _mcp_impl.MCPConnection(
                 "mutbot_remote", {"url": "http://x"})
-            _impl(conn)._sandbox = type('_S', (), {'_async_loop': loop})()
+            _impl(conn)._sandbox = _sandbox_with_loop(loop)
             loop.run_until_complete(conn.reconnect())
             return conn, loop
         except Exception:
@@ -384,10 +396,10 @@ class TestMCPConnectionPeerIntegration:
         ``mutagent/docs/specifications/feature-namespace-multi-provider.md``。
         """
 
-        sandbox = _FakeSandbox()
+        sandbox = cast(SandboxEnv, _FakeSandbox())
         clash_ns = Namespace("mutbot_remote", description="clash")
         clash_ns.register("noop", lambda: None, "")
-        sandbox._registry.add(clash_ns)
+        _get_registry(sandbox).add(clash_ns)
         dispatch = _make_server_dispatch(sandbox)
         fake_client = _FakeHTTPClientForConn(
             dispatch, PYSANDBOX_CAPABILITY, [])
@@ -403,7 +415,7 @@ class TestMCPConnectionPeerIntegration:
         try:
             conn = _mcp_impl.MCPConnection(
                 "mutbot_remote", {"url": "http://x"})
-            _impl(conn)._sandbox = type('_S', (), {'_async_loop': loop})()
+            _impl(conn)._sandbox = _sandbox_with_loop(loop)
             # 不再抛错：conn 成功 connected，peer 列表含同名 ns
             loop.run_until_complete(conn.reconnect())
             assert conn.state == "connected"
@@ -422,7 +434,7 @@ class TestMCPConnectionPeerIntegration:
             # 模拟 server 返回两个同名 peer ns
             return [Namespace("dup"), Namespace("dup")]
 
-        sandbox = _FakeSandbox()
+        sandbox = cast(SandboxEnv, _FakeSandbox())
         dispatch = _make_server_dispatch(sandbox)
         fake_client = _FakeHTTPClientForConn(
             dispatch, PYSANDBOX_CAPABILITY, [])
@@ -577,7 +589,9 @@ class TestMakeNamespaceFuncSignature:
             name = "peer"
             state = "connected"
             last_error = None
-            _sandbox = type('_S', (), {'_async_loop': None})()  # 本组测试不触发调用
+            _sandbox = _sandbox_with_loop(
+                cast(asyncio.AbstractEventLoop, object()),
+            )  # 本组测试不触发调用
         return _FakeConn()
 
     def test_with_params_builds_signature(self) -> None:
@@ -649,15 +663,15 @@ class TestPeerBuildWithParams:
         """服务端真函数签名 → describe.params → 客户端 __signature__ 一致。"""
 
 
-        sandbox = _FakeSandbox()
-        sandbox._registry.add(_build_mutbot_namespace())
+        sandbox = cast(SandboxEnv, _FakeSandbox())
+        _get_registry(sandbox).add(_build_mutbot_namespace())
         dispatch = _make_server_dispatch(sandbox)
 
         class _FakeConn:
             name = "mutbot_local"
             state = "connected"
             last_error = None
-            _sandbox = type('_S', (), {'_async_loop': None})()
+            _sandbox = _sandbox_with_loop(cast(asyncio.AbstractEventLoop, object()))
 
         conn = _FakeConn()
         client = _FakeHTTPClient(dispatch)
@@ -684,7 +698,7 @@ class TestPeerBuildWithParams:
     def test_peer_namespace_optional_no_default_keeps_omit_signature(self) -> None:
 
 
-        sandbox = _FakeSandbox()
+        sandbox = cast(SandboxEnv, _FakeSandbox())
         ns = Namespace("mutbot", description="mutbot runtime introspection")
 
         def browser_file_upload(paths=_MISSING) -> dict[str, Any]:
@@ -695,14 +709,14 @@ class TestPeerBuildWithParams:
             browser_file_upload,
             browser_file_upload.__doc__ or "",
         )
-        sandbox._registry.add(ns)
+        _get_registry(sandbox).add(ns)
         dispatch = _make_server_dispatch(sandbox)
 
         class _FakeConn:
             name = "mutbot_local"
             state = "connected"
             last_error = None
-            _sandbox = type('_S', (), {'_async_loop': None})()
+            _sandbox = _sandbox_with_loop(cast(asyncio.AbstractEventLoop, object()))
 
         conn = _FakeConn()
         client = _FakeHTTPClient(dispatch)

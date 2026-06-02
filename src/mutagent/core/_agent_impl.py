@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import mutobj
 from .agent import Agent, CancelFn
+from ._context_impl import update_context_usage
 from .messages import (
     Message,
     Response,
@@ -47,6 +48,13 @@ logger = logging.getLogger(__name__)
 MAX_TOOL_ROUNDS = 25
 
 
+class AgentRuntime(mutobj.Extension[Agent]):
+    """Agent internal runtime state."""
+
+    event_listeners: list[Callable[[StreamEvent], Any]] | None = None
+    current_task: asyncio.Task[None] | None = None
+
+
 def _gen_id() -> str:
     """生成短 ID。"""
     return uuid4().hex[:12]
@@ -59,7 +67,10 @@ def _get_tool_calls(msg: Message) -> list[ToolUseBlock]:
 
 def _get_tool_capture_enabled(agent: Agent) -> bool:
     """Check if tool log capture is enabled via any registered tool source's LogStore."""
-    entries = getattr(agent.tools, '_entries', None)
+    from ._tools_impl import ToolSetRuntime
+
+    tools_rt = ToolSetRuntime.get(agent.tools)
+    entries = tools_rt.entries if tools_rt is not None else None
     if not entries:
         return False
     for entry in entries.values():
@@ -70,11 +81,21 @@ def _get_tool_capture_enabled(agent: Agent) -> bool:
 
 
 def _event_listeners(agent: Agent) -> list[Callable[[StreamEvent], Any]]:
-    listeners = getattr(agent, "_event_listeners", None)
+    rt = AgentRuntime.get_or_create(agent)
+    listeners = rt.event_listeners
     if listeners is None:
         listeners = []
-        object.__setattr__(agent, "_event_listeners", listeners)
+        rt.event_listeners = listeners
     return listeners
+
+
+def _runtime(agent: Agent) -> AgentRuntime:
+    return AgentRuntime.get_or_create(agent)
+
+
+def _get_current_task(agent: Agent) -> asyncio.Task[None] | None:
+    rt = AgentRuntime.get(agent)
+    return None if rt is None else rt.current_task
 
 
 async def _emit_event(agent: Agent, event: StreamEvent) -> None:
@@ -162,11 +183,11 @@ async def agent_run(
                 response.message.timestamp = response_start_ts
                 response.message.model = model
                 response.message.duration = time.time() - response_start_ts
-                response.message.input_tokens = response.usage.get("input_tokens", 0)
-                response.message.output_tokens = response.usage.get("output_tokens", 0)
+                response.message.input_tokens = response.usage.input_tokens
+                response.message.output_tokens = response.usage.output_tokens
 
                 # Update token usage
-                self.context.update_usage(response.usage)
+                update_context_usage(self.context, response.usage)
 
                 # Add assistant message to history
                 self.context.messages.append(response.message)
@@ -192,7 +213,7 @@ async def agent_run(
                         async for event in agent_step(self, stream=stream):
                             yield event
                             if event.type == "response_done" and event.response:
-                                self.context.update_usage(event.response.usage)
+                                update_context_usage(self.context, event.response.usage)
                                 self.context.messages.append(event.response.message)
                         break
 
@@ -304,7 +325,8 @@ def agent_subscribe(
 
 @mutobj.impl(Agent.is_busy)
 def agent_is_busy(self: Agent) -> bool:
-    task = getattr(self, "_current_task", None)
+    rt = AgentRuntime.get(self)
+    task = rt.current_task if rt is not None else None
     return bool(task is not None and not task.done())
 
 
@@ -365,12 +387,13 @@ async def agent_submit(self: Agent, text: str) -> None:
                 )
 
     task = asyncio.create_task(_drive())
-    object.__setattr__(self, "_current_task", task)
+    rt = _runtime(self)
+    rt.current_task = task
 
     def _cleanup(done: asyncio.Task[None]) -> None:
-        current = getattr(self, "_current_task", None)
+        current = rt.current_task
         if current is done:
-            object.__setattr__(self, "_current_task", None)
+            rt.current_task = None
         try:
             done.result()
         except asyncio.CancelledError:
@@ -383,7 +406,8 @@ async def agent_submit(self: Agent, text: str) -> None:
 
 @mutobj.impl(Agent.cancel)
 def agent_cancel(self: Agent) -> bool:
-    task = getattr(self, "_current_task", None)
+    rt = AgentRuntime.get(self)
+    task = rt.current_task if rt is not None else None
     if task is None or task.done():
         logger.info("Cancel ignored: no running task")
         return False

@@ -8,6 +8,7 @@ import logging
 from typing import Any
 
 import mutobj
+from mutagent.core._context_impl import ContextRuntime
 from mutagent.core.messages import (
     Message,
     StreamEvent,
@@ -190,12 +191,13 @@ def _refresh_shell(self: Conversation) -> None:
     # context + cache — synced from AgentContext (defensive: may be absent in tests)
     ctx = getattr(self.agent, "context", None)
     if ctx is not None:
-        ext.status_bar.context_used = ctx.get_context_used()
-        ctx_pct = ctx.get_context_percent()
-        ext.status_bar.context_percent = ctx_pct if ctx_pct is not None else 0.0
-        ext.status_bar.context_total = ctx.context_window
-        ext.status_bar.cache_read_tokens = ctx.get_cache_read_tokens()
-        ext.status_bar.cache_write_tokens = ctx.get_cache_write_tokens()
+        rt = ContextRuntime.get_or_create(ctx)
+        ext.status_bar.context_used = rt.total_input_tokens
+        cw = getattr(self.agent.llm, "context_window", 0) or 0
+        ext.status_bar.context_percent = rt.total_input_tokens / cw if cw else 0.0
+        ext.status_bar.context_total = cw
+        ext.status_bar.cache_read_tokens = rt.total_cache_read_tokens
+        ext.status_bar.cache_write_tokens = rt.total_cache_write_tokens
     ext.chat_input.disabled = False
     ext.chat_input.is_busy = self.is_busy
     ext.toolbar.context = ActionContext(

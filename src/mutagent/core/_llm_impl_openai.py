@@ -18,6 +18,7 @@ from .messages import (
     ToolResultBlock,
     ToolSchema,
     ToolUseBlock,
+    Usage,
 )
 from .llm import LLMApiClient
 
@@ -244,14 +245,11 @@ def _response_from_openai(data: dict[str, Any]) -> Response:
 
     # Usage
     usage_data = data.get("usage", {})
-    usage: dict[str, int] = {}
-    if "prompt_tokens" in usage_data:
-        usage["input_tokens"] = usage_data["prompt_tokens"]
-    if "completion_tokens" in usage_data:
-        usage["output_tokens"] = usage_data["completion_tokens"]
-    prompt_details = usage_data.get("prompt_tokens_details", {})
-    if isinstance(prompt_details, dict) and "cached_tokens" in prompt_details:
-        usage["cache_read_input_tokens"] = prompt_details["cached_tokens"]
+    usage = Usage(
+        input_tokens=usage_data.get("prompt_tokens", 0),
+        output_tokens=usage_data.get("completion_tokens", 0),
+        cache_read_input_tokens=usage_data.get("prompt_tokens_details", {}).get("cached_tokens", 0),
+    )
 
     message = Message(role="assistant", blocks=blocks)
     return Response(message=message, stop_reason=stop_reason, usage=usage)
@@ -329,7 +327,7 @@ async def _send_stream(
             # Track tool call state by index
             tool_call_data: dict[int, dict[str, Any]] = {}
             stop_reason = ""
-            usage: dict[str, int] = {}
+            usage = Usage()
             finish_reason = ""
 
             async for raw_line in resp.aiter_lines():
@@ -389,12 +387,12 @@ async def _send_stream(
                 if data.get("usage"):
                     usage_data = data["usage"]
                     if "prompt_tokens" in usage_data:
-                        usage["input_tokens"] = usage_data["prompt_tokens"]
+                        usage.input_tokens = usage_data["prompt_tokens"]
                     if "completion_tokens" in usage_data:
-                        usage["output_tokens"] = usage_data["completion_tokens"]
+                        usage.output_tokens = usage_data["completion_tokens"]
                     prompt_details = usage_data.get("prompt_tokens_details", {})
                     if isinstance(prompt_details, dict) and "cached_tokens" in prompt_details:
-                        usage["cache_read_input_tokens"] = prompt_details["cached_tokens"]
+                        usage.cache_read_input_tokens = prompt_details["cached_tokens"]
 
                 choices = data.get("choices", [])
                 if not choices:

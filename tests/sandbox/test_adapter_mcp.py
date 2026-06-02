@@ -38,6 +38,7 @@ from mutagent.sandbox._namespace_impl import (
     _render_namespace,
     _render_registry,
 )
+from mutagent.sandbox._env_impl import SandboxEnvRuntime
 
 
 def _set_sandbox(conn, sandbox):
@@ -335,8 +336,16 @@ class TestBridgeDispatch:
 # ============================================================
 
 class _FakeSandbox:
-    """Mock sandbox，仅提供 _async_loop，供 _make_tool_func 使用。"""
-    _async_loop: asyncio.AbstractEventLoop | None = None
+    """Mock sandbox，runtime loop 由 SandboxEnvRuntime 承载。"""
+    pass
+
+
+def _sandbox_with_loop(
+    loop: asyncio.AbstractEventLoop | None,
+) -> _FakeSandbox:
+    sandbox = _FakeSandbox()
+    SandboxEnvRuntime.get_or_create(sandbox).async_loop = loop  # type: ignore[arg-type]
+    return sandbox
 
 
 class TestToolFuncCrossThread:
@@ -361,8 +370,7 @@ class TestToolFuncCrossThread:
             "transport": "http",
             "url": "http://example/mcp",
         })
-        sandbox = _FakeSandbox()
-        sandbox._async_loop = asyncio.get_running_loop()
+        sandbox = _sandbox_with_loop(asyncio.get_running_loop())
         _set_sandbox(conn, sandbox)
 
         await conn.ensure_connected()
@@ -398,8 +406,7 @@ class TestToolFuncCrossThread:
             "transport": "http",
             "url": "http://example/mcp",
         })
-        sandbox = _FakeSandbox()
-        sandbox._async_loop = asyncio.get_running_loop()
+        sandbox = _sandbox_with_loop(asyncio.get_running_loop())
         _set_sandbox(conn, sandbox)
 
         await conn.ensure_connected()
@@ -533,7 +540,7 @@ class TestMCPConnectionStateMachine:
             lambda ns, cfg: fake)
 
         conn = MCPConnection("ns", {"transport": "http", "url": "http://x"})
-        _set_sandbox(conn, type('_S', (), {'_async_loop': loop})())
+        _set_sandbox(conn, _sandbox_with_loop(loop))
         await conn.reconnect()
 
         assert conn.state == "connected"
@@ -673,7 +680,7 @@ class TestMCPConnectionStateMachine:
             lambda ns, cfg: fake)
 
         conn = MCPConnection("ns", {"transport": "http", "url": "http://x"})
-        _set_sandbox(conn, type('_S', (), {'_async_loop': loop})())
+        _set_sandbox(conn, _sandbox_with_loop(loop))
         await conn.reconnect()
         assert "old" in conn.namespace._functions
 
@@ -697,7 +704,7 @@ class TestToolFuncAutoReconnect:
             lambda ns, cfg: fake)
 
         conn = MCPConnection("ns", {"transport": "http", "url": "http://x"})
-        _set_sandbox(conn, type('_S', (), {'_async_loop': loop})())
+        _set_sandbox(conn, _sandbox_with_loop(loop))
         # 没 autostart，未 connect
         assert conn.state == "disconnected"
 
@@ -735,7 +742,7 @@ class TestToolFuncAutoReconnect:
         conn = MCPConnection(
             "ns", {"transport": "http", "url": "http://x",
                    "retry_cooldown": 0.0})
-        _set_sandbox(conn, type('_S', (), {'_async_loop': loop})())
+        _set_sandbox(conn, _sandbox_with_loop(loop))
         await conn.ensure_connected()  # 拿到第一个 client
 
         result_box: dict = {}
@@ -766,7 +773,7 @@ class TestToolFuncAutoReconnect:
             "mutagent.sandbox._mcp_impl.make_client", factory)
 
         conn = MCPConnection("ns", {"transport": "http", "url": "http://x"})
-        _set_sandbox(conn, type('_S', (), {'_async_loop': loop})())
+        _set_sandbox(conn, _sandbox_with_loop(loop))
         await conn.ensure_connected()
 
         result_box: dict = {}
@@ -805,7 +812,7 @@ class TestToolFuncAutoReconnect:
         conn = MCPConnection(
             "ns", {"transport": "http", "url": "http://x",
                    "retry_cooldown": 0.0})
-        _set_sandbox(conn, type('_S', (), {'_async_loop': loop})())
+        _set_sandbox(conn, _sandbox_with_loop(loop))
         await conn.ensure_connected()
 
         result_box: dict = {}
@@ -1065,7 +1072,7 @@ class TestListToolsMetadata:
 
         loop = asyncio.get_running_loop()
         conn = MCPConnection("fs", {"transport": "stdio", "command": "x"})
-        _set_sandbox(conn, type('_S', (), {'_async_loop': loop})())
+        _set_sandbox(conn, _sandbox_with_loop(loop))
         await conn.reconnect()
 
         meta = conn.list_tools_metadata()
@@ -1104,7 +1111,11 @@ class TestMakeToolFuncSignature:
         # conn.client / conn.ensure_connected；本组测试不触发调用分支，所以
         # 可以直接传最小对象。
         class _DummySandbox:
-            _async_loop = None
+            def __init__(self) -> None:
+                SandboxEnvRuntime.get_or_create(self).async_loop = cast(  # type: ignore[arg-type]
+                    asyncio.AbstractEventLoop,
+                    object(),
+                )
 
         class _DummyConn:
             _sandbox = _DummySandbox()
@@ -1236,7 +1247,9 @@ class TestMakeToolFuncSignature:
 
         class _DummyConn:
             def __init__(self):
-                self._sandbox = type('_S', (), {'_async_loop': None})()
+                self._sandbox = _sandbox_with_loop(
+                    cast(asyncio.AbstractEventLoop, object()),
+                )
                 self.client = _DummyClient()
 
             async def ensure_connected(self):
@@ -1296,7 +1309,9 @@ class TestMakeToolFuncSignature:
 
         class _DummyConn:
             def __init__(self):
-                self._sandbox = type('_S', (), {'_async_loop': None})()
+                self._sandbox = _sandbox_with_loop(
+                    cast(asyncio.AbstractEventLoop, object()),
+                )
                 self.client = _DummyClient()
 
             async def ensure_connected(self):
@@ -1359,7 +1374,9 @@ class TestMakeToolFuncSignature:
 
         class _DummyConn:
             def __init__(self):
-                self._sandbox = type('_S', (), {'_async_loop': None})()
+                self._sandbox = _sandbox_with_loop(
+                    cast(asyncio.AbstractEventLoop, object()),
+                )
                 self.client = _DummyClient()
 
             async def ensure_connected(self):

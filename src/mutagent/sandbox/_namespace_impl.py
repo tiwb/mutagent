@@ -117,8 +117,10 @@ class Namespace(NamespaceProtocol):
             impl = _connection_impl(connection)
             _sandbox = impl._sandbox
         if connection is not None and state != "connected" and _sandbox is not None:
+            from mutagent.sandbox._env_impl import _require_async_loop
+
             future = asyncio.run_coroutine_threadsafe(
-                connection.ensure_connected(), _sandbox._async_loop)
+                connection.ensure_connected(), _require_async_loop(_sandbox))
             try:
                 # 30s 余量覆盖 stdio 冷启动 / npx 下载场景
                 future.result(timeout=30)
@@ -336,8 +338,10 @@ class MergedNamespaceView:
             if conn is not None:
                 sandbox = _connection_impl(conn)._sandbox
             if conn is not None and state != "connected" and sandbox is not None:
+                from mutagent.sandbox._env_impl import _require_async_loop
+
                 future = asyncio.run_coroutine_threadsafe(
-                    conn.ensure_connected(), sandbox._async_loop)
+                    conn.ensure_connected(), _require_async_loop(sandbox))
                 try:
                     future.result(timeout=30)
                 except Exception:
