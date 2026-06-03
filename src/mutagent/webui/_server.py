@@ -1,21 +1,40 @@
-"""Default WebUIServer implementation."""
+"""WebUI server — Declaration + Implementation."""
 
 from __future__ import annotations
 
 import logging
 import json
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import mutagent
 import mutobj
 from mutagent.sandbox.entry_mcp import PySandboxTools
-from mutagent.webui.conversation import Conversation
-from mutagent.webui.server import WebUIServer
+from ._conversation import Conversation
 from mutgui import Channel, ModuleRegistry, ViewPort
 from mutio.mcp.view import MCPView
-from mutio.net.server import HTMLResponse, StaticView, WebSocketConnection, WebSocketDisconnect
+from mutio.net.server import HTMLResponse, Server, StaticView, WebSocketConnection, WebSocketDisconnect
+
+if TYPE_CHECKING:
+    from mutagent.core.agent import Agent
+    from mutagent.app.app import App
+
 
 logger = logging.getLogger(__name__)
+
+
+class WebUIServer(Server):
+    app: App
+    agent: Agent
+    conversation: Conversation
+
+    def __init__(
+        self,
+        *,
+        app: App,
+        agent: Agent,
+        host: str = "127.0.0.1",
+        port: int = 0,
+    ) -> None: ...
 
 
 @mutobj.impl(WebUIServer.on_startup)
@@ -29,7 +48,7 @@ async def web_ui_server_on_startup(self: WebUIServer) -> None:
         await self.app.connect_sources()
         # bind_main_loop 注入 _async_loop，供 MCPSettingsPanel 的
         # _submit_async 跨线程投递协程使用（Connect/Disconnect/Reconnect 等按钮）
-        sandbox = getattr(self.app, "sandbox", None)
+        sandbox = self.app.sandbox
         if sandbox is not None:
             sandbox.bind_main_loop()
     except Exception:

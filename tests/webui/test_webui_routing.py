@@ -10,21 +10,27 @@ from typing import Any
 
 import pytest
 
-from mutagent.webui import Conversation, SettingsPage
-from mutagent.webui._settings_page_impl import _spext
-from mutagent.webui._conversation_impl import _cext, _parse_hash, _hash_for_route
+from mutagent.webui._conversation import Conversation
+from mutagent.webui._settings_page import SettingsPage
+from mutagent.webui._conversation import _cext, _parse_hash, _hash_for_route
 from mutgui.events import Event
 from mutagent.app.config import Config
 from mutagent.core.context import AgentContext
 
 
+class _FakeSandbox:
+    def list_sources(self) -> dict:
+        return {}
+
+
 class _DummyAgent:
     def __init__(self) -> None:
-        self.llm = type("LLM", (), {"model": "model-alpha"})()
+        self.llm = type("LLM", (), {"model": "model-alpha", "context_window": 200000})()
         self.model = "model-alpha"
         self.context = AgentContext()
         self.config = Config()
         self.config.load_from_dict({})
+        self.sandbox = _FakeSandbox()
 
     def list_models(self) -> list[dict[str, str]]:
         return [{"name": "alpha", "model_id": "model-alpha"}]
@@ -97,7 +103,7 @@ def _patch_commands(conv: Conversation) -> list[tuple[str, dict[str, Any]]]:
 def _patch_panel_lifecycle(page: SettingsPage) -> list[tuple[str, str]]:
     """监听全部 panel 的 on_open / on_close 调用顺序。"""
     events: list[tuple[str, str]] = []
-    for panel_id, panel in _spext(page).panels.items():
+    for panel_id, panel in page.panels.items():
         def _make_open(pid: str) -> Any:
             def _on_open() -> None:
                 events.append(("open", pid))
@@ -116,7 +122,7 @@ def _patch_panel_lifecycle(page: SettingsPage) -> list[tuple[str, str]]:
 def test_navigate_to_same_route_is_noop() -> None:
     conv = _make_conversation()
     calls = _patch_commands(conv)
-    events = _patch_panel_lifecycle(_cext(conv).settings_page)
+    events = _patch_panel_lifecycle(conv.settings_page)
 
     asyncio.run(conv.navigate_to(""))
 
@@ -128,12 +134,12 @@ def test_navigate_to_same_route_is_noop() -> None:
 def test_navigate_to_settings_activates_default_panel() -> None:
     conv = _make_conversation()
     calls = _patch_commands(conv)
-    events = _patch_panel_lifecycle(_cext(conv).settings_page)
+    events = _patch_panel_lifecycle(conv.settings_page)
 
     asyncio.run(conv.navigate_to("settings"))
 
     assert conv.current_route == "settings"
-    assert _cext(conv).settings_page.active_panel_id == "llm"  # 首个 panel
+    assert conv.settings_page.active_panel_id == "llm"  # 首个 panel
     assert calls == [("mutgui.setHash", {"hash": "#/settings"})]
     assert events == [("open", "llm")]
 
@@ -141,12 +147,12 @@ def test_navigate_to_settings_activates_default_panel() -> None:
 def test_navigate_to_settings_panel_id_activates_specific_panel() -> None:
     conv = _make_conversation()
     _patch_commands(conv)
-    events = _patch_panel_lifecycle(_cext(conv).settings_page)
+    events = _patch_panel_lifecycle(conv.settings_page)
 
     asyncio.run(conv.navigate_to("settings/mcp"))
 
     assert conv.current_route == "settings/mcp"
-    assert _cext(conv).settings_page.active_panel_id == "mcp"
+    assert conv.settings_page.active_panel_id == "mcp"
     assert events == [("open", "mcp")]
 
 
@@ -158,7 +164,7 @@ def test_navigate_to_resume_activates_resume_page() -> None:
     async def _activate() -> None:
         events.append("activate")
 
-    _cext(conv).resume_page.activate = _activate  # type: ignore[method-assign]
+    conv.resume_page.activate = _activate  # type: ignore[method-assign]
 
     asyncio.run(conv.navigate_to("resume"))
 
@@ -170,13 +176,13 @@ def test_navigate_to_resume_activates_resume_page() -> None:
 def test_navigate_between_panels_closes_old_opens_new() -> None:
     conv = _make_conversation()
     _patch_commands(conv)
-    events = _patch_panel_lifecycle(_cext(conv).settings_page)
+    events = _patch_panel_lifecycle(conv.settings_page)
 
     asyncio.run(conv.navigate_to("settings/llm"))
     events.clear()
     asyncio.run(conv.navigate_to("settings/mcp"))
 
-    assert _cext(conv).settings_page.active_panel_id == "mcp"
+    assert conv.settings_page.active_panel_id == "mcp"
     # 切换严格 close 旧 → open 新
     assert events == [("close", "llm"), ("open", "mcp")]
 
@@ -184,7 +190,7 @@ def test_navigate_between_panels_closes_old_opens_new() -> None:
 def test_navigate_back_to_conversation_deactivates_panel() -> None:
     conv = _make_conversation()
     _patch_commands(conv)
-    events = _patch_panel_lifecycle(_cext(conv).settings_page)
+    events = _patch_panel_lifecycle(conv.settings_page)
 
     asyncio.run(conv.navigate_to("settings/mcp"))
     events.clear()
@@ -193,18 +199,18 @@ def test_navigate_back_to_conversation_deactivates_panel() -> None:
     assert conv.current_route == ""
     # 离开 settings → close 当前 panel；active_panel_id 保留作为「上次激活」记忆
     assert events == [("close", "mcp")]
-    assert _cext(conv).settings_page.active_panel_id == "mcp"
+    assert conv.settings_page.active_panel_id == "mcp"
 
 
 def test_on_hash_change_drives_route_state() -> None:
     conv = _make_conversation()
     calls = _patch_commands(conv)
-    events = _patch_panel_lifecycle(_cext(conv).settings_page)
+    events = _patch_panel_lifecycle(conv.settings_page)
 
     asyncio.run(conv.on_hash_change("#/settings/mcp"))
 
     assert conv.current_route == "settings/mcp"
-    assert _cext(conv).settings_page.active_panel_id == "mcp"
+    assert conv.settings_page.active_panel_id == "mcp"
     assert events == [("open", "mcp")]
     # on_hash_change 现在广播 setHash 给所有 tab 同步 URL；
     # 防循环由 W3C（pushState 不触发 hashchange）保证，而非后端 silence
@@ -215,7 +221,7 @@ def test_on_hash_change_same_route_is_noop() -> None:
     conv = _make_conversation()
     asyncio.run(conv.on_hash_change("#/"))  # 与初始 "" 等价
     calls = _patch_commands(conv)
-    events = _patch_panel_lifecycle(_cext(conv).settings_page)
+    events = _patch_panel_lifecycle(conv.settings_page)
 
     asyncio.run(conv.on_hash_change("#/"))
 
@@ -237,10 +243,10 @@ def test_settings_mode_render_only_shows_settings_page() -> None:
 
     # 设置模式：root 只挂 settings_page；toolbar / message_list / chat_input 都不进 wire tree
     assert len(children) == 1
-    assert children[0] is _cext(conv).settings_page
-    assert _cext(conv).toolbar not in children
-    assert _cext(conv).message_list not in children
-    assert _cext(conv).chat_input not in children
+    assert children[0] is conv.settings_page
+    assert conv.toolbar not in children
+    assert conv.message_list not in children
+    assert conv.chat_input not in children
 
 
 def test_conversation_mode_render_excludes_settings_page() -> None:
@@ -251,7 +257,7 @@ def test_conversation_mode_render_excludes_settings_page() -> None:
 
     # 三个子节点：toolbar-shell / messages-shell / chat_input；不含 settings_page
     assert len(children) == 3
-    assert all(child is not _cext(conv).settings_page for child in children)
+    assert all(child is not conv.settings_page for child in children)
 
 
 def test_resume_mode_render_only_shows_resume_page() -> None:
@@ -263,9 +269,9 @@ def test_resume_mode_render_only_shows_resume_page() -> None:
     children = root["$children"]
 
     assert len(children) == 1
-    assert children[0] is _cext(conv).resume_page
-    assert _cext(conv).settings_page not in children
-    assert _cext(conv).chat_input not in children
+    assert children[0] is conv.resume_page
+    assert conv.settings_page not in children
+    assert conv.chat_input not in children
 
 
 # ── on_event 路由 ────────────────────────────────────────────
@@ -274,7 +280,7 @@ def test_resume_mode_render_only_shows_resume_page() -> None:
 def test_on_event_intercepts_root_hashchange() -> None:
     conv = _make_conversation()
     _patch_commands(conv)
-    events = _patch_panel_lifecycle(_cext(conv).settings_page)
+    events = _patch_panel_lifecycle(conv.settings_page)
 
     # 模拟 mutgui 系统事件：source=[], component_id="", name="$hashchange"
     event = Event("", "$hashchange", kwargs={"hash": "#/settings/mcp", "cause": "user"})
@@ -336,7 +342,7 @@ def test_on_hash_change_same_route_still_noop() -> None:
     conv = _make_conversation()
     asyncio.run(conv.on_hash_change("#/"))  # 与初始 "" 等价
     calls = _patch_commands(conv)
-    events = _patch_panel_lifecycle(_cext(conv).settings_page)
+    events = _patch_panel_lifecycle(conv.settings_page)
 
     asyncio.run(conv.on_hash_change("#/"))
 
@@ -357,7 +363,7 @@ def test_settings_page_close_routes_back_to_conversation() -> None:
     calls.clear()  # 清掉 navigate_to 自己产生的 setHash
 
     # 模拟 panel 触发 close
-    asyncio.run(_cext(conv).settings_page.close())
+    asyncio.run(conv.settings_page.close())
 
     assert conv.current_route == ""
     # 走 navigate_to → 发出 setHash 回到 #/

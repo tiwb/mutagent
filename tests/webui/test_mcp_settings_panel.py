@@ -21,7 +21,7 @@ import pytest
 from mutagent.sandbox._env_impl import SandboxEnvRuntime
 from mutagent.app.config import Config
 from mutagent.webui._settings_mcp import (
-    MCPSettingsPanel,
+    MCPSettingPanel,
     _check_name_conflicts,
     _config_changed_at_runtime,
     _delete_source,
@@ -74,6 +74,12 @@ class _FakeSandbox:
             self._removed.append(conn.namespace)
 
 
+class _FakePage:
+    """模拟 SettingsPage — 仅提供 panel 需要的 conversation 级联属性。"""
+    def __init__(self, conversation: _FakeConversation) -> None:
+        self.conversation = conversation
+
+
 class _FakeApp:
     def __init__(self, config: Config, sandbox: _FakeSandbox) -> None:
         self.config = config
@@ -119,7 +125,7 @@ class _FakeConn:
 
 def _make_panel(*, mcp_sources: dict | None = None,
                 conns: dict[str, _FakeConn] | None = None,
-                tmp_path=None) -> tuple[MCPSettingsPanel, _FakeApp]:
+                tmp_path=None) -> tuple[MCPSettingPanel, _FakeApp]:
     config = Config()
     config.load_from_dict({"mcp_sources": mcp_sources or {}})
     if tmp_path:
@@ -129,7 +135,7 @@ def _make_panel(*, mcp_sources: dict | None = None,
         for k, c in conns.items():
             sandbox.connect_source(c)
     app = _FakeApp(config, sandbox)
-    panel = MCPSettingsPanel(conversation=_FakeConversation(app=app))
+    panel = MCPSettingPanel(page=_FakePage(conversation=_FakeConversation(app=app)))
     return panel, app
 
 
@@ -322,7 +328,7 @@ class TestNameConflicts:
 
 class TestButtonStates:
 
-    def _row_button_id_label(self, panel: MCPSettingsPanel, key: str
+    def _row_button_id_label(self, panel: MCPSettingPanel, key: str
                              ) -> tuple[str, str, bool]:
         row = _render_list_row(panel, key, panel._drafts[key])
         btn = row["$children"][1]

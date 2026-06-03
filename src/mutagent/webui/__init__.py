@@ -1,52 +1,6 @@
-"""mutagent.webui -- built-in WebUI: agent widgets, actions, server, and CLI."""
+"""mutagent.webui -- built-in WebUI: internal implementation, only WebUIServer is public."""
 
-from .conversation import Conversation
-from ._session_page import ResumeSessionPage
-from .settings import SettingsPanel, SettingsPage
-from .toolbar import AgentStatusBar
-from .messages import (
-    MessageList,
-    ChatItem,
-    ChatItemView,
-    UserTextItem,
-    AssistantTextItem,
-    AssistantErrorItem,
-    TurnSeparatorItem,
-    ToolCallItem,
-    UserMessage,
-    AssistantMessage,
-    AssistantError,
-    TurnSeparator,
-    ToolCallCard,
-)
-from .blocks import BlockRenderer, ThinkingBlock
-from .chat_input import ChatInput
-from .server import WebUIServer
+from ._server import WebUIServer
 
-__all__ = [
-    "Conversation",
-    "ResumeSessionPage",
-    "SettingsPanel",
-    "SettingsPage",
-    "AgentStatusBar",
-    "MessageList",
-    "ChatItem",
-    "ChatItemView",
-    "UserTextItem",
-    "AssistantTextItem",
-    "AssistantErrorItem",
-    "TurnSeparatorItem",
-    "ToolCallItem",
-    "UserMessage",
-    "AssistantMessage",
-    "AssistantError",
-    "TurnSeparator",
-    "ToolCallCard",
-    "BlockRenderer",
-    "ThinkingBlock",
-    "ChatInput",
-    "WebUIServer",
-]
+__all__ = ["WebUIServer"]
 
-from . import _settings_llm  # noqa: E402,F401 — ensure SettingsPanel subclasses are registered before SettingsPage instantiates
-from . import _settings_mcp  # noqa: E402,F401

@@ -1,6 +1,5 @@
 """Session management — ResumePage Declaration + implementation + helpers.
 
-Single-file module following the _settings_mcp.py pattern.
 Provides ResumePage (View) and session lifecycle functions:
 start_new_session(), resume_session().
 """
@@ -14,11 +13,13 @@ import time
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
+import mutobj
 from mutagent.core.session import AgentSession
 from mutgui import Action, ActionContext, Callback, View, ViewBlock
 
 if TYPE_CHECKING:
-    from mutagent.webui.conversation import Conversation
+    from ._conversation import Conversation
+    from mutgui.view import ViewId
 
 
 @dataclass(slots=True)
@@ -33,14 +34,13 @@ class SessionSummary:
 class ResumeSessionPage(View):
     """Session resume page for the built-in WebUI."""
 
-    conversation: Conversation | None
-    entries: list[SessionSummary]
+    id: ViewId = "resume-page"
+    conversation: Conversation
+    entries: list[SessionSummary] = mutobj.field(default_factory=list)
 
-    def __init__(self, *, conversation: Conversation | None = None) -> None:
+    def __init__(self, *, conversation: Conversation) -> None:
         super().__init__()
-        self.id = "resume-page"
         self.conversation = conversation
-        self.entries = []
 
     def render(self) -> ViewBlock:
         return _render_resume_page(self)
@@ -53,8 +53,7 @@ class ResumeSessionPage(View):
         self.invalidate()
 
     async def close(self) -> None:
-        if self.conversation is not None:
-            await self.conversation.navigate_to("")
+        await self.conversation.navigate_to("")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -289,8 +288,7 @@ async def _on_back_click(view: ResumeSessionPage, *_: Any) -> None:
 
 
 async def _on_resume_click(view: ResumeSessionPage, session_path: str) -> None:
-    if view.conversation is not None:
-        await resume_session(view.conversation, session_path)
+    await resume_session(view.conversation, session_path)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -305,14 +303,12 @@ class ResumeSessionAction(Action):
 
     def check_enabled(self, context: ActionContext) -> bool:
         conv = context.get("conversation")
-        return not getattr(conv, "is_busy", False)
+        return not conv.is_busy
 
     async def execute(self, context: ActionContext) -> None:
         conv = context.get("conversation")
         if conv is not None:
-            navigate_to = getattr(conv, "navigate_to", None)
-            if navigate_to is not None:
-                await navigate_to("resume")
+            await conv.navigate_to("resume")
 
 
 class NewSessionAction(Action):
@@ -322,7 +318,7 @@ class NewSessionAction(Action):
 
     def check_enabled(self, context: ActionContext) -> bool:
         conv = context.get("conversation")
-        return not getattr(conv, "is_busy", False)
+        return not conv.is_busy
 
     async def execute(self, context: ActionContext) -> None:
         conv = context.get("conversation")
@@ -335,43 +331,37 @@ class NewSessionAction(Action):
 # ═══════════════════════════════════════════════════════════════
 
 
-def _current_session_model(conversation: Any) -> str:
+def _current_session_model(conversation: Conversation) -> str:
     return (
-        str(getattr(conversation.agent, "model", "") or "")
+        str(conversation.agent.model or "")
         or conversation.current_model
-        or str(getattr(getattr(conversation.agent, "llm", None), "model", "") or "")
+        or str((conversation.agent.llm.model_id or "") if conversation.agent.llm else "")
     )
 
 
-def _start_session(conversation: Any) -> AgentSession:
-    # local import to avoid circular: _conversation_impl → _session_page → _conversation_impl
-    from ._conversation_impl import _cext
-
-    ext = _cext(conversation)
-    ext.session = AgentSession()
-    ext.session.start_new(
+def _start_session(conversation: Conversation) -> AgentSession:
+    conversation.session = AgentSession()
+    conversation.session.start_new(
         session_dir=_default_session_dir(),
         cwd=str(Path.cwd()),
         model=_current_session_model(conversation),
     )
-    object.__setattr__(conversation.agent, "session", ext.session)
-    return ext.session
+    return conversation.session
 
 
-async def start_new_session(conversation: Any) -> None:
+async def start_new_session(conversation: Conversation) -> None:
     """Clear all messages + reset state + create new AgentSession. Navigate to main if needed."""
-    from ._conversation_impl import (
+    from ._conversation import (
         _reset_context_usage,
-        _replace_items,
         _reset_runtime_state,
         _refresh_shell,
     )
 
-    context = getattr(conversation.agent, "context", None)
+    context = conversation.agent.context
     if context is not None:
         context.messages = []
         _reset_context_usage(context)
-    _replace_items(conversation, [])
+    conversation.message_list.replace_items([])
     _reset_runtime_state(conversation)
     _start_session(conversation)
     _refresh_shell(conversation)
@@ -381,24 +371,21 @@ async def start_new_session(conversation: Any) -> None:
         conversation.invalidate()
 
 
-async def resume_session(conversation: Any, session_path: str | Path) -> None:
+async def resume_session(conversation: Conversation, session_path: str | Path) -> None:
     """Load a saved session into the agent context and rebuild UI items."""
-    from ._conversation_impl import (
-        _cext,
+    from ._conversation import (
         _reset_context_usage,
-        _replace_items,
         _rebuild_items_from_messages,
         _reset_runtime_state,
         _refresh_shell,
     )
 
-    ext = _cext(conversation)
-    context = getattr(conversation.agent, "context", None)
+    context = conversation.agent.context
     if context is None:
         return
-    ext.session.resume(session_path, context)
+    conversation.session.resume(session_path, context)
     _reset_context_usage(context)
-    _replace_items(conversation, _rebuild_items_from_messages(context.messages))
+    conversation.message_list.replace_items(_rebuild_items_from_messages(context.messages))
     _reset_runtime_state(conversation)
     _refresh_shell(conversation)
     await conversation.navigate_to("")

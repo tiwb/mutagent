@@ -1,31 +1,27 @@
-"""Default block renderer implementation."""
+"""Block renderer and specialized fenced-block widgets — Declaration + Implementation."""
 
 from __future__ import annotations
 
 import re
 
 import mutobj
-from mutagent.webui.blocks import BlockRenderer, ThinkingBlock
-from mutgui import Callback, ViewBlock
+from mutgui import Callback, View, ViewBlock
+
+
+class BlockRenderer(View):
+    text: str = ""
+
+    def render(self) -> ViewBlock: ...
+
+
+class ThinkingBlock(View):
+    body: str = ""
+    expanded: bool = False
+
+    def render(self) -> ViewBlock: ...
+
 
 _FENCE_RE = re.compile(r"^```([^\n]*)$")
-
-
-@mutobj.impl(BlockRenderer.__init__)
-def block_renderer_init(self: BlockRenderer, *, text: str = "") -> None:
-    super(BlockRenderer, self).__init__()
-    self.id = f"block-renderer-{id(self)}"
-    self.text = text
-
-
-@mutobj.impl(ThinkingBlock.__init__)
-def thinking_block_init(
-    self: ThinkingBlock, *, body: str = "", expanded: bool = False
-) -> None:
-    super(ThinkingBlock, self).__init__()
-    self.id = f"thinking-{id(self)}"
-    self.body = body
-    self.expanded = expanded
 
 
 def _toggle_thinking(*, view: ThinkingBlock) -> None:
@@ -100,7 +96,7 @@ def _render_code_block(code: str, language: str) -> dict:
 
 def _render_mutagent_block(block_type: str, body: str) -> dict | ThinkingBlock:
     if block_type == "thinking":
-        return ThinkingBlock(body=body, expanded=False)
+        return ThinkingBlock(body=body)
     return {
         "$component": "div",
         "$id": f"mutagent-{block_type}-{abs(hash(body))}",

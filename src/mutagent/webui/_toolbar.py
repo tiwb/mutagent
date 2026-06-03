@@ -1,55 +1,51 @@
-"""Default toolbar widget implementations + toolbar-domain Actions."""
+"""Toolbar widgets: status bar — Declaration + Implementation, plus toolbar-domain Actions."""
 
 from __future__ import annotations
 
-import inspect
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import mutobj
-from mutagent.webui.toolbar import AgentStatusBar
-from mutgui import Action, ActionContext, ActionRef, Callback, Expr, ViewBlock
+from mutgui import Action, ActionContext, ActionRef, ActionToolbar, Callback, Expr, View, ViewBlock
+
+if TYPE_CHECKING:
+    from ._conversation import Conversation
+    from mutgui.view import ViewId
+
+
+class AgentToolbar(ActionToolbar):
+    """Conversation 顶栏，封装 ActionToolbar 配置和 toolbar 域 Actions 上下文。"""
+    id: ViewId = "conversation-toolbar"
+    conversation: Conversation
+
+    def __init__(self, *, conversation: Conversation) -> None:
+        super(AgentToolbar, self).__init__()
+        self.categories = ["mutagent.conversation.toolbar"]
+        self.context = ActionContext(data={"conversation": conversation})
+        self.conversation = conversation
+
+
+class AgentStatusBar(View):
+    id: ViewId = "agent-status-bar"
+    status: str = "idle"
+    input_tokens: int = 0
+    output_tokens: int = 0
+    context_percent: float = 0.0
+    context_total: int = 0
+    context_used: int = 0
+    total_cost: float = 0.0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    expanded: bool = False
+
+    def render(self) -> ViewBlock: ...
 
 
 # ── 私有辅助：从 ActionContext 提取 Conversation；通用 async 调用包装 ─────
-def _conversation(context: ActionContext) -> Any | None:
-    return context.get("conversation")
-
-
-async def _call_action(handler: Any, *args: Any) -> None:
-    if handler is None:
-        return
-    result = handler(*args)
-    if inspect.isawaitable(result):
-        await result
-
-
-@mutobj.impl(AgentStatusBar.__init__)
-def agent_status_bar_init(
-    self: AgentStatusBar,
-    *,
-    status: str = "idle",
-    input_tokens: int = 0,
-    output_tokens: int = 0,
-    context_percent: float = 0.0,
-    context_total: int = 0,
-    context_used: int = 0,
-    total_cost: float = 0.0,
-    cache_read_tokens: int = 0,
-    cache_write_tokens: int = 0,
-    expanded: bool = False,
-) -> None:
-    super(AgentStatusBar, self).__init__()
-    self.id = "agent-status-bar"
-    self.status = status
-    self.input_tokens = input_tokens
-    self.output_tokens = output_tokens
-    self.context_percent = context_percent
-    self.context_total = context_total
-    self.context_used = context_used
-    self.total_cost = total_cost
-    self.cache_read_tokens = cache_read_tokens
-    self.cache_write_tokens = cache_write_tokens
-    self.expanded = expanded
+def _conversation(context: ActionContext) -> Conversation:
+    ret = context.get("conversation")
+    if not ret:
+        raise ValueError("Conversation not found in ActionContext")
+    return ret
 
 
 def _format_count(n: int) -> str:
@@ -71,10 +67,33 @@ def _format_count(n: int) -> str:
     return str(n)
 
 
+def _on_expand_change(self: AgentStatusBar, visible: bool) -> None:
+    self.expanded = visible
+    self.invalidate()
+
+
 @mutobj.impl(AgentStatusBar.render)
 def agent_status_bar_render(self: AgentStatusBar) -> ViewBlock:
     # 紧凑行内容
     segments: list[dict[str, Any]] = []
+
+    # Status
+    if self.status:
+        status_color = {
+            "idle": "var(--mutgui-text-dim)",
+            "busy": "var(--mutgui-accent)",
+            "error": "var(--mutgui-danger, #ff4d4f)",
+        }.get(self.status, "var(--mutgui-text-dim)")
+        segments.append({
+            "$component": "div",
+            "$id": "status-text",
+            "style": {
+                "fontSize": "var(--mutagent-font-size-meta)",
+                "color": status_color,
+                "fontVariantNumeric": "tabular-nums",
+            },
+            "children": self.status,
+        })
 
     # Cost
     cost_text = f"${self.total_cost:.3f}" if self.total_cost else "$0"
@@ -203,11 +222,7 @@ def agent_status_bar_render(self: AgentStatusBar) -> ViewBlock:
         "placement": "bottomRight",
         "arrow": True,
         "open": self.expanded,
-        "onOpenChange": Callback(
-            lambda visible, *, view: setattr(view, 'expanded', visible) or view.invalidate(),
-            Expr.wire("$0"),
-            view=self,
-        ),
+        "onOpenChange": Callback(_on_expand_change, self, Expr.wire("$0")),
         "content": detail_panel,
         "$children": [compact_row],
     }])
@@ -226,19 +241,16 @@ class ModelSelectorAction(Action):
     menu_placement = "bottom-start"
 
     def resolved_label(self, context: ActionContext | None = None) -> str:
-        if context:
-            conv = context.get("conversation")
-            if conv and getattr(conv, "current_model", ""):
-                return conv.current_model
-        return self.label or "Model"
+        assert context is not None
+        return _conversation(context).current_model
 
     def check_enabled(self, context: ActionContext) -> bool:
         conv = _conversation(context)
-        return not getattr(conv, "is_busy", False)
+        return not conv.is_busy
 
     def menu_actions(self, context: ActionContext) -> list[ActionRef]:
         conv = _conversation(context)
-        app = getattr(conv, "app", None)
+        app = conv.app
         models = app.config.list_models() if app else []
         return [
             ActionRef(action=SelectModelAction(str(m.get("name", ""))))
@@ -261,11 +273,11 @@ class SelectModelAction(Action):
 
     def check_checked(self, context: ActionContext) -> bool:
         conv = _conversation(context)
-        return getattr(conv, "current_model", "") == self._model_name
+        return conv.current_model == self._model_name
 
     async def execute(self, context: ActionContext) -> None:
         conv = _conversation(context)
-        await _call_action(getattr(conv, "_handle_model_change", None), self._model_name)
+        conv.change_model(self._model_name)
 
 
 class AgentStatusAction(Action):
@@ -278,7 +290,7 @@ class AgentStatusAction(Action):
 
     def toolbar_view(self, context: ActionContext) -> Any:
         conversation = _conversation(context)
-        return getattr(conversation, "status_bar", None)
+        return conversation.status_bar
 
 
 class MainMenuAction(Action):

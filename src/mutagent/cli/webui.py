@@ -48,7 +48,7 @@ def _ensure_console_logging(level_name: str = "WARNING") -> None:
 def dispatch_webui(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     """启动 WebUI server。"""
     try:
-        from mutagent.webui.server import WebUIServer
+        from mutagent.webui import WebUIServer
     except ImportError as exc:
         raise SystemExit("需要先安装 WebUI 依赖：pip install mutagent[webui]") from exc
 

@@ -23,13 +23,14 @@ from mutagent.sandbox import MCPConnection
 from mutagent.sandbox._mcp_impl import MCPConnectionImpl, _sanitize_ns_name
 from mutagent.sandbox._namespace_impl import connection_status
 from mutagent.sandbox._signature import format_callable_signature
-from mutagent.webui.settings import SettingsPanel
+from ._settings_page import SettingPanel
 from mutgui import Bind, Callback, ViewBlock
 from mutgui.view import ViewId
 from mutobj import field
 
 if TYPE_CHECKING:
-    from mutagent.webui.conversation import Conversation
+    from ._conversation import Conversation
+    from ._settings_page import SettingsPage
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,7 @@ def _connection_impl(conn: MCPConnection) -> MCPConnectionImpl:
 # ═══════════════════════════════════════════════════════════════
 
 
-class MCPSettingsPanel(SettingsPanel):
+class MCPSettingPanel(SettingPanel):
     """MCP 连接配置面板。
 
     SettingsDrawer 通过 `discover_subclasses` 自动发现并实例化。
@@ -68,7 +69,6 @@ class MCPSettingsPanel(SettingsPanel):
     panel_placement: ClassVar[str] = "settings:10/20"
     panel_width: ClassVar[int] = 640
 
-    conversation: Conversation | None = None
     _drafts: dict[str, dict[str, Any]] = field(default_factory=dict[str, Any])
     _conns: dict[str, MCPConnection] = field(default_factory=dict[str, MCPConnection])
     _async_error: str = ""
@@ -95,12 +95,12 @@ class MCPSettingsPanel(SettingsPanel):
     expanded_ns: set = field(default_factory=set)
     expanded_fn: set = field(default_factory=set)
 
-    def __init__(self: MCPSettingsPanel, *, conversation: Conversation | None = None) -> None:
-        super(MCPSettingsPanel, self).__init__()
-        self.conversation = conversation
+    def __init__(self: MCPSettingPanel, *, page: SettingsPage) -> None:
+        super(MCPSettingPanel, self).__init__()
+        self.page = page
         _load_from_config(self)
 
-    def render(self: MCPSettingsPanel) -> ViewBlock:
+    def render(self: MCPSettingPanel) -> ViewBlock:
         if self.current_step == "edit":
             children = _render_edit(self)
         else:
@@ -238,7 +238,7 @@ def _draft_to_config(draft: dict[str, Any]) -> dict[str, Any]:
     return cfg
 
 
-def _persist_current_form(self: MCPSettingsPanel
+def _persist_current_form(self: MCPSettingPanel
                           ) -> tuple[dict[str, Any], list[str]]:
     """把 form_* 字段抓回 draft，同时返回 env 解析错误列表。"""
     env_dict, env_errors = _parse_env_text(self.form_env_text)
@@ -258,7 +258,7 @@ def _persist_current_form(self: MCPSettingsPanel
     return draft, env_errors
 
 
-def _apply_draft_to_form(self: MCPSettingsPanel, draft: dict[str, Any]) -> None:
+def _apply_draft_to_form(self: MCPSettingPanel, draft: dict[str, Any]) -> None:
     self.form_name = str(draft["name"])
     self.form_transport = str(draft["transport"])
     self.form_command = str(draft.get("command", ""))
@@ -276,31 +276,27 @@ def _apply_draft_to_form(self: MCPSettingsPanel, draft: dict[str, Any]) -> None:
 # ═══════════════════════════════════════════════════════════════
 
 
-def _write_config(self: MCPSettingsPanel,
+def _write_config(self: MCPSettingPanel,
                   mcp_sources: dict[str, dict[str, Any]]) -> None:
-    config = self.conversation.app.config
+    config = self.page.conversation.app.config
     config.set("mcp_sources", mcp_sources, source="webui")
     config.save()
 
 
-def _load_from_config(self: MCPSettingsPanel) -> None:
+def _load_from_config(self: MCPSettingPanel) -> None:
     """从 config + sandbox 反查，刷新 self._drafts / self._conns。
 
     drafts: dict[原始 key, draft dict]
     conns: dict[原始 key, MCPConnection]
     两者按原始 key 对齐；conn 可能没有（rename/未启动）。
     """
-    cfg_sources = self.conversation.app.config.get("mcp_sources", default={}) or {}
+    cfg_sources = self.page.conversation.app.config.get("mcp_sources", default={}) or {}
     self._drafts = {
         key: _draft_from_config(key, deepcopy(cfg))
         for key, cfg in cfg_sources.items()
         if isinstance(cfg, dict)
     }
-    sandbox = getattr(self.conversation.app, "sandbox", None)
-    if sandbox is not None and hasattr(sandbox, "list_sources"):
-        self._conns = sandbox.list_sources()
-    else:
-        self._conns = {}
+    self._conns = self.page.conversation.app.sandbox.list_sources()
     self.current_step = "list"
     self.editing_key = ""
     self.editing_is_new = False
@@ -310,7 +306,7 @@ def _load_from_config(self: MCPSettingsPanel) -> None:
     _set_message(self)
 
 
-def _set_message(self: MCPSettingsPanel, *, error: str = "",
+def _set_message(self: MCPSettingPanel, *, error: str = "",
                  notice: str = "") -> None:
     self.error = error
     self.notice = notice
@@ -321,7 +317,7 @@ def _set_message(self: MCPSettingsPanel, *, error: str = "",
 # ═══════════════════════════════════════════════════════════════
 
 
-def _check_name_conflicts(self: MCPSettingsPanel,
+def _check_name_conflicts(self: MCPSettingPanel,
                           new_name: str) -> str:
     """返回错误描述；空字符串表示无冲突。
 
@@ -349,7 +345,7 @@ def _check_name_conflicts(self: MCPSettingsPanel,
     return ""
 
 
-def _unique_name(self: MCPSettingsPanel, base: str) -> str:
+def _unique_name(self: MCPSettingPanel, base: str) -> str:
     candidate = base
     idx = 2
     while candidate in self._drafts:
@@ -363,7 +359,7 @@ def _unique_name(self: MCPSettingsPanel, base: str) -> str:
 # ═══════════════════════════════════════════════════════════════
 
 
-def _conn_state(self: MCPSettingsPanel, key: str) -> str:
+def _conn_state(self: MCPSettingPanel, key: str) -> str:
     conn = self._conns.get(key)
     if conn is None:
         return "disconnected"
@@ -429,16 +425,13 @@ def _config_changed_at_runtime(draft: dict[str, Any],
 # ═══════════════════════════════════════════════════════════════
 
 
-def _sandbox_loop(self: MCPSettingsPanel) -> asyncio.AbstractEventLoop | None:
+def _sandbox_loop(self: MCPSettingPanel) -> asyncio.AbstractEventLoop | None:
     from mutagent.sandbox._env_impl import _get_async_loop
 
-    sandbox = getattr(self.conversation.app, "sandbox", None)
-    if sandbox is None:
-        return None
-    return _get_async_loop(sandbox)
+    return _get_async_loop(self.page.conversation.app.sandbox)
 
 
-def _ensure_conn(self: MCPSettingsPanel, key: str) -> MCPConnection | None:
+def _ensure_conn(self: MCPSettingPanel, key: str) -> MCPConnection | None:
     """按需创建 MCPConnection（仅本地缓存，不注册到 sandbox）。
 
     - 已有 → 直接返回
@@ -466,7 +459,7 @@ def _ensure_conn(self: MCPSettingsPanel, key: str) -> MCPConnection | None:
     return conn
 
 
-def _submit_async(self: MCPSettingsPanel, coro: Any,
+def _submit_async(self: MCPSettingPanel, coro: Any,
                   pending_token: str) -> None:
     """提交协程到 sandbox loop，完成后 invalidate panel 触发重渲染。"""
     loop = _sandbox_loop(self)
@@ -491,26 +484,22 @@ def _submit_async(self: MCPSettingsPanel, coro: Any,
         else:
             _set_message(self)
         # 反查 sandbox conns（autostart 后端自动新增的 conn 也能拿到）
-        sandbox = getattr(self.conversation.app, "sandbox", None)
-        if sandbox is not None and hasattr(sandbox, "list_sources"):
-            self._conns = sandbox.list_sources()
+        self._conns = self.page.conversation.app.sandbox.list_sources()
         self.invalidate()
 
     fut = asyncio.run_coroutine_threadsafe(coro, loop)
     fut.add_done_callback(_done)
 
 
-async def _do_connect(self: MCPSettingsPanel, key: str) -> None:
+async def _do_connect(self: MCPSettingPanel, key: str) -> None:
     conn = _ensure_conn(self, key)
     if conn is None:
         raise RuntimeError(f"Connection '{key}' could not be created.")
-    sandbox = getattr(self.conversation.app, "sandbox", None)
-    if sandbox is not None:
-        sandbox.connect_source(conn)
+    self.page.conversation.app.sandbox.connect_source(conn)
     await conn.reconnect()
 
 
-async def _do_disconnect(self: MCPSettingsPanel, key: str) -> None:
+async def _do_disconnect(self: MCPSettingPanel, key: str) -> None:
     conn = self._conns.get(key)
     if conn is None:
         return
@@ -521,7 +510,7 @@ async def _do_disconnect(self: MCPSettingsPanel, key: str) -> None:
     await conn.close()
 
 
-async def _do_reconnect(self: MCPSettingsPanel, key: str) -> None:
+async def _do_reconnect(self: MCPSettingPanel, key: str) -> None:
     conn = self._conns.get(key)
     if conn is None:
         await _do_connect(self, key)
@@ -534,19 +523,19 @@ async def _do_reconnect(self: MCPSettingsPanel, key: str) -> None:
 # ═══════════════════════════════════════════════════════════════
 
 
-def _btn_connect(key: str, *, view: MCPSettingsPanel) -> None:
+def _btn_connect(key: str, *, view: MCPSettingPanel) -> None:
     _submit_async(view, _do_connect(view, key), f"{key}:connect")
 
 
-def _btn_disconnect(key: str, *, view: MCPSettingsPanel) -> None:
+def _btn_disconnect(key: str, *, view: MCPSettingPanel) -> None:
     _submit_async(view, _do_disconnect(view, key), f"{key}:disconnect")
 
 
-def _btn_reconnect(key: str, *, view: MCPSettingsPanel) -> None:
+def _btn_reconnect(key: str, *, view: MCPSettingPanel) -> None:
     _submit_async(view, _do_reconnect(view, key), f"{key}:reconnect")
 
 
-def _btn_reload_tools(key: str, *, view: MCPSettingsPanel) -> None:
+def _btn_reload_tools(key: str, *, view: MCPSettingPanel) -> None:
     _submit_async(view, _do_reconnect(view, key), f"{key}:reload")
 
 
@@ -555,7 +544,7 @@ def _btn_reload_tools(key: str, *, view: MCPSettingsPanel) -> None:
 # ═══════════════════════════════════════════════════════════════
 
 
-def _edit_source(key: str, *, view: MCPSettingsPanel) -> None:
+def _edit_source(key: str, *, view: MCPSettingPanel) -> None:
     draft = view._drafts.get(key)
     if draft is None:
         return
@@ -567,7 +556,7 @@ def _edit_source(key: str, *, view: MCPSettingsPanel) -> None:
     view.invalidate()
 
 
-def _start_add(transport: str, *, view: MCPSettingsPanel) -> None:
+def _start_add(transport: str, *, view: MCPSettingPanel) -> None:
     base = "stdio-source" if transport == "stdio" else "http-source"
     name = _unique_name(view, base)
     draft = _make_draft(name, transport=transport)
@@ -579,14 +568,14 @@ def _start_add(transport: str, *, view: MCPSettingsPanel) -> None:
     view.invalidate()
 
 
-def _back_to_list(*, view: MCPSettingsPanel) -> None:
+def _back_to_list(*, view: MCPSettingPanel) -> None:
     view.current_step = "list"
     view.editing_is_new = False
     _set_message(view)
     view.invalidate()
 
 
-def _save_edits(*, view: MCPSettingsPanel) -> None:
+def _save_edits(*, view: MCPSettingPanel) -> None:
     """保存当前编辑的 source。
 
     决策 C：只持久化 config，不动运行时连接。
@@ -619,10 +608,9 @@ def _save_edits(*, view: MCPSettingsPanel) -> None:
     # rename → 删旧 conn（摘 namespace 触发 close），新 conn 等用户点 Connect
     if is_rename:
         old_conn = view._conns.pop(old_key, None)
-        sandbox = getattr(view.conversation.app, "sandbox", None)
-        if old_conn is not None and sandbox is not None:
+        if old_conn is not None:
             try:
-                sandbox.disconnect_source(old_key)
+                view.page.conversation.app.sandbox.disconnect_source(old_key)
             except Exception as exc:
                 logger.warning("Cleanup old conn '%s' failed: %s", old_key, exc)
         view._drafts.pop(old_key, None)
@@ -645,7 +633,7 @@ def _save_edits(*, view: MCPSettingsPanel) -> None:
     view.invalidate()
 
 
-def _delete_source(*, view: MCPSettingsPanel) -> None:
+def _delete_source(*, view: MCPSettingPanel) -> None:
     if view.editing_is_new:
         # 新增 draft 还没落盘，直接丢弃
         _back_to_list(view=view)
@@ -656,10 +644,9 @@ def _delete_source(*, view: MCPSettingsPanel) -> None:
         return
     # 摘 conn + namespace
     conn = view._conns.pop(key, None)
-    sandbox = getattr(view.conversation.app, "sandbox", None)
-    if conn is not None and sandbox is not None:
+    if conn is not None:
         try:
-            sandbox.disconnect_source(key)
+            view.page.conversation.app.sandbox.disconnect_source(key)
         except Exception as exc:
             logger.warning("Cleanup conn '%s' failed: %s", key, exc)
     view._drafts.pop(key, None)
@@ -677,7 +664,7 @@ def _delete_source(*, view: MCPSettingsPanel) -> None:
     view.invalidate()
 
 
-async def _close_panel(*, view: MCPSettingsPanel) -> None:
+async def _close_panel(*, view: MCPSettingPanel) -> None:
     await view.page.close()
 
 
@@ -686,7 +673,7 @@ async def _close_panel(*, view: MCPSettingsPanel) -> None:
 # ═══════════════════════════════════════════════════════════════
 
 
-def _render_message(self: MCPSettingsPanel, *, margin_bottom: int = 12
+def _render_message(self: MCPSettingPanel, *, margin_bottom: int = 12
                     ) -> list[dict[str, Any]]:
     if self.error:
         return [{
@@ -714,7 +701,7 @@ def _render_message(self: MCPSettingsPanel, *, margin_bottom: int = 12
 # ═══════════════════════════════════════════════════════════════
 
 
-def _render_list_row(self: MCPSettingsPanel, key: str,
+def _render_list_row(self: MCPSettingPanel, key: str,
                      draft: dict[str, Any]) -> dict[str, Any]:
     conn = self._conns.get(key)
     state = _conn_state(self, key)
@@ -820,7 +807,7 @@ def _render_list_row(self: MCPSettingsPanel, key: str,
     }
 
 
-def _render_list(self: MCPSettingsPanel) -> list[dict[str, Any]]:
+def _render_list(self: MCPSettingPanel) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     items.extend(_render_message(self))
     items.append({
@@ -881,7 +868,7 @@ def _render_list(self: MCPSettingsPanel) -> list[dict[str, Any]]:
             "fontSize": "12px",
             "color": "var(--mutgui-text-dim)",
         },
-        "children": f"Config file: {self.conversation.app.config.path or '(not saved)'}",
+        "children": f"Config file: {self.page.conversation.app.config.path or '(not saved)'}",
     })
 
 
@@ -893,7 +880,7 @@ def _render_list(self: MCPSettingsPanel) -> list[dict[str, Any]]:
 # ═══════════════════════════════════════════════════════════════
 
 
-def _toggle_ns(ns_name: str, *, view: MCPSettingsPanel) -> None:
+def _toggle_ns(ns_name: str, *, view: MCPSettingPanel) -> None:
     """点击 namespace 行：展开/折叠 Level 2 函数列表。"""
     if ns_name in view.expanded_ns:
         view.expanded_ns.discard(ns_name)
@@ -902,7 +889,7 @@ def _toggle_ns(ns_name: str, *, view: MCPSettingsPanel) -> None:
     view.invalidate()
 
 
-def _toggle_fn(full_name: str, *, view: MCPSettingsPanel) -> None:
+def _toggle_fn(full_name: str, *, view: MCPSettingPanel) -> None:
     """点击函数行：展开/折叠 Level 3 函数详情。"""
     if full_name in view.expanded_fn:
         view.expanded_fn.discard(full_name)
@@ -946,8 +933,8 @@ def _fn_detail(func: Any, fn_name: str) -> str:
     return '\n'.join(lines)
 
 
-def _render_function_browser(self: MCPSettingsPanel,
-                              conn: MCPConnection | None) -> dict[str, Any]:
+def _render_function_browser(self: MCPSettingPanel,
+                             conn: MCPConnection | None) -> dict[str, Any]:
     """Level 1~3 逐级展开：namespace → 函数列表 → 函数详情。
 
     每个 namespace 展示为可点击展开的行（Level 1），展开后显示
@@ -1174,7 +1161,7 @@ def _sanitized_hint(name: str) -> str:
     return f"运行时名: {s}（已 sanitize）"
 
 
-def _render_edit(self: MCPSettingsPanel) -> list[dict[str, Any]]:
+def _render_edit(self: MCPSettingPanel) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     key = self.editing_key
     conn = self._conns.get(key)

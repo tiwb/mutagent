@@ -33,5 +33,4 @@ class AgentContext(mutobj.Declaration):
         ...
 
 
-
 from . import _context_impl as _context_impl  # noqa: F401, E402

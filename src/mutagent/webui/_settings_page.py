@@ -1,37 +1,64 @@
-"""Default SettingsPage implementation + settings-domain Actions.
-
-全页面式 SettingsPage —— 替代旧的 SettingsDrawer 浮层。
-
-通过 ``self.conversation`` 级联引用直接访问 Conversation 的路由/模型刷新能力，
-不再需要回调注入。
-"""
+"""Settings subsystem 全页面式 SettingsPage 。 """
 
 from __future__ import annotations
 
-import inspect
-from typing import Any, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING, ClassVar
 
 import mutobj
 from mutobj import AttributeDescriptor
-from mutagent.webui.settings import SettingsPage, SettingsPanel
-from mutgui import Action, ActionContext, Callback, Expr, ViewBlock
+from mutgui import Action, ActionContext, Callback, Expr, View, ViewBlock
 
 if TYPE_CHECKING:
-    from mutagent.webui.conversation import Conversation
+    from ._conversation import Conversation
 
 
-# ── Extension ─────────────────────────────────────────────────
+class SettingsPage(View):
+    """全页面设置容器（替代旧的 SettingsDrawer 浮层）。
 
-class SettingsPageExt(mutobj.Extension[SettingsPage]):
-    """SettingsPage 的运行时私有状态。"""
-    conversation: Conversation | None = None
-    panels: dict[str, SettingsPanel] = mutobj.field(default_factory=dict)
+    路由权威由 Conversation 持有；本类不持有 ``is_open``/打开状态字段。
+    panel 切换通过 ``activate(panel_id)`` / ``deactivate()`` 由
+    Conversation 显式驱动。
+
+    通过与 Conversation 的级联引用直接完成导航：
+    ``self.conversation.navigate_to(route)``。
+    """
+
+    active_panel_id: str
+    conversation: Conversation
+    panels: dict[str, SettingPanel] = mutobj.field(default_factory=dict)
     ordered_panel_ids: list[str] = mutobj.field(default_factory=list)
     active: bool = False
 
+    def __init__(self, *, conversation: Conversation) -> None: ...
 
-def _spext(self: SettingsPage) -> SettingsPageExt:
-    return SettingsPageExt.get_or_create(self)
+    def render(self) -> ViewBlock: ...
+
+    async def activate(self, panel_id: str) -> None: ...
+    async def deactivate(self) -> None: ...
+    async def close(self) -> None: ...
+
+    def list_panels(self) -> list[SettingPanel]: ...
+
+
+class SettingPanel(View):
+    """所有设置面板基类。子类声明 panel_id / panel_title / panel_placement。
+
+    SettingsPage 通过 discover_subclasses 自动发现所有子类，
+    分配到对应 panel_id 路由。每个子类独占一个 _settings_<name>.py 文件。
+    """
+
+    panel_id: ClassVar[str] = ""
+    panel_title: ClassVar[str] = ""
+    panel_placement: ClassVar[str] = ""
+    panel_width: ClassVar[int] = 560
+    page: SettingsPage
+
+    def render(self) -> ViewBlock: ...
+
+    def on_open(self) -> None: ...
+    def on_close(self) -> None: ...
+
+    def load_config(self) -> None: ...
 
 
 # ── helpers ──────────────────────────────────────────────────
@@ -51,15 +78,6 @@ def _resolve_panel_attr(cls, attr_name: str, default: str = "") -> str:
     return str(desc) if desc else default
 
 
-async def _call_maybe_async(handler: Any, *args: Any) -> None:
-    """通用调用：handler 为 None 跳过；同步/异步均支持。"""
-    if handler is None:
-        return
-    result = handler(*args)
-    if inspect.isawaitable(result):
-        await result
-
-
 # ── @impl: __init__ ──────────────────────────────────────────
 
 
@@ -67,53 +85,46 @@ async def _call_maybe_async(handler: Any, *args: Any) -> None:
 def settings_page_init__(
     self: SettingsPage,
     *,
-    conversation: Conversation | None = None,
+    conversation: Conversation,
 ) -> None:
     super(SettingsPage, self).__init__()
-    ext = _spext(self)
     self.id = "settings-page"
     self.conversation = conversation
-    ext.conversation = conversation
     self.active_panel_id = ""
 
     # ── 发现并实例化全部 SettingsPanel 子类 ─────
-    panel_classes = mutobj.discover_subclasses(SettingsPanel)
-    ext.panels = {}
-    ext.ordered_panel_ids = []
+    panel_classes = mutobj.discover_subclasses(SettingPanel)
+    self.panels = {}
+    self.ordered_panel_ids = []
 
     for cls in panel_classes:
         panel_id = _resolve_panel_attr(cls, "panel_id")
         if not panel_id:
             continue
-        panel = cls(conversation=conversation)
-        setattr(panel, "page", self)
-        ext.panels[panel_id] = panel
+        panel = cls(page=self)
+        self.panels[panel_id] = panel
 
     def _placement_key(panel_id: str) -> str:
-        panel = ext.panels[panel_id]
+        panel = self.panels[panel_id]
         placement = _resolve_panel_attr(type(panel), "panel_placement")
         return placement or f"zzzz:{panel_id}"
 
-    ext.ordered_panel_ids = sorted(ext.panels.keys(), key=_placement_key)
-    if ext.ordered_panel_ids:
-        self.active_panel_id = ext.ordered_panel_ids[0]
+    self.ordered_panel_ids = sorted(self.panels.keys(), key=_placement_key)
+    if self.ordered_panel_ids:
+        self.active_panel_id = self.ordered_panel_ids[0]
     # 是否处于"已激活"状态。初始 False：``active_panel_id`` 只是默认占位，
     # panel 未触发过 ``on_open``。activate / deactivate 均仅在 active=True 时
     # 才 close 旧 panel，避免首次进入 settings 时误发 close 事件。
-    ext.active = False
-
-
-# ── @impl: render ────────────────────────────────────────────
+    self.active = False
 
 
 @mutobj.impl(SettingsPage.render)
 def settings_page_render(self: SettingsPage) -> ViewBlock:
-    ext = _spext(self)
-    active = ext.panels.get(self.active_panel_id)
+    active = self.panels.get(self.active_panel_id)
 
     menu_items: list[dict[str, Any]] = []
-    for panel_id in ext.ordered_panel_ids:
-        panel = ext.panels[panel_id]
+    for panel_id in self.ordered_panel_ids:
+        panel = self.panels[panel_id]
         title = _resolve_panel_attr(type(panel), "panel_title") or panel_id
         menu_items.append({"key": panel_id, "label": title})
 
@@ -239,43 +250,32 @@ def settings_page_render(self: SettingsPage) -> ViewBlock:
     return ViewBlock([root])
 
 
-# ── @impl: activate / deactivate / close / list / notify ─────
-
-
 @mutobj.impl(SettingsPage.activate)
 async def settings_page_activate(self: SettingsPage, panel_id: str) -> None:
-    ext = _spext(self)
-    target = panel_id or (ext.ordered_panel_ids[0] if ext.ordered_panel_ids else "")
-    if not target or target not in ext.panels:
+    target = panel_id or (self.ordered_panel_ids[0] if self.ordered_panel_ids else "")
+    if not target or target not in self.panels:
         return
 
-    if ext.active:
-        prev = ext.panels.get(self.active_panel_id)
-        if prev is not None and prev is not ext.panels.get(target):
-            on_close = getattr(prev, "on_close", None)
-            if callable(on_close):
-                await _call_maybe_async(on_close)
+    if self.active:
+        prev = self.panels.get(self.active_panel_id)
+        if prev is not None and prev is not self.panels.get(target):
+            prev.on_close()
 
     self.active_panel_id = target
-    ext.active = True
-    new_panel = ext.panels[target]
-    on_open = getattr(new_panel, "on_open", None)
-    if callable(on_open):
-        await _call_maybe_async(on_open)
+    self.active = True
+    new_panel = self.panels[target]
+    new_panel.on_open()
     new_panel.invalidate()
     self.invalidate()
 
 
 @mutobj.impl(SettingsPage.deactivate)
 async def settings_page_deactivate(self: SettingsPage) -> None:
-    ext = _spext(self)
-    if ext.active:
-        prev = ext.panels.get(self.active_panel_id)
+    if self.active:
+        prev = self.panels.get(self.active_panel_id)
         if prev is not None:
-            on_close = getattr(prev, "on_close", None)
-            if callable(on_close):
-                await _call_maybe_async(on_close)
-    ext.active = False
+            prev.on_close()
+    self.active = False
     self.invalidate()
 
 
@@ -286,9 +286,8 @@ async def settings_page_close(self: SettingsPage) -> None:
 
 
 @mutobj.impl(SettingsPage.list_panels)
-def settings_page_list_panels(self: SettingsPage) -> list[SettingsPanel]:
-    ext = _spext(self)
-    return [ext.panels[pid] for pid in ext.ordered_panel_ids]
+def settings_page_list_panels(self: SettingsPage) -> list[SettingPanel]:
+    return [self.panels[pid] for pid in self.ordered_panel_ids]
 
 
 
@@ -321,3 +320,6 @@ class OpenSettingsAction(Action):
             await conv.navigate_to("settings")
 
 
+# 导入 settings panel 子类以触发 mutobj 注册（SettingsPage 发现子类前需要）
+from . import _settings_llm  # noqa: E402,F401
+from . import _settings_mcp  # noqa: E402,F401

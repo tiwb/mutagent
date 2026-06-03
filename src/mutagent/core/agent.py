@@ -35,7 +35,6 @@ class Agent(mutobj.Declaration):
     model: str
     tools: ToolSet
     context: AgentContext
-    session: Any  # 运行时由上层（如 mutbot）注入
 
     async def handle_tool_calls(
         self, tool_calls: list[ToolUseBlock]

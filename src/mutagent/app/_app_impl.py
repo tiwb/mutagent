@@ -139,11 +139,7 @@ async def app_connect_sources(self) -> None:
     - ``autostart=false``：完全 lazy，首次访问 namespace 成员时才连。
     - ``retry_cooldown``（默认 5s，0 禁用）：失败后冷却期内不重试。
     """
-    sandbox = getattr(self, "sandbox", None)
-    if sandbox is None:
-        logger.warning("connect_sources called before setup_agent; skipping")
-        return
-
+    sandbox = self.sandbox
     mcp_sources = self.config.get("mcp_sources", default={}) or {}
     for ns_name, server_cfg in mcp_sources.items():
         autostart = bool(server_cfg.get("autostart", True))

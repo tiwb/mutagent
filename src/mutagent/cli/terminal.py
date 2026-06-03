@@ -41,7 +41,6 @@ def _build_agent_session(app: App, resume: str | None = None) -> AgentSession:
     )
     if resume is not None:
         session.resume(resume, app.agent.context)
-    object.__setattr__(app.agent, "session", session)
     return session
 
 
@@ -237,7 +236,7 @@ def dispatch_terminal(parser: argparse.ArgumentParser, args: argparse.Namespace)
             print(f"\n[Error: {e}]", file=sys.stderr, flush=True)
 
     # 清理 sandbox + event loop
-    sandbox = getattr(app, "sandbox", None)
+    sandbox = app.sandbox
     try:
         session.sync(app.agent.context)
     except Exception:

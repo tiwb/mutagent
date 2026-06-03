@@ -558,7 +558,7 @@ def connection_status(
     namespace 上拿到的 reason 内容严格一致。
     """
     # 非 MCP namespace 没有 _connection，也不对外暴露状态
-    if getattr(ns, "_connection", None) is None:
+    if ns._connection is None:
         return (None, None)
     state = ns.connection_state
     if state != "failed":

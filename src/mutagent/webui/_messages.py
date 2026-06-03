@@ -1,50 +1,144 @@
-"""Default MessageList / ChatItemView implementations."""
+"""Message list widgets and chat item models — Declaration + Implementation."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import time
-from typing import Any
+from typing import Any, ClassVar, Generic, TypeVar
 
 import mutobj
-from mutagent.webui.blocks import BlockRenderer
-from mutagent.webui.messages import (
-    AssistantError,
-    AssistantErrorItem,
-    AssistantMessage,
-    AssistantTextItem,
-    ChatItem,
-    ChatItemView,
-    MessageList,
-    ToolCallCard,
-    ToolCallItem,
-    TurnSeparator,
-    TurnSeparatorItem,
-    UserMessage,
-    UserTextItem,
-)
+from ._blocks import BlockRenderer
 from mutgui import Callback, View, ViewBlock, VirtualList, VirtualListItemAdapter
 
-
-# ── Extensions ─────────────────────────────────────────────────
-
-class MessageListExt(mutobj.Extension[MessageList]):
-    """MessageList 的运行时私有状态。"""
-    adapter: Any = None
-    virtual_list: Any = None
+_T = TypeVar("_T", bound="ChatItem")
 
 
-class AssistantMessageExt(mutobj.Extension[AssistantMessage]):
-    """AssistantMessage 的运行时私有状态。"""
-    renderer: Any = None
+@dataclass(slots=True)
+class ChatItem:
+    id: str
+    kind: str
 
 
-def _mext(self: MessageList) -> MessageListExt:
-    return MessageListExt.get_or_create(self)
+@dataclass(slots=True)
+class UserTextItem(ChatItem):
+    text: str
+    timestamp: float = 0.0
 
 
-def _aext(self: AssistantMessage) -> AssistantMessageExt:
-    return AssistantMessageExt.get_or_create(self)
+@dataclass(slots=True)
+class AssistantTextItem(ChatItem):
+    text: str
+    model: str = ""
+    timestamp: float = 0.0
+    duration: float = 0.0
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+@dataclass(slots=True)
+class AssistantErrorItem(ChatItem):
+    error: str
+    timestamp: float = 0.0
+
+
+@dataclass(slots=True)
+class TurnSeparatorItem(ChatItem):
+    turn_id: str
+    duration: float = 0.0
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+@dataclass(slots=True)
+class ToolCallItem(ChatItem):
+    tool_id: str
+    name: str
+    input_text: str = ""
+    result_text: str = ""
+    status: str = "pending"
+    is_error: bool = False
+    duration: float = 0.0
+    expanded: bool = True
+
+
+class ChatItemView(View, Generic[_T]):
+    """所有 ChatItem 渲染器的统一基类。
+
+    泛型参数 ``_T`` 绑定具体 ChatItem 子类，子类继承时指定：
+    ``UserMessage(ChatItemView[UserTextItem])``。
+
+    ``item_type`` ClassVar 用于运行时自动发现，
+    ``ChatItemView.for_item()`` 据此自动分派 View 类。
+    上层项目新增 ChatItem + ChatItemView 子类即可扩展消息类型，
+    无需修改 mutagent 本身。
+    """
+
+    item: _T
+    item_type: ClassVar[type[ChatItem]] = ChatItem  # 子类必须覆盖
+
+    def render(self) -> ViewBlock: ...
+
+    @classmethod
+    def for_item(cls, item: ChatItem) -> "ChatItemView[ChatItem]": ...
+
+
+class MessageList(View):
+    items: list[ChatItem] = mutobj.field(default_factory=list)
+    adapter: _MessageListAdapter
+    virtual_list: VirtualList
+
+    def __init__(self) -> None: ...
+
+    def append_item(self, item: ChatItem) -> None: ...
+
+    def find_item(self, item_id: str) -> ChatItem | None: ...
+
+    def replace_items(self, items: list[ChatItem]) -> None: ...
+
+    def refresh(self) -> None: ...
+
+    def invalidate_item(self, item_id: str) -> None: ...
+
+    def render(self) -> ViewBlock: ...
+
+
+class UserMessage(ChatItemView[UserTextItem]):
+    item_type: ClassVar[type[ChatItem]] = UserTextItem
+    item: UserTextItem
+
+    def render(self) -> ViewBlock: ...
+
+
+class AssistantMessage(ChatItemView[AssistantTextItem]):
+    item_type: ClassVar[type[ChatItem]] = AssistantTextItem
+    item: AssistantTextItem
+    renderer: BlockRenderer
+
+    def __init__(self, *, item: AssistantTextItem) -> None: ...
+
+    def render(self) -> ViewBlock: ...
+
+
+class AssistantError(ChatItemView[AssistantErrorItem]):
+    item_type: ClassVar[type[ChatItem]] = AssistantErrorItem
+    item: AssistantErrorItem
+
+    def render(self) -> ViewBlock: ...
+
+
+class TurnSeparator(ChatItemView[TurnSeparatorItem]):
+    item_type: ClassVar[type[ChatItem]] = TurnSeparatorItem
+    item: TurnSeparatorItem
+
+    def render(self) -> ViewBlock: ...
+
+
+class ToolCallCard(ChatItemView[ToolCallItem]):
+    item_type: ClassVar[type[ChatItem]] = ToolCallItem
+    item: ToolCallItem
+
+    def render(self) -> ViewBlock: ...
 
 
 # ── 工具函数 ──────────────────────────────────────────────────
@@ -101,12 +195,6 @@ def _resolve_view_class(item_type: type[ChatItem]) -> type[ChatItemView]:
         ) from None
 
 
-@mutobj.impl(ChatItemView.__init__)
-def chat_item_view_init(self: ChatItemView, *, item: ChatItem) -> None:
-    super(ChatItemView, self).__init__()
-    self.item = item
-
-
 @mutobj.impl(ChatItemView.for_item)
 def chat_item_view_for_item(cls: type[ChatItemView], item: ChatItem) -> ChatItemView:
     view_cls = _resolve_view_class(type(item))
@@ -119,17 +207,17 @@ def chat_item_view_for_item(cls: type[ChatItemView], item: ChatItem) -> ChatItem
 
 
 class _MessageListAdapter(VirtualListItemAdapter):
-    items: list[ChatItem] = mutobj.field(default_factory=list)
+    message_list: MessageList
 
     @property
     def item_count(self) -> int:
-        return len(self.items)
+        return len(self.message_list.items)
 
     def item_id(self, index: int) -> str:
-        return self.items[index].id
+        return self.message_list.items[index].id
 
     def create_item_view(self, index: int) -> View:
-        return ChatItemView.for_item(self.items[index])
+        return ChatItemView.for_item(self.message_list.items[index])
 
     def invalidate_existing_item(self, item_id: str) -> None:
         for virtual_list in self.virtual_lists:
@@ -141,17 +229,13 @@ class _MessageListAdapter(VirtualListItemAdapter):
 
 
 @mutobj.impl(MessageList.__init__)
-def message_list_init(
-    self: MessageList, *, items: list[Any] | None = None
-) -> None:
+def message_list_init(self: MessageList) -> None:
     super(MessageList, self).__init__()
-    ext = _mext(self)
     self.id = "message-list"
-    self.items = items if items is not None else []
-    ext.adapter = _MessageListAdapter(items=self.items)
-    ext.virtual_list = VirtualList(
+    self.adapter = _MessageListAdapter(message_list=self)
+    self.virtual_list = VirtualList(
         id="chat-list",
-        adapter=ext.adapter,
+        adapter=self.adapter,
         stick_to_bottom=True,
         estimated_item_height=128,
     )
@@ -159,21 +243,17 @@ def message_list_init(
 
 @mutobj.impl(MessageList.refresh)
 def message_list_refresh(self: MessageList) -> None:
-    ext = _mext(self)
-    ext.adapter.invalidate()
+    self.adapter.invalidate()
     self.invalidate()
 
 
 @mutobj.impl(MessageList.invalidate_item)
 def message_list_invalidate_item(self: MessageList, item_id: str) -> None:
-    ext = _mext(self)
-    ext.adapter.invalidate_existing_item(item_id)
+    self.adapter.invalidate_existing_item(item_id)
 
 
 @mutobj.impl(MessageList.render)
 def message_list_render(self: MessageList) -> ViewBlock:
-    ext = _mext(self)
-    ext.adapter.items = self.items
     return ViewBlock([
         {
             "$component": "div",
@@ -185,9 +265,29 @@ def message_list_render(self: MessageList) -> ViewBlock:
                 "flexDirection": "column",
                 "overflow": "hidden",
             },
-            "$children": [ext.virtual_list],
+            "$children": [self.virtual_list],
         }
     ])
+
+
+@mutobj.impl(MessageList.append_item)
+def message_list_append_item(self: MessageList, item: ChatItem) -> None:
+    self.items.append(item)
+    self.refresh()
+
+
+@mutobj.impl(MessageList.find_item)
+def message_list_find_item(self: MessageList, item_id: str) -> ChatItem | None:
+    for item in self.items:
+        if item.id == item_id:
+            return item
+    return None
+
+
+@mutobj.impl(MessageList.replace_items)
+def message_list_replace_items(self: MessageList, items: list[ChatItem]) -> None:
+    self.items[:] = items
+    self.refresh()
 
 
 # ---------------------------------------------------------------------------
@@ -226,11 +326,6 @@ def _meta_style() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # UserMessage
 # ---------------------------------------------------------------------------
-
-
-@mutobj.impl(UserMessage.__init__)
-def user_message_init(self: UserMessage, *, item: UserTextItem) -> None:
-    super(UserMessage, self).__init__(item=item)
 
 
 @mutobj.impl(UserMessage.render)
@@ -280,17 +375,15 @@ def assistant_message_init(
     self: AssistantMessage, *, item: AssistantTextItem
 ) -> None:
     super(AssistantMessage, self).__init__(item=item)
-    ext = _aext(self)
-    ext.renderer = BlockRenderer(text=item.text)
-    ext.renderer.id = f"block-renderer-{item.id}"
+    self.renderer = BlockRenderer(text=item.text)
+    self.renderer.id = f"block-renderer-{item.id}"
 
 
 @mutobj.impl(AssistantMessage.render)
 def assistant_message_render(self: AssistantMessage) -> ViewBlock:
-    ext = _aext(self)
-    if ext.renderer.text != self.item.text:
-        ext.renderer = BlockRenderer(text=self.item.text)
-        ext.renderer.id = f"block-renderer-{self.item.id}"
+    if self.renderer.text != self.item.text:
+        self.renderer = BlockRenderer(text=self.item.text)
+        self.renderer.id = f"block-renderer-{self.item.id}"
     return ViewBlock([
         {
             "$component": "div",
@@ -312,7 +405,7 @@ def assistant_message_render(self: AssistantMessage) -> ViewBlock:
                                 timestamp=self.item.timestamp,
                             ),
                         },
-                        ext.renderer,
+                        self.renderer,
                     ],
                 }
             ],
@@ -323,13 +416,6 @@ def assistant_message_render(self: AssistantMessage) -> ViewBlock:
 # ---------------------------------------------------------------------------
 # AssistantError
 # ---------------------------------------------------------------------------
-
-
-@mutobj.impl(AssistantError.__init__)
-def assistant_error_init(
-    self: AssistantError, *, item: AssistantErrorItem
-) -> None:
-    super(AssistantError, self).__init__(item=item)
 
 
 @mutobj.impl(AssistantError.render)
@@ -377,13 +463,6 @@ def assistant_error_render(self: AssistantError) -> ViewBlock:
 # ---------------------------------------------------------------------------
 # TurnSeparator
 # ---------------------------------------------------------------------------
-
-
-@mutobj.impl(TurnSeparator.__init__)
-def turn_separator_init(
-    self: TurnSeparator, *, item: TurnSeparatorItem
-) -> None:
-    super(TurnSeparator, self).__init__(item=item)
 
 
 @mutobj.impl(TurnSeparator.render)
@@ -453,11 +532,6 @@ def _pretty_json(text: str) -> str:
         return json.dumps(json.loads(text), ensure_ascii=False, indent=2)
     except Exception:
         return text
-
-
-@mutobj.impl(ToolCallCard.__init__)
-def tool_call_card_init(self: ToolCallCard, *, item: ToolCallItem) -> None:
-    super(ToolCallCard, self).__init__(item=item)
 
 
 @mutobj.impl(ToolCallCard.render)

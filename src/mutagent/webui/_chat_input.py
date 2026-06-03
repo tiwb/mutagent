@@ -1,61 +1,48 @@
-"""Default ChatInput implementation + chat-input-domain Actions."""
+"""Chat input widget — Declaration + Implementation, plus chat-input-domain Actions."""
 
 from __future__ import annotations
 
 import mutobj
 
-import inspect
 import logging
-from functools import partial
-from typing import Any, Callable
+from typing import Any, TYPE_CHECKING
 
-from mutagent.webui.chat_input import ChatInput
-from mutgui import Action, ActionContext, ActionRef, ActionToolbar, Bind, Callback, ViewBlock
+from mutgui import Action, ActionContext, ActionRef, ActionToolbar, Bind, Callback, View, ViewBlock
+
+if TYPE_CHECKING:
+    from ._conversation import Conversation
+    from mutgui.view import ViewId
+
 
 logger = logging.getLogger(__name__)
 
 
-# ── Extension ──────────────────────────────────────────────
+class ChatInput(View):
+    id: ViewId = "chat-input"
+    text: str = ""
+    send_mode: str = "enter"
+    disabled: bool = False
+    toolbar: ActionToolbar
+    conversation: Conversation
 
-class ChatInputExt(mutobj.Extension[ChatInput]):
-    """ChatInput 的运行时私有状态。"""
-    on_send: Any = None
-    on_cancel: Any = None
-    submit_action: Any = None
-    cancel_action: Any = None
-    set_send_mode_action: Any = None
+    def __init__(self, *, conversation: Conversation) -> None: ...
 
-
-def _ciext(self: ChatInput) -> ChatInputExt:
-    return ChatInputExt.get_or_create(self)
+    def render(self) -> ViewBlock: ...
 
 
 @mutobj.impl(ChatInput.__init__)
 def chat_input_init__(
     self: ChatInput,
-    *,
-    on_send: Callable[[str], Any],
-    on_cancel: Callable[[], Any] | None = None,
+    conversation: Conversation,
 ) -> None:
-    ext = _ciext(self)
     super(ChatInput, self).__init__()
-    self.id = "chat-input"
-    self.text = ""
-    self.send_mode = "enter"
-    self.disabled = False
-    self.is_busy = False
     self.toolbar = ActionToolbar(
         id="chat-input-toolbar",
         categories=["mutagent.chat_input.toolbar"],
         context=ActionContext(data={"chat_input": self}),
         label_mode="auto",
     )
-    self.conversation = None
-    ext.on_send = on_send
-    ext.on_cancel = on_cancel
-    ext.submit_action = partial(_submit, view=self)
-    ext.cancel_action = partial(_cancel, view=self)
-    ext.set_send_mode_action = partial(_set_send_mode, view=self)
+    self.conversation = conversation
 
 
 async def _submit(*, view: ChatInput) -> None:
@@ -67,22 +54,14 @@ async def _submit(*, view: ChatInput) -> None:
         logger.info("ChatInput submit ignored: empty text")
         return
     logger.info("ChatInput submit triggered (%d chars)", len(text))
-    ext = _ciext(view)
-    result = ext.on_send(text)
-    if hasattr(result, "__await__"):
-        await result
+    await view.conversation.send(text)
     view.text = ""
     view.invalidate()
 
 
 async def _cancel(*, view: ChatInput) -> None:
-    ext = _ciext(view)
-    if ext.on_cancel is None:
-        return
     logger.info("ChatInput cancel triggered")
-    result = ext.on_cancel()
-    if hasattr(result, "__await__"):
-        await result
+    await view.conversation.cancel()
 
 
 def _set_send_mode(value: str, *, view: ChatInput) -> None:
@@ -120,16 +99,8 @@ def chat_input_render(self: ChatInput) -> ViewBlock:
 
 
 # ── 私有辅助 ─────────────────────────────────────────
-def _chat_input(context: ActionContext) -> Any | None:
+def _chat_input(context: ActionContext) -> ChatInput | None:
     return context.get("chat_input")
-
-
-async def _call_action(handler: Any, *args: Any) -> None:
-    if handler is None:
-        return
-    result = handler(*args)
-    if inspect.isawaitable(result):
-        await result
 
 
 # ── ChatInput 域 Actions ────────────────────────────
@@ -146,16 +117,15 @@ class SendMessageAction(Action):
 
     def check_enabled(self, context: ActionContext) -> bool:
         chat_input = _chat_input(context)
-        if chat_input is None or getattr(chat_input, "disabled", False):
+        if chat_input is None or chat_input.disabled:
             return False
-        return bool(str(getattr(chat_input, "text", "")).strip())
+        return bool(str(chat_input.text).strip())
 
     async def execute(self, context: ActionContext) -> None:
         chat_input = _chat_input(context)
         if chat_input is None:
             return
-        ext = _ciext(chat_input)
-        await _call_action(ext.submit_action)
+        await _submit(view=chat_input)
 
     def menu_actions(self, context: ActionContext) -> list[ActionRef]:
         return [
@@ -173,14 +143,15 @@ class CancelMessageAction(Action):
 
     def check_visible(self, context: ActionContext) -> bool:
         chat_input = _chat_input(context)
-        return bool(getattr(chat_input, "is_busy", False))
+        if chat_input is None:
+            return False
+        return bool(chat_input.conversation.is_busy)
 
     async def execute(self, context: ActionContext) -> None:
         chat_input = _chat_input(context)
         if chat_input is None:
             return
-        ext = _ciext(chat_input)
-        await _call_action(ext.cancel_action)
+        await _cancel(view=chat_input)
 
 
 class SetSendModeChoiceAction(Action):
@@ -196,11 +167,12 @@ class SetSendModeChoiceAction(Action):
 
     def check_checked(self, context: ActionContext) -> bool:
         chat_input = _chat_input(context)
-        return getattr(chat_input, "send_mode", "enter") == self.mode
+        if chat_input is None:
+            return False
+        return chat_input.send_mode == self.mode
 
     async def execute(self, context: ActionContext) -> None:
         chat_input = _chat_input(context)
         if chat_input is None:
             return
-        ext = _ciext(chat_input)
-        await _call_action(ext.set_send_mode_action, self.mode)
+        _set_send_mode(self.mode, view=chat_input)

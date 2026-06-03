@@ -1,11 +1,11 @@
-"""Default Conversation implementation."""
+"""Conversation root view and Agent ↔ View adapter — Declaration + Implementation."""
 
 from __future__ import annotations
 
 import time
 from functools import partial
 import logging
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import mutobj
 from mutagent.core._context_impl import ContextRuntime
@@ -17,52 +17,88 @@ from mutagent.core.messages import (
     ToolUseBlock,
 )
 from mutagent.core.llm import LLMApiClient
-from mutagent.webui.chat_input import ChatInput
-from mutagent.webui.conversation import Conversation
-from mutagent.webui.messages import (
+from ._chat_input import ChatInput
+from ._messages import (
     AssistantErrorItem,
     AssistantTextItem,
+    ChatItem,
     MessageList,
     ToolCallItem,
     TurnSeparatorItem,
     UserTextItem,
 )
-from mutagent.webui._session_page import ResumeSessionPage
-from mutagent.webui.toolbar import AgentStatusBar
-from mutagent.webui.settings import SettingsPage
-from mutgui import ActionContext, ActionToolbar, Callback, ViewBlock
+from ._session_page import ResumeSessionPage
+from ._toolbar import AgentStatusBar, AgentToolbar
+from ._settings_page import SettingsPage
+from mutgui import Callback, View, ViewBlock
 from mutgui.events import Event
 
+if TYPE_CHECKING:
+    from mutagent.core.agent import Agent, CancelFn
+    from mutagent.core.context import AgentContext
+    from mutagent.core.session import AgentSession
+    from mutagent.app.app import App
+
+
 logger = logging.getLogger(__name__)
+
+
+class Conversation(View):
+    """Root conversation shell for the built-in WebUI.
+
+    路由权威集中在此类。``current_route`` 是单一真相源：
+
+    - ``""``                — 对话主页
+    - ``"resume"``          — 历史 session 恢复页
+    - ``"settings"``        — 设置页（默认 panel）
+    - ``"settings/<id>"``   — 设置页的指定 panel
+
+    URL hash 由 mutgui 的 ``mutgui.setHash`` 命令 + ``$hashchange`` 事件
+    通道双向同步——本类既不直接读写 ``window.location.hash``，也不依赖
+    任何防循环标记位（W3C 规定 ``pushState`` 不触发 ``hashchange``，
+    天然无回环）。
+    """
+
+    current_route: str = ""
+    agent: Agent
+    app: App
+    current_model: str
+    status: str = "idle"
+    is_busy: bool = False
+    config_dirty: bool = False
+    message_list: MessageList
+    status_bar: AgentStatusBar
+    chat_input: ChatInput
+    toolbar: AgentToolbar
+    resume_page: ResumeSessionPage
+    settings_page: SettingsPage
+    session: AgentSession
+
+    def __init__(self, *, agent: Agent, app: App) -> None: ...
+
+    def render(self) -> ViewBlock: ...
+
+    async def navigate_to(self, route: str) -> None: ...
+    async def on_hash_change(self, hash_value: str) -> None: ...
+    async def on_event(self, event: Event) -> bool: ...
+
+    def change_model(self, model_name: str) -> None: ...
+    async def send(self, text: str) -> None: ...
+    async def cancel(self) -> None: ...
 
 
 # ── Extension ──────────────────────────────────────────────────────
 
 class ConversationExt(mutobj.Extension[Conversation]):
     """Conversation 的运行时私有状态。"""
-    items: list[Any] = mutobj.field(default_factory=list)
-    message_list: Any = None
-    status_bar: Any = None
-    chat_input: Any = None
-    toolbar: Any = None
-    resume_page: Any = None
-    settings_page: Any = None
-    session: Any = None
     cancel_requested: bool = False
     current_assistant_id: str = ""
     tool_item_ids: dict[str, str] = mutobj.field(default_factory=dict)
     turn_input_tokens: int = 0
     turn_output_tokens: int = 0
     turn_started_at: float = 0.0
-    total_cost: float = 0.0
-    handle_model_change: Any = None
-    handle_send: Any = None
-    handle_cancel: Any = None
-    handle_agent_event: Any = None
-    subscription: Any = None
+    subscription: CancelFn | None = None
     pending_model: str = ""
-    config_dirty: bool = False
-
 
 def _cext(self: Conversation) -> ConversationExt:
     return ConversationExt.get_or_create(self)
@@ -87,7 +123,7 @@ def _find_last_assistant(items: list[Any]) -> AssistantTextItem | None:
     return None
 
 
-def _reset_context_usage(context: Any) -> None:
+def _reset_context_usage(context: AgentContext) -> None:
     if context is None:
         return
     rt = ContextRuntime.get_or_create(context)
@@ -98,9 +134,7 @@ def _reset_context_usage(context: Any) -> None:
 
 
 def _replace_items(self: Conversation, items: list[Any]) -> None:
-    ext = _cext(self)
-    ext.items[:] = items
-    ext.message_list.refresh()
+    self.message_list.replace_items(items)
 
 
 def _message_has_user_text(message: Message) -> bool:
@@ -125,8 +159,8 @@ def _assistant_turn_ends(messages: list[Message], index: int) -> bool:
     return _message_has_user_text(messages[index + 1])
 
 
-def _rebuild_items_from_messages(messages: list[Message]) -> list[Any]:
-    items: list[Any] = []
+def _rebuild_items_from_messages(messages: list[Message]) -> list[ChatItem]:
+    items: list[ChatItem] = []
     tool_item_ids: dict[str, str] = {}
     turn_input_tokens = 0
     turn_output_tokens = 0
@@ -248,54 +282,22 @@ def _normalize_route(route: str) -> str:
 
 
 @mutobj.impl(Conversation.__init__)
-def conversation_init__(self: Conversation, *, agent: Any, app: Any = None) -> None:
+def conversation_init__(self: Conversation, *, agent: Agent, app: App) -> None:
     super(Conversation, self).__init__()
     ext = _cext(self)
     self.app = app
     self.agent = agent
-    ext.items = []
-    ext.message_list = MessageList(items=ext.items)
-    ext.message_list.id = "message-list"
-    self.current_model = getattr(agent, "model", "")
-    self.status = "idle"
-    self.is_busy = False
-    ext.cancel_requested = False
-    ext.current_assistant_id = ""
-    ext.tool_item_ids = {}
-    ext.turn_input_tokens = 0
-    ext.turn_output_tokens = 0
-    ext.turn_started_at = 0.0
-    ext.total_cost = 0.0
-    # 路由：单一真相源。"" = 对话；"settings" / "settings/<id>" = 设置页
-    self.current_route = ""
+    self.message_list = MessageList()
+    self.current_model = agent.model
     # 模块级函数绑定到 self（Conversation 类未声明这些为方法，手动用 partial 绑）
-    ext.handle_model_change = partial(handle_model_change, self)
-    ext.handle_send = partial(handle_send, self)
-    ext.handle_cancel = partial(handle_cancel, self)
-    ext.handle_agent_event = partial(handle_agent_event, self)
-    ext.status_bar = AgentStatusBar(
-        status=self.status,
-    )
-    ext.status_bar.id = "agent-status-bar"
-    ext.chat_input = ChatInput(
-        on_send=ext.handle_send,
-        on_cancel=ext.handle_cancel,
-    )
-    ext.chat_input.id = "chat-input"
-    ext.chat_input.conversation = self
-    ext.resume_page = ResumeSessionPage(conversation=self)
-    ext.settings_page = SettingsPage(conversation=self)
-    ext.toolbar = ActionToolbar(
-        id="conversation-toolbar",
-        categories=["mutagent.conversation.toolbar"],
-        context=ActionContext(
-            data={"conversation": self},
-        ),
-        label_mode="auto",
-    )
+    self.status_bar = AgentStatusBar()
+    self.chat_input = ChatInput(conversation=self)
+    self.resume_page = ResumeSessionPage(conversation=self)
+    self.settings_page = SettingsPage(conversation=self)
+    self.toolbar = AgentToolbar(conversation=self)
     from ._session_page import _start_session
     _start_session(self)
-    ext.subscription = agent.subscribe(ext.handle_agent_event)
+    ext.subscription = agent.subscribe(partial(handle_agent_event, self))
 
 
 # ── 回调 helpers ────────────────────────────────────────────────
@@ -316,28 +318,20 @@ async def _on_settings_request_navigate(self: Conversation, route: str) -> None:
 
 def _refresh_shell(self: Conversation) -> None:
     ext = _cext(self)
-    ext.status_bar.status = self.status
-    ext.status_bar.input_tokens = ext.turn_input_tokens
-    ext.status_bar.output_tokens = ext.turn_output_tokens
-    ext.status_bar.total_cost = ext.total_cost
-    # context + cache — synced from AgentContext (defensive: may be absent in tests)
-    ctx = getattr(self.agent, "context", None)
-    if ctx is not None:
-        rt = ContextRuntime.get_or_create(ctx)
-        ext.status_bar.context_used = rt.total_input_tokens
-        cw = getattr(self.agent.llm, "context_window", 0) or 0
-        ext.status_bar.context_percent = rt.total_input_tokens / cw if cw else 0.0
-        ext.status_bar.context_total = cw
-        ext.status_bar.cache_read_tokens = rt.total_cache_read_tokens
-        ext.status_bar.cache_write_tokens = rt.total_cache_write_tokens
-    ext.chat_input.disabled = False
-    ext.chat_input.is_busy = self.is_busy
-    ext.toolbar.context = ActionContext(
-        data={"conversation": self},
-    )
-    ext.status_bar.invalidate()
-    ext.chat_input.invalidate()
-    ext.toolbar.invalidate()
+    self.status_bar.status = self.status
+    self.status_bar.input_tokens = ext.turn_input_tokens
+    self.status_bar.output_tokens = ext.turn_output_tokens
+    ctx = self.agent.context
+    rt = ContextRuntime.get_or_create(ctx)
+    self.status_bar.context_used = rt.total_input_tokens
+    cw = self.agent.llm.context_window or 0
+    self.status_bar.context_percent = rt.total_input_tokens / cw if cw else 0.0
+    self.status_bar.context_total = cw
+    self.status_bar.cache_read_tokens = rt.total_cache_read_tokens
+    self.status_bar.cache_write_tokens = rt.total_cache_write_tokens
+    self.status_bar.invalidate()
+    self.chat_input.invalidate()
+    self.toolbar.invalidate()
 
 
 def _reset_runtime_state(self: Conversation) -> None:
@@ -352,30 +346,10 @@ def _reset_runtime_state(self: Conversation) -> None:
     ext.turn_started_at = 0.0
 
 
-def _append_item(self: Conversation, item: Any) -> None:
+async def _handle_send(self: Conversation, text: str) -> None:
     ext = _cext(self)
-    ext.items.append(item)
-    ext.message_list.refresh()
-
-
-def _touch_item(self: Conversation, item_id: str) -> None:
-    ext = _cext(self)
-    ext.message_list.invalidate_item(item_id)
-
-
-def _find_item(self: Conversation, item_id: str) -> Any | None:
-    ext = _cext(self)
-    for item in ext.items:
-        if getattr(item, "id", "") == item_id:
-            return item
-    return None
-
-
-
-async def handle_send(self: Conversation, text: str) -> None:
-    ext = _cext(self)
-    if (ext.pending_model or ext.config_dirty) and self.app is not None:
-        model = ext.pending_model or getattr(self.agent, "model", "")
+    if ext.pending_model or self.config_dirty:
+        model = ext.pending_model or self.agent.model
         if model:
             try:
                 spec = self.app.config.resolve_model(model)
@@ -386,13 +360,12 @@ async def handle_send(self: Conversation, text: str) -> None:
             except Exception:
                 logger.exception("Failed to rebuild LLM")
         ext.pending_model = ""
-        ext.config_dirty = False
+        self.config_dirty = False
     if self.is_busy:
         logger.info("Conversation send ignored while busy")
         return
     logger.info("Conversation submit requested (%d chars)", len(text))
-    _append_item(
-        self,
+    self.message_list.append_item(
         UserTextItem(
             id=_now_item_id("user"),
             kind="user.text",
@@ -416,8 +389,7 @@ async def handle_send(self: Conversation, text: str) -> None:
         logger.exception("Conversation submit failed")
         self.is_busy = False
         self.status = "idle"
-        _append_item(
-            self,
+        self.message_list.append_item(
             AssistantErrorItem(
                 id=_now_item_id("error"),
                 kind="assistant.error",
@@ -429,9 +401,9 @@ async def handle_send(self: Conversation, text: str) -> None:
         self.invalidate()
 
 
-async def handle_cancel(self: Conversation) -> None:
-    ext = _cext(self)
+async def _handle_cancel(self: Conversation) -> None:
     if self.agent.cancel():
+        ext = _cext(self)
         logger.info("Conversation cancel requested")
         ext.cancel_requested = True
         self.status = "cancelling"
@@ -439,22 +411,11 @@ async def handle_cancel(self: Conversation) -> None:
         self.invalidate()
 
 
-async def handle_model_change(self: Conversation, name: str) -> None:
-    logger.info("Conversation model change requested: %s", name)
-    if self.app is None:
-        return
-    ext = _cext(self)
-    ext.pending_model = name
-    self.current_model = name
-    _refresh_shell(self)
-    self.invalidate()
-
-
 def _ensure_current_assistant(self: Conversation, event: StreamEvent) -> AssistantTextItem:
     ext = _cext(self)
     item = None
     if ext.current_assistant_id:
-        found = _find_item(self, ext.current_assistant_id)
+        found = self.message_list.find_item(ext.current_assistant_id)
         if isinstance(found, AssistantTextItem):
             item = found
     if item is None:
@@ -467,7 +428,7 @@ def _ensure_current_assistant(self: Conversation, event: StreamEvent) -> Assista
             timestamp=(response.timestamp if response else time.time()),
         )
         ext.current_assistant_id = item.id
-        _append_item(self, item)
+        self.message_list.append_item(item)
     return item
 
 
@@ -485,12 +446,12 @@ async def handle_agent_event(self: Conversation, event: StreamEvent) -> None:
             timestamp=(response.timestamp if response else time.time()),
         )
         ext.current_assistant_id = item.id
-        _append_item(self, item)
+        self.message_list.append_item(item)
         self.status = "thinking"
     elif event.type == "text_delta" and event.text:
         item = _ensure_current_assistant(self, event)
         item.text += event.text
-        _touch_item(self, item.id)
+        self.message_list.invalidate_item(item.id)
     elif event.type == "tool_exec_start" and isinstance(event.tool_call, ToolUseBlock):
         logger.info("Tool execution started: %s", event.tool_call.name)
         tool_call = event.tool_call
@@ -498,8 +459,7 @@ async def handle_agent_event(self: Conversation, event: StreamEvent) -> None:
         if item_id is None:
             item_id = f"tool-{tool_call.id or time.time_ns()}"
             ext.tool_item_ids[tool_call.id] = item_id
-            _append_item(
-                self,
+            self.message_list.append_item(
                 ToolCallItem(
                     id=item_id,
                     kind="assistant.tool_group",
@@ -509,23 +469,23 @@ async def handle_agent_event(self: Conversation, event: StreamEvent) -> None:
                     status="pending",
                 ),
             )
-        tool_item = _find_item(self, item_id)
+        tool_item = self.message_list.find_item(item_id)
         if isinstance(tool_item, ToolCallItem):
             tool_item.status = "pending"
             tool_item.input_text = str(tool_call.input)
-            _touch_item(self, item_id)
+            self.message_list.invalidate_item(item_id)
         self.status = "tool_calling"
     elif event.type == "tool_exec_end" and isinstance(event.tool_call, ToolResultBlock):
         logger.info("Tool execution finished: %s", event.tool_call.tool_name)
         tool_call = event.tool_call
         item_id = ext.tool_item_ids.get(tool_call.tool_use_id)
-        tool_item = _find_item(self, item_id) if item_id else None
+        tool_item = self.message_list.find_item(item_id) if item_id else None
         if isinstance(tool_item, ToolCallItem):
             tool_item.status = "error" if tool_call.is_error else "success"
             tool_item.result_text = tool_call.content
             tool_item.duration = tool_call.duration
             tool_item.is_error = tool_call.is_error
-            _touch_item(self, tool_item.id)
+            self.message_list.invalidate_item(tool_item.id)
         self.status = "thinking"
     elif event.type == "response_done" and event.response is not None:
         assistant_item = _ensure_current_assistant(self, event)
@@ -539,11 +499,10 @@ async def handle_agent_event(self: Conversation, event: StreamEvent) -> None:
         assistant_item.output_tokens += response.message.output_tokens
         ext.turn_input_tokens += response.message.input_tokens
         ext.turn_output_tokens += response.message.output_tokens
-        _touch_item(self, assistant_item.id)
+        self.message_list.invalidate_item(assistant_item.id)
     elif event.type == "error":
         logger.error("Conversation received error event: %s", event.error or "Unknown error")
-        _append_item(
-            self,
+        self.message_list.append_item(
             AssistantErrorItem(
                 id=_now_item_id("error"),
                 kind="assistant.error",
@@ -556,16 +515,15 @@ async def handle_agent_event(self: Conversation, event: StreamEvent) -> None:
     elif event.type == "turn_done":
         logger.info("Conversation turn finished")
         if ext.cancel_requested:
-            assistant_item = _find_item(self, ext.current_assistant_id)
+            assistant_item = self.message_list.find_item(ext.current_assistant_id)
             if isinstance(assistant_item, AssistantTextItem):
                 if "[interrupted]" not in assistant_item.text:
                     assistant_item.text = (
                         assistant_item.text.rstrip() + "\n\n[interrupted]"
                     ).strip()
-                    _touch_item(self, assistant_item.id)
+                    self.message_list.invalidate_item(assistant_item.id)
         duration = max(0.0, time.time() - ext.turn_started_at) if ext.turn_started_at else 0.0
-        _append_item(
-            self,
+        self.message_list.append_item(
             TurnSeparatorItem(
                 id=f"turn-{event.turn_id or time.time_ns()}",
                 kind="turn_done",
@@ -581,11 +539,10 @@ async def handle_agent_event(self: Conversation, event: StreamEvent) -> None:
         ext.current_assistant_id = ""
         ext.tool_item_ids = {}
         try:
-            ext.session.sync(self.agent.context)
+            self.session.sync(self.agent.context)
         except Exception as exc:
             logger.exception("Conversation session sync failed")
-            _append_item(
-                self,
+            self.message_list.append_item(
                 AssistantErrorItem(
                     id=_now_item_id("error"),
                     kind="assistant.error",
@@ -605,7 +562,6 @@ async def _apply_route(self: Conversation, route: str) -> None:
 
     最后写入 ``self.current_route``。``invalidate`` 由调用方负责。
     """
-    ext = _cext(self)
     route = _normalize_route(route)
     prev = self.current_route
     prev_in_settings = prev.startswith("settings")
@@ -619,12 +575,12 @@ async def _apply_route(self: Conversation, route: str) -> None:
         if route.startswith("settings/"):
             new_panel_id = route[len("settings/"):]
         # 从 settings → settings 同模式切换：activate 内部已处理 close 旧 panel
-        await ext.settings_page.activate(new_panel_id)
+        await self.settings_page.activate(new_panel_id)
     elif prev_in_settings:
         # 离开 settings → close 当前 panel
-        await ext.settings_page.deactivate()
+        await self.settings_page.deactivate()
     if new_in_resume:
-        await ext.resume_page.activate()
+        await self.resume_page.activate()
     elif prev_in_resume:
         pass
     # 其他象限（conversation → conversation）无需做 panel 生命周期处理
@@ -678,20 +634,19 @@ async def conversation_on_event(self: Conversation, event: Event) -> bool:
 
 @mutobj.impl(Conversation.render)
 def conversation_render(self: Conversation) -> ViewBlock:
-    ext = _cext(self)
     _refresh_shell(self)
     in_settings = self.current_route.startswith("settings")
     if in_settings:
-        children: list[Any] = [ext.settings_page]
+        children: list[Any] = [self.settings_page]
     elif self.current_route == "resume":
-        children = [ext.resume_page]
+        children = [self.resume_page]
     else:
         children = [
             {
                 "$component": "div",
                 "$id": "toolbar-shell",
                 "style": {"padding": "8px 12px"},
-                "$children": [ext.toolbar],
+                "$children": [self.toolbar],
             },
             {
                 "$component": "div",
@@ -703,9 +658,9 @@ def conversation_render(self: Conversation) -> ViewBlock:
                     "flexDirection": "column",
                     "overflow": "hidden",
                 },
-                "$children": [ext.message_list],
+                "$children": [self.message_list],
             },
-            ext.chat_input,
+            self.chat_input,
         ]
     return ViewBlock([
         {
@@ -725,3 +680,23 @@ def conversation_render(self: Conversation) -> ViewBlock:
             "$children": children,
         }
     ])
+
+
+@mutobj.impl(Conversation.change_model)
+def conversation_change_model(self: Conversation, model_name: str) -> None:
+    logger.info("Conversation model change requested: %s", model_name)
+    ext = _cext(self)
+    ext.pending_model = model_name
+    self.current_model = model_name
+    _refresh_shell(self)
+    self.invalidate()
+
+
+@mutobj.impl(Conversation.send)
+async def conversation_send(self: Conversation, text: str) -> None:
+    await _handle_send(self, text)
+
+
+@mutobj.impl(Conversation.cancel)
+async def conversation_cancel(self: Conversation) -> None:
+    await _handle_cancel(self)

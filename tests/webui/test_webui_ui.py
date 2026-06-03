@@ -6,26 +6,31 @@ import asyncio
 
 import httpx
 
-from mutagent.webui.messages import MessageList
-from mutagent.webui._conversation_impl import _cext
-from mutagent.webui._messages_impl import _aext
-from mutagent.webui import Conversation
-from mutagent.webui._settings_llm import LLMSettingsPanel, _ANTHROPIC_API_TYPE, _discover_remote_models
-from mutagent.webui.chat_input import ChatInput
-from mutagent.webui.messages import AssistantMessage, AssistantTextItem
-from mutagent.webui._server_impl import _render_root_html
+from mutagent.webui._messages import MessageList
+from mutagent.webui._conversation import _cext
+from mutagent.webui._conversation import Conversation
+from mutagent.webui._settings_llm import LLMSettingPanel, _ANTHROPIC_API_TYPE, _discover_remote_models
+from mutagent.webui._chat_input import ChatInput
+from mutagent.webui._messages import AssistantMessage, AssistantTextItem
+from mutagent.webui._server import _render_root_html
 from mutagent.app.config import Config
 from mutagent.core.context import AgentContext
 
 
+class _FakeSandbox:
+    def list_sources(self) -> dict:
+        return {}
+
+
 class _DummyAgent:
     def __init__(self) -> None:
-        self.llm = type("LLM", (), {"model": "model-alpha"})()
+        self.llm = type("LLM", (), {"model": "model-alpha", "context_window": 200000})()
         self.model = "model-alpha"
         self.context = AgentContext()
         self.config = Config()
         self.config.load_from_dict({})
         self.app = self  # 兼容 conversation.app 级联访问
+        self.sandbox = _FakeSandbox()  # 兼容 app.sandbox 级联访问
 
     def list_models(self) -> list[dict[str, str]]:
         return [{"name": "alpha", "model_id": "model-alpha"}]
@@ -35,19 +40,25 @@ class _DummyAgent:
         return lambda: None
 
 
+class _FakePage:
+    """模拟 SettingsPage — 仅提供 panel 需要的 conversation 级联属性。"""
+    def __init__(self, conversation: Any) -> None:
+        self.conversation = conversation
+
+
 def test_conversation_child_views_have_stable_ids():
     agent = _DummyAgent()
     conversation = Conversation(agent=agent, app=agent)
 
     ext = _cext(conversation)
     child_ids = {
-        ext.toolbar.id,
-        ext.status_bar.id,
-        ext.message_list.id,
-        ext.chat_input.id,
-        ext.chat_input.toolbar.id,
-        ext.resume_page.id,
-        ext.settings_page.id,
+        conversation.toolbar.id,
+        conversation.status_bar.id,
+        conversation.message_list.id,
+        conversation.chat_input.id,
+        conversation.chat_input.toolbar.id,
+        conversation.resume_page.id,
+        conversation.settings_page.id,
     }
 
     assert "" not in child_ids
@@ -58,31 +69,30 @@ def test_assistant_message_block_renderer_has_id():
     item = AssistantTextItem(id="msg-1", kind="assistant.text", text="hello")
     message = AssistantMessage(item=item)
 
-    assert _aext(message).renderer.id == "block-renderer-msg-1"
+    assert message.renderer.id == "block-renderer-msg-1"
 
 
 def test_assistant_message_recreates_renderer_when_text_changes():
     item = AssistantTextItem(id="msg-1", kind="assistant.text", text="")
     message = AssistantMessage(item=item)
-    original_renderer = _aext(message).renderer
+    original_renderer = message.renderer
 
     item.text = "updated"
     message.render()
 
-    assert _aext(message).renderer is not original_renderer
-    assert _aext(message).renderer.id == "block-renderer-msg-1"
-    assert _aext(message).renderer.text == "updated"
+    assert message.renderer is not original_renderer
+    assert message.renderer.id == "block-renderer-msg-1"
+    assert message.renderer.text == "updated"
 
 
-def test_message_list_keeps_passed_empty_list_reference():
-    items: list[object] = []
-    message_list = MessageList(items=items)
+def test_message_list_initial_items_is_empty():
+    message_list = MessageList()
 
-    assert message_list.items is items
+    assert message_list.items == []
 
 
 def test_message_list_shell_is_flex_scroll_container():
-    message_list = MessageList(items=[])
+    message_list = MessageList()
 
     shell = message_list.render().items[0]
 
@@ -111,7 +121,9 @@ def test_conversation_root_is_edge_to_edge_shell():
 
 
 def test_chat_input_renders_unified_shell_and_press_enter_handler():
-    chat_input = ChatInput(on_send=lambda text: text, on_cancel=lambda: None)
+    agent = _DummyAgent()
+    conversation = Conversation(agent=agent, app=agent)
+    chat_input = ChatInput(conversation=conversation)
 
     shell = chat_input.render().items[0]
 
@@ -142,14 +154,14 @@ def test_settings_page_excluded_from_conversation_mode_render():
     assert len(children) == 3
     assert children[0]["$id"] == "toolbar-shell"
     assert children[1]["$id"] == "messages-shell"
-    assert children[2] is _cext(conversation).chat_input
+    assert children[2] is conversation.chat_input
     # settings_page 不在对话模式的 wire tree 中
-    assert all(child is not _cext(conversation).settings_page for child in children)
+    assert all(child is not conversation.settings_page for child in children)
 
 
 def test_settings_panel_list_page_only_offers_anthropic_and_openai():
     agent = _DummyAgent()
-    panel = LLMSettingsPanel(conversation=agent)
+    panel = LLMSettingPanel(page=_FakePage(conversation=agent))
 
     root = panel.render().items[0]
     children = root["$children"]
@@ -163,7 +175,7 @@ def test_settings_panel_list_page_only_offers_anthropic_and_openai():
 
 def test_settings_panel_provider_list_shows_name_type_and_full_models():
     agent = _DummyAgent()
-    panel = LLMSettingsPanel(conversation=agent)
+    panel = LLMSettingPanel(page=_FakePage(conversation=agent))
     panel._drafts = {
         "volcengine": {
             "name": "volcengine",
@@ -202,7 +214,7 @@ def test_settings_panel_provider_list_shows_name_type_and_full_models():
 
 def test_settings_panel_edit_page_keeps_discover_button_inline_with_models():
     agent = _DummyAgent()
-    panel = LLMSettingsPanel(conversation=agent)
+    panel = LLMSettingPanel(page=_FakePage(conversation=agent))
     panel.current_step = "edit"
     panel.provider_name = "volcengine"
     panel.provider_type = _ANTHROPIC_API_TYPE

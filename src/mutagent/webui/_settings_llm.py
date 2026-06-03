@@ -8,7 +8,6 @@ LLMSettingsPanel now extends SettingsPanel from webui.settings.
 
 from __future__ import annotations
 
-import inspect
 import re
 from copy import deepcopy
 from typing import Any, ClassVar, TYPE_CHECKING
@@ -16,12 +15,13 @@ from typing import Any, ClassVar, TYPE_CHECKING
 import httpx
 import mutobj
 from mutagent.core.llm import LLMApiClient
-from mutagent.webui.settings import SettingsPanel
+from ._settings_page import SettingPanel
 from mutgui import Bind, Callback, Expr, ViewBlock
 from mutgui.view import ViewId
 
 if TYPE_CHECKING:
-    from mutagent.webui.conversation import Conversation
+    from ._conversation import Conversation
+    from ._settings_page import SettingsPage
 
 _CHAT_MODEL_PREFIXES = ("gpt-", "o1", "o3", "o4", "chatgpt-")
 _VARIANT_SUFFIXES = ("-mini", "-nano", "-turbo", "-latest", "-preview", "-realtime")
@@ -49,7 +49,7 @@ _PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
 }
 
 
-class LLMSettingsPanel(SettingsPanel):
+class LLMSettingPanel(SettingPanel):
     """LLM provider 配置面板。
 
     独立面板文件，由 SettingsDrawer 通过 discover_subclasses 自动发现。
@@ -59,7 +59,6 @@ class LLMSettingsPanel(SettingsPanel):
     panel_title: ClassVar[str] = "LLM API 设置"
     panel_placement: ClassVar[str] = "settings:10/10"
 
-    conversation: Conversation | None = None
     _drafts: dict[str, dict[str, Any]] = mutobj.field(default_factory=dict)
 
     id: ViewId = "llm-settings-panel"
@@ -79,13 +78,12 @@ class LLMSettingsPanel(SettingsPanel):
     error: str = ""
     notice: str = ""
 
-    def __init__(self, *, conversation: Conversation | None = None) -> None:
-        super(LLMSettingsPanel, self).__init__()
-        self.conversation = conversation
-        assert self.conversation is not None, "conversation is required for LLM panel"
+    def __init__(self, *, page: SettingsPage) -> None:
+        super(LLMSettingPanel, self).__init__()
+        self.page = page
         _load_from_config(self)
 
-    def render(self: LLMSettingsPanel) -> ViewBlock:
+    def render(self: LLMSettingPanel) -> ViewBlock:
         _sync_default_model(self)
         if self.current_step == "edit":
             children = _render_edit(self)
@@ -262,7 +260,7 @@ def _draft_from_config(key: str, config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _all_model_names(self: LLMSettingsPanel) -> list[str]:
+def _all_model_names(self: LLMSettingPanel) -> list[str]:
     names: list[str] = []
     for draft in self._drafts.values():
         for model in _normalize_models(draft.get("models", [])):
@@ -271,14 +269,14 @@ def _all_model_names(self: LLMSettingsPanel) -> list[str]:
     return names
 
 
-def _sync_default_model(self: LLMSettingsPanel) -> None:
+def _sync_default_model(self: LLMSettingPanel) -> None:
     names = _all_model_names(self)
     if self.default_model and self.default_model in names:
         return
     self.default_model = names[0] if names else ""
 
 
-def _apply_draft(self: LLMSettingsPanel, draft: dict[str, Any]) -> None:
+def _apply_draft(self: LLMSettingPanel, draft: dict[str, Any]) -> None:
     self.provider_name = str(draft["name"])
     self.provider_type = str(draft["type"])
     self.provider_type_label = _provider_label_from_path(self.provider_type)
@@ -288,7 +286,7 @@ def _apply_draft(self: LLMSettingsPanel, draft: dict[str, Any]) -> None:
     self.discovered_models = list(draft["discovered_models"])
 
 
-def _persist_current_draft(self: LLMSettingsPanel) -> dict[str, Any]:
+def _persist_current_draft(self: LLMSettingPanel) -> dict[str, Any]:
     return {
         "name": self.provider_name.strip(),
         "type": self.provider_type.strip() or _ANTHROPIC_API_TYPE,
@@ -299,7 +297,7 @@ def _persist_current_draft(self: LLMSettingsPanel) -> dict[str, Any]:
     }
 
 
-def _unique_provider_name(self: LLMSettingsPanel, base: str) -> str:
+def _unique_provider_name(self: LLMSettingPanel, base: str) -> str:
     candidate = base
     index = 2
     while candidate in self._drafts:
@@ -390,26 +388,26 @@ async def _discover_remote_models(
     return _prioritize_models(ranked)
 
 
-def _write_config(self: LLMSettingsPanel, providers: dict[str, dict[str, Any]], default_model: str) -> None:
-    config = self.conversation.app.config
+def _write_config(self: LLMSettingPanel, providers: dict[str, dict[str, Any]], default_model: str) -> None:
+    config = self.page.conversation.app.config
     config.set("providers", providers, source="webui")
     config.set("default_model", default_model, source="webui")
     config.save()
 
 
-def _set_message(self: LLMSettingsPanel, *, error: str = "", notice: str = "") -> None:
+def _set_message(self: LLMSettingPanel, *, error: str = "", notice: str = "") -> None:
     self.error = error
     self.notice = notice
 
 
-def _load_from_config(self: LLMSettingsPanel) -> None:
-    providers = self.conversation.app.config.get("providers", default={}) or {}
+def _load_from_config(self: LLMSettingPanel) -> None:
+    providers = self.page.conversation.app.config.get("providers", default={}) or {}
     self._drafts = {
         key: _draft_from_config(key, deepcopy(config))
         for key, config in providers.items()
         if isinstance(config, dict)
     }
-    self.default_model = str(self.conversation.app.config.get("default_model", default="") or "")
+    self.default_model = str(self.page.conversation.app.config.get("default_model", default="") or "")
     self.current_step = "list"
     self.editing_key = ""
     self.editing_is_new = False
@@ -448,7 +446,7 @@ def _base_url_hint(provider_path: str) -> str:
 # ═══════════════════════════════════════════════════════════════
 
 
-def _edit_provider(key: str, *, view: LLMSettingsPanel) -> None:
+def _edit_provider(key: str, *, view: LLMSettingPanel) -> None:
     draft = view._drafts.get(key)
     if draft is None:
         return
@@ -460,7 +458,7 @@ def _edit_provider(key: str, *, view: LLMSettingsPanel) -> None:
     view.invalidate()
 
 
-def _start_add_provider(*, view: LLMSettingsPanel) -> None:
+def _start_add_provider(*, view: LLMSettingPanel) -> None:
     """添加新 provider，默认使用第一种可用类型。"""
     types = _available_provider_types()
     if not types:
@@ -476,7 +474,7 @@ def _start_add_provider(*, view: LLMSettingsPanel) -> None:
     view.invalidate()
 
 
-def _on_provider_type_change(*, view: LLMSettingsPanel, value: str) -> None:
+def _on_provider_type_change(*, view: LLMSettingPanel, value: str) -> None:
     """Provider Type 下拉切换时同步更新 base_url 默认值和模型列表。"""
     view.provider_type = value
     view.provider_type_label = _provider_label_from_path(value)
@@ -488,7 +486,7 @@ def _on_provider_type_change(*, view: LLMSettingsPanel, value: str) -> None:
     view.invalidate()
 
 
-def _back_to_list(*, view: LLMSettingsPanel) -> None:
+def _back_to_list(*, view: LLMSettingPanel) -> None:
     view.current_step = "list"
     if not view.editing_is_new and view.editing_key in view._drafts:
         _apply_draft(view, view._drafts[view.editing_key])
@@ -497,7 +495,7 @@ def _back_to_list(*, view: LLMSettingsPanel) -> None:
     view.invalidate()
 
 
-def _save_provider_edits(*, view: LLMSettingsPanel) -> None:
+def _save_provider_edits(*, view: LLMSettingPanel) -> None:
     draft = _persist_current_draft(view)
     provider_name = draft["name"]
     if not provider_name:
@@ -531,7 +529,7 @@ def _save_provider_edits(*, view: LLMSettingsPanel) -> None:
     view.invalidate()
 
 
-def _delete_provider(*, view: LLMSettingsPanel) -> None:
+def _delete_provider(*, view: LLMSettingPanel) -> None:
     if not view.editing_is_new and view.editing_key in view._drafts:
         view._drafts.pop(view.editing_key, None)
         _set_message(view, notice=f"Removed provider '{view.editing_key}'.")
@@ -546,7 +544,7 @@ def _delete_provider(*, view: LLMSettingsPanel) -> None:
     view.invalidate()
 
 
-async def _discover_models(*, view: LLMSettingsPanel) -> None:
+async def _discover_models(*, view: LLMSettingPanel) -> None:
     _set_message(view)
     base_url = view.base_url.strip()
     auth_token = view.auth_token.strip()
@@ -576,7 +574,7 @@ async def _discover_models(*, view: LLMSettingsPanel) -> None:
     view.invalidate()
 
 
-async def _save_all_settings(*, view: LLMSettingsPanel) -> None:
+async def _save_all_settings(*, view: LLMSettingPanel) -> None:
     providers: dict[str, dict[str, Any]] = {}
     for key, draft in view._drafts.items():
         provider_name = str(key).strip()
@@ -614,8 +612,7 @@ async def _save_all_settings(*, view: LLMSettingsPanel) -> None:
     default_model = view.default_model if view.default_model in all_models else all_models[0]
     try:
         _write_config(view, providers, default_model)
-        if view.conversation is not None:
-            view.conversation.config_dirty = True
+        view.page.conversation.config_dirty = True
         await view.page.close()
     except Exception as exc:
         _set_message(view, error=str(exc))
@@ -627,7 +624,7 @@ async def _save_all_settings(*, view: LLMSettingsPanel) -> None:
 # ═══════════════════════════════════════════════════════════════
 
 
-def _render_message(self: LLMSettingsPanel, *, margin_bottom: int = 12) -> list[dict[str, Any]]:
+def _render_message(self: LLMSettingPanel, *, margin_bottom: int = 12) -> list[dict[str, Any]]:
     if self.error:
         return [{
             "$component": "antd.Alert",
@@ -649,7 +646,7 @@ def _render_message(self: LLMSettingsPanel, *, margin_bottom: int = 12) -> list[
     return []
 
 
-def _render_list(self: LLMSettingsPanel) -> list[dict[str, Any]]:
+def _render_list(self: LLMSettingPanel) -> list[dict[str, Any]]:
     items = _render_message(self)
     provider_buttons: list[dict[str, Any]] = []
     for key, draft in self._drafts.items():
@@ -774,7 +771,7 @@ def _render_list(self: LLMSettingsPanel) -> list[dict[str, Any]]:
                 "fontSize": "12px",
                 "color": "var(--mutgui-text-dim)",
             },
-            "children": f"Config file: {self.conversation.app.config.path or '(not saved)'}",
+            "children": f"Config file: {self.page.conversation.app.config.path or '(not saved)'}",
         },
         {
             "$component": "antd.Button",
@@ -787,7 +784,7 @@ def _render_list(self: LLMSettingsPanel) -> list[dict[str, Any]]:
     return items
 
 
-def _render_edit(self: LLMSettingsPanel) -> list[dict[str, Any]]:
+def _render_edit(self: LLMSettingPanel) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     items.extend([
         {

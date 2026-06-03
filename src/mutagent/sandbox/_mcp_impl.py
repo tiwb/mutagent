@@ -812,7 +812,7 @@ class MCPConnectionImpl(mutobj.Implementation[MCPConnection]):
         # MergedNamespaceView._resolved_cache_key = tuple(id(p) for p in providers)，
         # 只在 providers 列表变化时失效；本函数直改 ns._functions（id 不变），
         # 导致 view.displayed / primary / _description 拿到旧结果。
-        sandbox = getattr(self, "_sandbox", None)
+        sandbox = self._sandbox
         if sandbox is not None:
             from mutagent.sandbox._env_impl import _peek_registry
 
