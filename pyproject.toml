@@ -39,10 +39,7 @@ dev = [
 webui = [
     "mutgui~=0.9.0",
 ]
-web-extract = [
-    "readability-lxml>=0.8",
-    "markdownify>=1.0",
-]
+
 
 [project.urls]
 Homepage = "https://github.com/tiwb/mutagent"
