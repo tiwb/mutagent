@@ -8,10 +8,10 @@ from __future__ import annotations
 import fnmatch
 
 import mutobj
+from mutio.codec.json import JsonObject
 from mutobj import discover_subclasses, get_registry_generation
 
 from .llm import LLMApiClient
-
 
 # 常见模型的 context window 大小（token 数），作为配置未指定时的兜底。
 # 支持通配符：精确匹配优先，通配符按长度降序匹配（更长 = 更具体）。
@@ -71,10 +71,6 @@ def _get_provider_aliases() -> dict[str, type]:
         return _provider_aliases
 
     aliases: dict[str, type] = {}
-    # 确保内置 provider 已注册
-    from mutagent.core import _llm_impl_anthropic  # noqa: F401
-    from mutagent.core import _llm_impl_copilot  # noqa: F401
-    from mutagent.core import _llm_impl_openai  # noqa: F401
     for sub_cls in discover_subclasses(LLMApiClient):
         if sub_cls is LLMApiClient:
             continue
@@ -137,7 +133,13 @@ def _resolve_provider(name: str) -> type:
 
 
 @mutobj.impl(LLMApiClient.from_spec)
-def llm_api_client_from_spec(spec: dict) -> LLMApiClient:
-    provider_type = spec.get("type", "")
+def llm_api_client_from_spec(spec: JsonObject) -> LLMApiClient:
+    provider_type = str(spec.get("type", ""))
     provider_cls = _resolve_provider(provider_type)
     return provider_cls(spec)
+
+
+# 确保内置 provider 已注册
+from . import _llm_impl_anthropic as  _llm_impl_anthropic  # noqa: F401
+from . import _llm_impl_copilot  as _llm_impl_copilot  # noqa: F401
+from . import _llm_impl_openai as _llm_impl_openai  # noqa: F401

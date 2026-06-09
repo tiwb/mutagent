@@ -1,14 +1,20 @@
 """mutagent.core._provider_impl_anthropic -- Anthropic Claude API provider."""
 
-import json
 import logging
-import time
-from typing import Any, AsyncGenerator, AsyncIterator, ClassVar
+from typing import AsyncGenerator, AsyncIterator, ClassVar, cast
 
 import httpx
 
+from mutio.codec.json import (
+    JSONDecodeError,
+    JsonObject,
+    JsonValue,
+    dumps,
+    get_field,
+    loads,
+    narrow_value,
+)
 from mutio.net.client import HttpClient
-from ._llm_impl import get_default_context_window
 from .messages import (
     ContentBlock,
     DocumentBlock,
@@ -24,6 +30,7 @@ from .messages import (
     Usage,
 )
 from .llm import LLMApiClient
+from ._llm_impl import get_default_context_window
 
 logger = logging.getLogger(__name__)
 
@@ -41,15 +48,16 @@ class AnthropicApiClient(LLMApiClient):
     base_url: str
     api_key: str
 
-    def __init__(self, spec: dict):
-        if not spec.get("auth_token"):
+    def __init__(self, spec: JsonObject):
+        auth_token = get_field(spec, "auth_token", str, default="")
+        if not auth_token:
             raise ValueError("AnthropicProvider requires 'auth_token' in model spec.")
-        model_id = spec.get("model_id", "")
+        model_id = get_field(spec, "model_id", str, default="")
         super().__init__(
             model_id=model_id,
             context_window=get_default_context_window(model_id),
-            base_url=spec.get("base_url", "https://api.anthropic.com"),
-            api_key=spec["auth_token"],
+            base_url=get_field(spec, "base_url", str, default="https://api.anthropic.com"),
+            api_key=auth_token,
         )
 
     async def send(
@@ -61,7 +69,7 @@ class AnthropicApiClient(LLMApiClient):
     ) -> AsyncGenerator[StreamEvent, None]:
         """Send messages to Claude API and yield streaming events."""
         claude_messages = _messages_to_claude(messages)
-        payload: dict[str, Any] = {
+        payload: JsonObject = {
             "model": self.model_id,
             "messages": claude_messages,
             "max_tokens": 4096,
@@ -89,7 +97,7 @@ class AnthropicApiClient(LLMApiClient):
 # Message → Claude API 转换
 # ---------------------------------------------------------------------------
 
-def _block_to_claude(block: ContentBlock) -> dict[str, Any] | None:
+def _block_to_claude(block: ContentBlock) -> JsonObject | None:
     """将单个 ContentBlock 转换为 Claude API content block。未知类型返回 None。"""
     if isinstance(block, TextBlock):
         return {"type": "text", "text": block.text} if block.text else None
@@ -125,7 +133,7 @@ def _block_to_claude(block: ContentBlock) -> dict[str, Any] | None:
             "input": block.input,
         }
     if isinstance(block, ToolResultBlock):
-        result: dict[str, Any] = {
+        result: JsonObject = {
             "type": "tool_result",
             "tool_use_id": block.tool_use_id,
             "content": block.content,
@@ -137,7 +145,7 @@ def _block_to_claude(block: ContentBlock) -> dict[str, Any] | None:
     return None
 
 
-def _messages_to_claude(messages: list[Message]) -> list[dict[str, Any]]:
+def _messages_to_claude(messages: list[Message]) -> list[JsonObject]:
     """Convert internal Message list to Claude API messages format.
 
     处理 blocks 模型：
@@ -145,10 +153,10 @@ def _messages_to_claude(messages: list[Message]) -> list[dict[str, Any]]:
     - user 消息中的 ToolResultBlock → tool_result content
     - 保证 user/assistant 严格交替（通过 merge）
     """
-    result: list[dict[str, Any]] = []
+    result: list[JsonObject] = []
     for msg in messages:
         if msg.role == "assistant":
-            assistant_content: list[dict[str, Any]] = []
+            assistant_content: list[JsonObject] = []
             for block in msg.blocks:
                 api_block = _block_to_claude(block)
                 if api_block:
@@ -158,7 +166,7 @@ def _messages_to_claude(messages: list[Message]) -> list[dict[str, Any]]:
                 result.append({"role": "assistant", "content": assistant_content})
         else:
             # user / system 消息
-            content: list[dict[str, Any]] = []
+            content: list[JsonObject] = []
             for block in msg.blocks:
                 api_block = _block_to_claude(block)
                 if api_block:
@@ -172,24 +180,24 @@ def _messages_to_claude(messages: list[Message]) -> list[dict[str, Any]]:
     return _merge_consecutive_roles(result)
 
 
-def _prompts_to_claude(prompts: list[Message]) -> list[dict[str, Any]]:
+def _prompts_to_claude(prompts: list[Message]) -> list[JsonObject]:
     """将 prompt Messages 转换为 Claude API system 字段的 content block 数组。"""
-    system_blocks: list[dict[str, Any]] = []
+    system_blocks: list[JsonObject] = []
     for msg in prompts:
         for block in msg.blocks:
             if isinstance(block, TextBlock) and block.text:
-                entry: dict[str, Any] = {"type": "text", "text": block.text}
+                entry: JsonObject = {"type": "text", "text": block.text}
                 if msg.cacheable:
                     entry["cache_control"] = {"type": "ephemeral"}
                 system_blocks.append(entry)
     return system_blocks
 
 
-def _merge_consecutive_roles(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _merge_consecutive_roles(messages: list[JsonObject]) -> list[JsonObject]:
     """Merge consecutive messages with the same role into one."""
     if not messages:
         return messages
-    merged: list[dict[str, Any]] = [messages[0]]
+    merged: list[JsonObject] = [messages[0]]
     for msg in messages[1:]:
         if msg["role"] == merged[-1]["role"]:
             prev = merged[-1]
@@ -201,20 +209,21 @@ def _merge_consecutive_roles(messages: list[dict[str, Any]]) -> list[dict[str, A
     return merged
 
 
-def _to_content_blocks(content: Any) -> list[dict[str, Any]]:
+def _to_content_blocks(content: JsonValue) -> list[JsonObject]:
     """Normalize message content to a list of content blocks."""
     if isinstance(content, list):
-        return content
+        # list[JsonValue] → list[JsonObject]：已知 content block 都是 dict
+        return cast(list[JsonObject], content)
     if isinstance(content, str):
         return [{"type": "text", "text": content}] if content else []
     return []
 
 
-def _tools_to_claude(tools: list[ToolSchema]) -> list[dict[str, Any]]:
+def _tools_to_claude(tools: list[ToolSchema]) -> list[JsonObject]:
     """Convert internal ToolSchema list to Claude API tools format."""
-    result = []
+    result: list[JsonObject] = []
     for tool in tools:
-        entry: dict[str, Any] = {
+        entry: JsonObject = {
             "name": tool.name,
             "description": tool.description,
             "input_schema": tool.input_schema or {"type": "object", "properties": {}},
@@ -227,86 +236,71 @@ def _tools_to_claude(tools: list[ToolSchema]) -> list[dict[str, Any]]:
 # Claude API → 内部模型转换
 # ---------------------------------------------------------------------------
 
-def _normalize_cache_creation(value: Any) -> int:
+def _normalize_cache_creation(value: JsonValue) -> int:
     """Normalize cache_creation_input_tokens from Anthropic (may be plain int or nested dict)."""
     if isinstance(value, dict):
-        return int(value.get("input_tokens", 0))
+        # isinstance 窄化后 value 为 dict[str, JsonValue] = JsonObject
+        return get_field(value, "input_tokens", int, default=0)
     if isinstance(value, (int, float)):
         return int(value)
     return 0
 
 
-def _response_from_claude(data: dict[str, Any]) -> Response:
+def _response_from_claude(data: JsonObject) -> Response:
     """Convert Claude API response to internal Response."""
-    stop_reason = data.get("stop_reason", "")
-    raw_usage = data.get("usage", {})
+    stop_reason = get_field(data, "stop_reason", str, default="")
+    raw_usage = get_field(data, "usage", JsonObject, default={})
     usage = Usage(
-        input_tokens=raw_usage.get("input_tokens", 0),
-        output_tokens=raw_usage.get("output_tokens", 0),
-        cache_read_input_tokens=raw_usage.get("cache_read_input_tokens", 0),
+        input_tokens=get_field(raw_usage, "input_tokens", int, default=0),
+        output_tokens=get_field(raw_usage, "output_tokens", int, default=0),
+        cache_read_input_tokens=get_field(raw_usage, "cache_read_input_tokens", int, default=0),
         cache_creation_input_tokens=_normalize_cache_creation(raw_usage.get("cache_creation_input_tokens", 0)),
     )
 
     blocks: list[ContentBlock] = []
-    for block_data in data.get("content", []):
-        block_type = block_data.get("type", "")
+    content = get_field(data, "content", list[JsonObject], default=[])
+    for block_data in content:
+        block_type = get_field(block_data, "type", str, default="")
         if block_type == "text":
-            blocks.append(TextBlock(text=block_data.get("text", "")))
+            blocks.append(TextBlock(text=get_field(block_data, "text", str, default="")))
         elif block_type == "tool_use":
             blocks.append(ToolUseBlock(
-                id=block_data.get("id", ""),
-                name=block_data.get("name", ""),
-                input=block_data.get("input", {}),
+                id=get_field(block_data, "id", str, default=""),
+                name=get_field(block_data, "name", str, default=""),
+                input=get_field(block_data, "input", JsonObject, default={}),
             ))
         elif block_type == "thinking":
             blocks.append(ThinkingBlock(
-                thinking=block_data.get("thinking", ""),
-                signature=block_data.get("signature", ""),
+                thinking=get_field(block_data, "thinking", str, default=""),
+                signature=get_field(block_data, "signature", str, default=""),
             ))
         elif block_type == "redacted_thinking":
             blocks.append(ThinkingBlock(
-                data=block_data.get("data", ""),
+                data=get_field(block_data, "data", str, default=""),
             ))
 
     message = Message(role="assistant", blocks=blocks)
     return Response(message=message, stop_reason=stop_reason, usage=usage)
 
 
-def _response_to_dict(response: Response) -> dict[str, Any]:
-    """Convert a Response object to a plain dict for recording."""
-    content: list[dict[str, Any]] = []
-    for block in response.message.blocks:
-        if isinstance(block, TextBlock) and block.text:
-            content.append({"type": "text", "text": block.text})
-        elif isinstance(block, ToolUseBlock):
-            content.append({
-                "type": "tool_use",
-                "id": block.id,
-                "name": block.name,
-                "input": block.input,
-            })
-        elif isinstance(block, ThinkingBlock):
-            if block.data:
-                content.append({"type": "redacted_thinking", "data": block.data})
-            elif block.thinking:
-                content.append({
-                    "type": "thinking",
-                    "thinking": block.thinking,
-                    "signature": block.signature,
-                })
-    return {
-        "content": content,
-        "stop_reason": response.stop_reason,
-    }
-
-
 # ---------------------------------------------------------------------------
 # HTTP 发送
 # ---------------------------------------------------------------------------
 
+def _extract_error_msg(data: JsonValue, status_code: int, prefix: str) -> str:
+    """从 API 错误响应 JSON 中提取错误消息。"""
+    if isinstance(data, dict):
+        error = data.get("error")
+        if isinstance(error, dict):
+            msg = error.get("message")
+            if isinstance(msg, str):
+                return f"{prefix} ({status_code}): {msg}"
+    return f"{prefix} ({status_code}): {dumps(data)}"
+
+
 async def _send_no_stream(
     base_url: str,
-    payload: dict[str, Any],
+    payload: JsonObject,
     headers: dict[str, str],
 ) -> AsyncIterator[StreamEvent]:
     """Non-streaming path: make a regular HTTP request and wrap as StreamEvents."""
@@ -316,17 +310,20 @@ async def _send_no_stream(
             headers=headers,
             json=payload,
         )
-    data = resp.json()
+    data_raw: JsonValue = resp.json()
     if resp.status_code != 200:
-        error_msg = data.get("error", {}).get("message", json.dumps(data))
+        error_msg = _extract_error_msg(data_raw, resp.status_code, "Claude API error")
         logger.warning("API error (%d): %s", resp.status_code, error_msg)
         yield StreamEvent(
             type="error",
-            error=f"Claude API error ({resp.status_code}): {error_msg}",
+            error=error_msg,
         )
         return
 
-    response = _response_from_claude(data)
+    if not isinstance(data_raw, dict):
+        yield StreamEvent(type="error", error="Claude API response is not a JSON object")
+        return
+    response = _response_from_claude(data_raw)
 
     # Emit text deltas
     for block in response.message.blocks:
@@ -341,7 +338,7 @@ async def _send_no_stream(
 
 async def _send_stream(
     base_url: str,
-    payload: dict[str, Any],
+    payload: JsonObject,
     headers: dict[str, str],
 ) -> AsyncIterator[StreamEvent]:
     """Streaming path: parse SSE events from Claude API and yield StreamEvents."""
@@ -357,14 +354,14 @@ async def _send_stream(
             if resp.status_code != 200:
                 body = await resp.aread()
                 try:
-                    data = json.loads(body)
-                    error_msg = data.get("error", {}).get("message", json.dumps(data))
+                    error_data = loads(body)
+                    error_msg = _extract_error_msg(error_data, resp.status_code, "Claude API error")
                 except Exception:
-                    error_msg = f"HTTP {resp.status_code}"
+                    error_msg = f"Claude API error ({resp.status_code}): HTTP {resp.status_code}"
                 logger.warning("API stream error (%d): %s", resp.status_code, error_msg)
                 yield StreamEvent(
                     type="error",
-                    error=f"Claude API error ({resp.status_code}): {error_msg}",
+                    error=error_msg,
                 )
                 return
 
@@ -396,25 +393,33 @@ async def _send_stream(
                         continue
 
                     try:
-                        data = json.loads(data_str)
-                    except json.JSONDecodeError:
+                        data_raw = loads(data_str)
+                    except JSONDecodeError:
                         continue
+
+                    # SSE 事件体始终是 JSON object
+                    if not isinstance(data_raw, dict):
+                        continue
+                    data: JsonObject = data_raw
 
                     try:
                         if event_type == "message_start":
-                            msg_data = data.get("message", {})
-                            raw = msg_data.get("usage", {})
-                            usage.input_tokens = max(usage.input_tokens, raw.get("input_tokens", 0))
-                            usage.output_tokens = max(usage.output_tokens, raw.get("output_tokens", 0))
-                            usage.cache_read_input_tokens = max(usage.cache_read_input_tokens, raw.get("cache_read_input_tokens", 0))
-                            usage.cache_creation_input_tokens = max(usage.cache_creation_input_tokens, _normalize_cache_creation(raw.get("cache_creation_input_tokens", 0)))
+                            msg_data = get_field(data, "message", JsonObject, default={})
+                            raw_usage = get_field(msg_data, "usage", JsonObject, default={})
+                            usage.input_tokens = max(usage.input_tokens, get_field(raw_usage, "input_tokens", int, default=0))
+                            usage.output_tokens = max(usage.output_tokens, get_field(raw_usage, "output_tokens", int, default=0))
+                            usage.cache_read_input_tokens = max(usage.cache_read_input_tokens, get_field(raw_usage, "cache_read_input_tokens", int, default=0))
+                            usage.cache_creation_input_tokens = max(
+                                usage.cache_creation_input_tokens,
+                                _normalize_cache_creation(raw_usage.get("cache_creation_input_tokens", 0)),
+                            )
 
                         elif event_type == "content_block_start":
-                            block = data.get("content_block", {})
-                            current_block_type = block.get("type", "")
+                            block = get_field(data, "content_block", JsonObject, default={})
+                            current_block_type = get_field(block, "type", str, default="")
                             if current_block_type == "tool_use":
-                                current_tool_id = block.get("id", "")
-                                current_tool_name = block.get("name", "")
+                                current_tool_id = get_field(block, "id", str, default="")
+                                current_tool_name = get_field(block, "name", str, default="")
                                 current_tool_json_parts = []
                                 tc = ToolUseBlock(
                                     id=current_tool_id,
@@ -432,17 +437,17 @@ async def _send_stream(
                                 current_text_parts = []
 
                         elif event_type == "content_block_delta":
-                            delta = data.get("delta", {})
-                            delta_type = delta.get("type", "")
+                            delta = get_field(data, "delta", JsonObject, default={})
+                            delta_type = get_field(delta, "type", str, default="")
                             if delta_type == "text_delta":
-                                text = delta.get("text", "")
+                                text = get_field(delta, "text", str, default="")
                                 if text:
                                     current_text_parts.append(text)
                                     yield StreamEvent(
                                         type="text_delta", text=text
                                     )
                             elif delta_type == "input_json_delta":
-                                json_chunk = delta.get("partial_json", "")
+                                json_chunk = get_field(delta, "partial_json", str, default="")
                                 if json_chunk:
                                     current_tool_json_parts.append(json_chunk)
                                     yield StreamEvent(
@@ -450,23 +455,23 @@ async def _send_stream(
                                         tool_json_delta=json_chunk,
                                     )
                             elif delta_type == "thinking_delta":
-                                thinking_text = delta.get("thinking", "")
+                                thinking_text = get_field(delta, "thinking", str, default="")
                                 if thinking_text:
                                     current_thinking_parts.append(thinking_text)
                             elif delta_type == "signature_delta":
-                                current_thinking_signature += delta.get("signature", "")
+                                current_thinking_signature += get_field(delta, "signature", str, default="")
 
                         elif event_type == "content_block_stop":
                             if current_block_type == "tool_use":
                                 json_str = "".join(current_tool_json_parts)
                                 try:
-                                    arguments = json.loads(json_str) if json_str else {}
-                                except json.JSONDecodeError:
-                                    arguments = {}
+                                    tool_args = narrow_value(loads(json_str), JsonObject) if json_str else JsonObject()
+                                except (JSONDecodeError, TypeError):
+                                    tool_args = JsonObject()
                                 blocks.append(ToolUseBlock(
                                     id=current_tool_id,
                                     name=current_tool_name,
-                                    input=arguments,
+                                    input=tool_args,
                                 ))
                                 yield StreamEvent(type="tool_use_end")
                             elif current_block_type == "text":
@@ -485,14 +490,11 @@ async def _send_stream(
                             current_block_type = ""
 
                         elif event_type == "message_delta":
-                            delta = data.get("delta", {})
-                            stop_reason = delta.get("stop_reason", stop_reason)
+                            delta = get_field(data, "delta", JsonObject, default={})
+                            stop_reason = get_field(delta, "stop_reason", str, default=stop_reason)
                             # 合并 usage：取每个字段的最大值。
-                            # message_start 携带 input_tokens 等初始值，
-                            # message_delta 携带最终 output_tokens，
-                            # 但某些代理会在 message_delta 中附带 input_tokens=0，
-                            # 用 max 避免错误覆盖。
-                            for k, v in data.get("usage", {}).items():
+                            raw_usage = get_field(data, "usage", JsonObject, default={})
+                            for k, v in raw_usage.items():
                                 if k == "input_tokens" and isinstance(v, (int, float)):
                                     usage.input_tokens = max(usage.input_tokens, int(v))
                                 elif k == "output_tokens" and isinstance(v, (int, float)):
@@ -500,7 +502,10 @@ async def _send_stream(
                                 elif k == "cache_read_input_tokens" and isinstance(v, (int, float)):
                                     usage.cache_read_input_tokens = max(usage.cache_read_input_tokens, int(v))
                                 elif k == "cache_creation_input_tokens":
-                                    usage.cache_creation_input_tokens = max(usage.cache_creation_input_tokens, _normalize_cache_creation(v))
+                                    usage.cache_creation_input_tokens = max(
+                                        usage.cache_creation_input_tokens,
+                                        _normalize_cache_creation(v),
+                                    )
 
                         elif event_type == "message_stop":
                             message = Message(role="assistant", blocks=blocks)

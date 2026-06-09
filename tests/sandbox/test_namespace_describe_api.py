@@ -1,7 +1,7 @@
-"""SandboxEnv.iter_namespaces / get_namespace + _collect_namespaces 单测。
+"""SandboxEnv.iter_namespaces / get_namespace + collect_namespaces 单测。
 
 覆盖 `refactor-namespace-describe-api.md` R1 / R2 的行为：
-- `_collect_namespaces` 的 decl + external 合并策略、单/多 provider 返回类型、空 registry
+- `collect_namespaces` 的 decl + external 合并策略、单/多 provider 返回类型、空 registry
 - `iter_namespaces` 顺序稳定、返回类型随 provider 数切换
 - `get_namespace` 存在/不存在路径
 - exec_code 与 share 协议的 namespace 可见集严格一致
@@ -16,8 +16,8 @@ from mutagent.sandbox import SandboxEnv
 from mutagent.sandbox._mcp_share import _all_namespaces
 from mutagent.sandbox._env_impl import (
     _build_namespace_dict,
-    _collect_namespaces,
     _get_registry,
+    collect_namespaces,
     sandbox_env_add_namespace,
     sandbox_env_get_namespace,
     sandbox_env_iter_namespaces,
@@ -45,21 +45,21 @@ def _make_ns(name: str, *, kind: str = "tool",
 
 def _external_names(sandbox: SandboxEnv) -> set[str]:
     """抽出 sandbox 上「非 NamespaceTools decl 发现」的外部注入 namespace 名。"""
-    return set(_get_registry(sandbox)._namespaces.keys())
+    return set(_get_registry(sandbox).namespaces.keys())
 
 
 # ---------------------------------------------------------------------------
-# _collect_namespaces
+# collect_namespaces
 # ---------------------------------------------------------------------------
 
 class TestCollectNamespaces:
-    """`_collect_namespaces` 合并策略 / 返回类型 / 边界。"""
+    """`collect_namespaces` 合并策略 / 返回类型 / 边界。"""
 
     def test_empty_registry_returns_only_decl(self):
         """空 registry：返回仅包含 NamespaceTools decl 发现的 namespace。"""
         sandbox = SandboxEnv()
 
-        result = _collect_namespaces(sandbox)
+        result = collect_namespaces(sandbox)
 
         # 所有返回值必须是 Namespace 或 MergedNamespaceView
         assert all(isinstance(v, (Namespace, MergedNamespaceView))
@@ -73,7 +73,7 @@ class TestCollectNamespaces:
         ns = _make_ns("uniq_single", functions={"ping": lambda: "ok"})
         sandbox_env_add_namespace(sandbox, ns)
 
-        result = _collect_namespaces(sandbox)
+        result = collect_namespaces(sandbox)
 
         assert "uniq_single" in result
         # 单 provider → 原 Namespace 实例，不经 view 包装
@@ -88,11 +88,11 @@ class TestCollectNamespaces:
         sandbox_env_add_namespace(sandbox, a)
         sandbox_env_add_namespace(sandbox, b)
 
-        result = _collect_namespaces(sandbox)
+        result = collect_namespaces(sandbox)
 
         assert isinstance(result["uniq_multi"], MergedNamespaceView)
         # 合并后两个函数都可见
-        funcs = result["uniq_multi"]._functions
+        funcs = result["uniq_multi"].functions
         assert "aa" in funcs and "bb" in funcs
 
     def test_multi_provider_first_wins(self):
@@ -105,10 +105,10 @@ class TestCollectNamespaces:
         sandbox_env_add_namespace(sandbox, first)
         sandbox_env_add_namespace(sandbox, second)
 
-        view = _collect_namespaces(sandbox)["uniq_conflict"]
+        view = collect_namespaces(sandbox)["uniq_conflict"]
         assert isinstance(view, MergedNamespaceView)
         # first provider 胜出
-        assert view._functions["shared"]() == "first"
+        assert view.functions["shared"]() == "first"
 
     def test_exec_and_share_see_same_names(self):
         """exec_code 路径（_build_namespace_dict）与 _mcp_share 路径（_all_namespaces）
@@ -140,7 +140,7 @@ class TestIterNamespaces:
                                    functions={"f": lambda: 1}))
         sandbox_env_add_namespace(sandbox, _make_ns("mmm_mid",
                                    functions={"f": lambda: 1}))
-        names = [ns._name for ns in sandbox_env_iter_namespaces(sandbox)]
+        names = [ns.name for ns in sandbox_env_iter_namespaces(sandbox)]
         # 提取我们添加的三个，验证相对顺序（其他 decl namespace 可能夹杂）
         ours = [n for n in names if n in ("aaa_first", "mmm_mid", "zzz_last")]
         assert ours == ["aaa_first", "mmm_mid", "zzz_last"]
@@ -150,7 +150,7 @@ class TestIterNamespaces:
         ns = _make_ns("uniq_single_iter", functions={"f": lambda: 1})
         sandbox_env_add_namespace(sandbox, ns)
         matched = [x for x in sandbox_env_iter_namespaces(sandbox)
-                   if x._name == "uniq_single_iter"]
+                   if x.name == "uniq_single_iter"]
         assert len(matched) == 1
         assert isinstance(matched[0], Namespace)
         assert matched[0] is ns
@@ -162,7 +162,7 @@ class TestIterNamespaces:
         sandbox_env_add_namespace(sandbox, _make_ns("uniq_multi_iter",
                                    functions={"b": lambda: 2}))
         matched = [x for x in sandbox_env_iter_namespaces(sandbox)
-                   if x._name == "uniq_multi_iter"]
+                   if x.name == "uniq_multi_iter"]
         assert len(matched) == 1
         assert isinstance(matched[0], MergedNamespaceView)
 
@@ -200,11 +200,11 @@ class TestGetNamespace:
         sandbox = SandboxEnv()
         sandbox_env_add_namespace(sandbox, _make_ns("uniq_consistency",
                                    functions={"f": lambda: 1}))
-        name_list = [ns._name for ns in sandbox_env_iter_namespaces(sandbox)]
+        name_list = [ns.name for ns in sandbox_env_iter_namespaces(sandbox)]
         for name in name_list:
             got = sandbox_env_get_namespace(sandbox, name)
             assert got is not None
-            assert got._name == name
+            assert got.name == name
 
 
 # ---------------------------------------------------------------------------
@@ -276,7 +276,7 @@ class TestConnectionStatus:
         ns.connection_error = error
         if has_conn:
             # 任意非 None 值即可（connection_status 只检查 is None）
-            ns._connection = object()  # type: ignore[assignment]
+            ns.connection = object()  # type: ignore[assignment]
         return ns
 
     def test_non_mcp_namespace_returns_none_none(self):

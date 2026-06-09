@@ -176,7 +176,7 @@ def test_settings_panel_list_page_only_offers_anthropic_and_openai():
 def test_settings_panel_provider_list_shows_name_type_and_full_models():
     agent = _DummyAgent()
     panel = LLMSettingPanel(page=_FakePage(conversation=agent))
-    panel._drafts = {
+    panel.drafts = {
         "volcengine": {
             "name": "volcengine",
             "type": _ANTHROPIC_API_TYPE,

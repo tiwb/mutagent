@@ -6,6 +6,7 @@ import re
 
 import mutobj
 from mutgui import Callback, View, ViewBlock
+from mutgui.view import RenderComponent, RenderNode, RenderTree
 
 
 class BlockRenderer(View):
@@ -29,7 +30,7 @@ def _toggle_thinking(*, view: ThinkingBlock) -> None:
     view.invalidate()
 
 
-def _render_text_block(text: str, *, kind: str = "paragraph") -> dict:
+def _render_text_block(text: str, *, kind: str = "paragraph") -> RenderComponent:
     style = {
         "whiteSpace": "pre-wrap",
         "wordBreak": "break-word",
@@ -53,7 +54,7 @@ def _render_text_block(text: str, *, kind: str = "paragraph") -> dict:
     return {"$component": "div", "$id": f"{kind}-{abs(hash(text))}", "style": style, "children": text}
 
 
-def _render_code_block(code: str, language: str) -> dict:
+def _render_code_block(code: str, language: str) -> RenderComponent:
     header = language or "code"
     return {
         "$component": "div",
@@ -94,7 +95,7 @@ def _render_code_block(code: str, language: str) -> dict:
     }
 
 
-def _render_mutagent_block(block_type: str, body: str) -> dict | ThinkingBlock:
+def _render_mutagent_block(block_type: str, body: str) -> RenderNode:
     if block_type == "thinking":
         return ThinkingBlock(body=body)
     return {
@@ -133,8 +134,8 @@ def _render_mutagent_block(block_type: str, body: str) -> dict | ThinkingBlock:
     }
 
 
-def _render_markdown_chunks(text: str) -> list[dict]:
-    parts: list[dict] = []
+def _render_markdown_chunks(text: str) -> list[RenderComponent]:
+    parts: list[RenderComponent] = []
     for raw in text.split("\n\n"):
         chunk = raw.strip("\n")
         if not chunk:
@@ -150,9 +151,9 @@ def _render_markdown_chunks(text: str) -> list[dict]:
     return parts
 
 
-def _render_segments(text: str) -> list[dict | ThinkingBlock]:
+def _render_segments(text: str) -> RenderTree:
     lines = text.splitlines()
-    parts: list[dict | ThinkingBlock] = []
+    parts: list[RenderNode] = []
     markdown_buffer: list[str] = []
     in_fence = False
     fence_lang = ""
@@ -209,7 +210,7 @@ def block_renderer_render(self: BlockRenderer) -> ViewBlock:
 
 @mutobj.impl(ThinkingBlock.render)
 def thinking_block_render(self: ThinkingBlock) -> ViewBlock:
-    children: list[dict] = [
+    children: list[RenderNode] = [
         {
             "$component": "div",
             "$id": "thinking-header",

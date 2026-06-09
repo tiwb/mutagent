@@ -93,7 +93,7 @@ def _runtime(agent: Agent) -> AgentRuntime:
     return AgentRuntime.get_or_create(agent)
 
 
-def _get_current_task(agent: Agent) -> asyncio.Task[None] | None:
+def get_current_task(agent: Agent) -> asyncio.Task[None] | None:
     rt = AgentRuntime.get(agent)
     return None if rt is None else rt.current_task
 

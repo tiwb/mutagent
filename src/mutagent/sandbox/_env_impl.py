@@ -65,7 +65,7 @@ def _get_registry(sandbox: SandboxEnv) -> NamespaceRegistry:
     return registry
 
 
-def _peek_registry(sandbox: SandboxEnv) -> NamespaceRegistry | None:
+def peek_registry(sandbox: SandboxEnv) -> NamespaceRegistry | None:
     rt = SandboxEnvRuntime.get(sandbox)
     return None if rt is None else rt.registry
 
@@ -103,13 +103,13 @@ def _get_start_time(sandbox: SandboxEnv) -> float:
     return t
 
 
-def _get_async_loop(sandbox: SandboxEnv) -> asyncio.AbstractEventLoop | None:
+def get_async_loop(sandbox: SandboxEnv) -> asyncio.AbstractEventLoop | None:
     rt = SandboxEnvRuntime.get(sandbox)
     return None if rt is None else rt.async_loop
 
 
-def _require_async_loop(sandbox: SandboxEnv) -> asyncio.AbstractEventLoop:
-    loop = _get_async_loop(sandbox)
+def require_async_loop(sandbox: SandboxEnv) -> asyncio.AbstractEventLoop:
+    loop = get_async_loop(sandbox)
     if loop is None:
         raise RuntimeError(
             "SandboxEnv._async_loop not set; "
@@ -129,7 +129,7 @@ def _get_async_loop_thread_id(sandbox: SandboxEnv) -> int | None:
 
 def _get_ns_tools_prefix(cls: type) -> str:
     """从 NamespaceTools 子类名推导 namespace 名（去掉 Tools 后缀，小写）。"""
-    explicit = cls.__dict__.get('_namespace')
+    explicit = cls.__dict__.get('namespace')
     if explicit is not None:
         return explicit
     name = cls.__name__
@@ -175,15 +175,15 @@ def _build_declaration_namespaces(self: SandboxEnv) -> dict[str, Namespace]:
 
             ns.register(method_name, fn, desc)
 
-        if ns._functions:
+        if ns.functions:
             result[ns_name] = ns
             logger.info("Discovered NamespaceTools: %s (%d functions)",
-                        ns_name, len(ns._functions))
+                        ns_name, len(ns.functions))
 
     return result
 
 
-def _wrap_async(sandbox: SandboxEnv, coro_fn: Any) -> Any:
+def _wrap_async(sandbox: SandboxEnv, coro_fn: Any) -> Callable[..., Any]:
     """将 async NamespaceTools 方法包装为 sync。
 
     把 coroutine 投递到 SandboxEnv 上捕获的主 event loop 执行，
@@ -206,7 +206,7 @@ def _wrap_async(sandbox: SandboxEnv, coro_fn: Any) -> Any:
     fn_name = coro_fn.__name__
 
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        loop = _require_async_loop(sandbox)
+        loop = require_async_loop(sandbox)
 
         # 同线程死锁保护
         loop_thread_id = _get_async_loop_thread_id(sandbox)
@@ -287,7 +287,7 @@ def sandbox_env_bind_main_loop(self: SandboxEnv) -> None:
 # Namespace 收集 — sandbox 可见集合的单一来源
 # ---------------------------------------------------------------------------
 
-def _collect_namespaces(
+def collect_namespaces(
     sandbox: SandboxEnv,
 ) -> dict[str, Namespace | MergedNamespaceView]:
     """sandbox 可见的全部 namespace（decl 先 + external 后，同名走 merged view）。
@@ -309,7 +309,7 @@ def _collect_namespaces(
     if not decl_namespaces:
         # 主 registry 视图直通 —— 复用原生 MergedNamespaceView，WARN-once 稳定
         result: dict[str, Namespace | MergedNamespaceView] = {}
-        for name in registry._namespaces:
+        for name in registry.namespaces:
             ns = registry.get(name)
             if ns is not None:
                 result[name] = ns
@@ -319,12 +319,12 @@ def _collect_namespaces(
     temp_registry = NamespaceRegistry()
     for ns in decl_namespaces.values():
         temp_registry.add(ns)
-    for providers in registry._namespaces.values():
+    for providers in registry.namespaces.values():
         for p in providers:
             temp_registry.add(p)
 
     result = {}
-    for name in temp_registry._namespaces:
+    for name in temp_registry.namespaces:
         ns = temp_registry.get(name)
         if ns is not None:
             result[name] = ns
@@ -356,7 +356,7 @@ def _build_namespace_dict(self: SandboxEnv) -> dict[str, Any]:
     if cached is not None and cached_gen == current_gen:
         return cached
 
-    collected = _collect_namespaces(self)
+    collected = collect_namespaces(self)
     ns_dict: dict[str, Any] = dict(collected)
     ns_dict['help'] = _make_sandbox_help(self)
 
@@ -366,7 +366,7 @@ def _build_namespace_dict(self: SandboxEnv) -> dict[str, Any]:
     return ns_dict
 
 
-def _make_sandbox_help(sandbox: SandboxEnv) -> Callable:
+def _make_sandbox_help(sandbox: SandboxEnv) -> Callable[..., Any]:
     """生成 sandbox-bound ``help()``。
 
     与 ``NamespaceRegistry._make_help`` 的区别：数据源是 sandbox 而非 registry，
@@ -374,9 +374,9 @@ def _make_sandbox_help(sandbox: SandboxEnv) -> Callable:
     可见集一致），而非仅外部注入的 registry 视角。
     """
     from mutagent.sandbox._namespace_impl import (
-        _render_function,
-        _render_namespace,
-        _render_registry_from_namespaces,
+        render_function,
+        render_namespace,
+        render_registry_from_namespaces,
     )
 
     def help(func_or_name: Any = None) -> str:
@@ -389,24 +389,24 @@ def _make_sandbox_help(sandbox: SandboxEnv) -> Callable:
         """
         # Layer 1: 列所有 namespace
         if func_or_name is None:
-            return _render_registry_from_namespaces(
+            return render_registry_from_namespaces(
                 list(sandbox_env_iter_namespaces(sandbox)))
 
         # Layer 2: 聚焦某个 namespace（含 view）
         if isinstance(func_or_name, (Namespace, MergedNamespaceView)):
-            return _render_namespace(func_or_name)
+            return render_namespace(func_or_name)
 
         # Layer 3: 聚焦某个函数
         if callable(func_or_name):
-            return _render_function(func_or_name)
+            return render_function(func_or_name)
 
         if isinstance(func_or_name, str):
             parts = func_or_name.split('.', 1)
             if len(parts) == 2:
                 ns = sandbox_env_get_namespace(sandbox, parts[0])
-                if ns is not None and parts[1] in ns._functions:
-                    return _render_function(
-                        ns._functions[parts[1]],
+                if ns is not None and parts[1] in ns.functions:
+                    return render_function(
+                        ns.functions[parts[1]],
                         ns_name=parts[0],
                         fn_name=parts[1])
             return f"(no documentation for '{func_or_name}')"
@@ -486,7 +486,7 @@ def sandbox_env_remove_namespace(self: SandboxEnv, name: str) -> None:
     registry = _get_registry(self)
     cleanups = _get_cleanups(self)
 
-    providers = list(registry._namespaces.get(name, ()))
+    providers = list(registry.namespaces.get(name, ()))
     registry.remove(name)
     # 收 cleanup
     for p in providers:
@@ -527,9 +527,9 @@ def sandbox_env_connect_source(self: SandboxEnv, conn: Any) -> None:
     _get_mcp_conns(self)[conn.name] = conn
     # 避免重复注册（panel Connect 可能调用多次）
     impl = mutobj.implementation_of(conn, MCPConnectionImpl)
-    impl._sandbox = self
+    impl.sandbox = self
     registry = _get_registry(self)
-    existing = registry._namespaces.get(conn.namespace.name, [])
+    existing = registry.namespaces.get(conn.namespace.name, [])
     if conn.namespace not in existing:
         sandbox_env_add_namespace(self, conn.namespace, on_remove=conn.close)
 
@@ -590,7 +590,7 @@ async def sandbox_env_close(self: SandboxEnv) -> None:
     # 拷贝并清空，避免重入
     items = list(cleanups.values())
     cleanups.clear()
-    for name in list(registry._namespaces):
+    for name in list(registry.namespaces):
         registry.remove(name)
     mcp_conns.clear()
 

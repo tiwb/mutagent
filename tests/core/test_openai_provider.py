@@ -19,8 +19,8 @@ from mutagent.core.messages import (
 from mutagent.core.llm import LLMApiClient
 from mutagent.core._llm_impl_openai import (
     OpenAIApiClient,
-    _messages_to_openai,
-    _tools_to_openai,
+    messages_to_openai,
+    tools_to_openai,
     _response_from_openai,
 )
 
@@ -41,18 +41,18 @@ class TestMessagesToOpenAI:
 
     def test_simple_user_message(self):
         msgs = [Message(role="user", blocks=[TextBlock(text="Hello")])]
-        result = _messages_to_openai(msgs)
+        result = messages_to_openai(msgs)
         assert result == [{"role": "user", "content": "Hello"}]
 
     def test_simple_assistant_message(self):
         msgs = [Message(role="assistant", blocks=[TextBlock(text="Hi there")])]
-        result = _messages_to_openai(msgs)
+        result = messages_to_openai(msgs)
         assert result == [{"role": "assistant", "content": "Hi there"}]
 
     def test_assistant_with_tool_calls_and_content(self):
         tc = ToolUseBlock(id="call_1", name="get_weather", input={"city": "Tokyo"})
         msgs = [Message(role="assistant", blocks=[TextBlock(text="Let me check."), tc])]
-        result = _messages_to_openai(msgs)
+        result = messages_to_openai(msgs)
 
         assert len(result) == 1
         assert result[0]["role"] == "assistant"
@@ -70,7 +70,7 @@ class TestMessagesToOpenAI:
     def test_assistant_tool_calls_no_text(self):
         tc = ToolUseBlock(id="call_1", name="run_code", input={"code": "1+1"})
         msgs = [Message(role="assistant", blocks=[tc])]
-        result = _messages_to_openai(msgs)
+        result = messages_to_openai(msgs)
 
         assert len(result) == 1
         assert result[0]["role"] == "assistant"
@@ -83,7 +83,7 @@ class TestMessagesToOpenAI:
         tc1 = ToolUseBlock(id="call_1", name="tool_a", input={"x": 1})
         tc2 = ToolUseBlock(id="call_2", name="tool_b", input={"y": 2})
         msgs = [Message(role="assistant", blocks=[tc1, tc2])]
-        result = _messages_to_openai(msgs)
+        result = messages_to_openai(msgs)
 
         assert len(result) == 1
         assert len(result[0]["tool_calls"]) == 2
@@ -104,7 +104,7 @@ class TestMessagesToOpenAI:
                 ),
             ]),
         ]
-        result = _messages_to_openai(msgs)
+        result = messages_to_openai(msgs)
 
         # assistant message + tool result message
         assert len(result) == 2
@@ -127,7 +127,7 @@ class TestMessagesToOpenAI:
                 ToolResultBlock(tool_use_id="call_2", tool_name="tool_b", content="result_2"),
             ]),
         ]
-        result = _messages_to_openai(msgs)
+        result = messages_to_openai(msgs)
 
         # assistant message + 2 tool result messages
         assert len(result) == 3
@@ -145,7 +145,7 @@ class TestMessagesToOpenAI:
             Message(role="assistant", blocks=[TextBlock(text="Hello!")]),
             Message(role="user", blocks=[TextBlock(text="Help me")]),
         ]
-        result = _messages_to_openai(msgs)
+        result = messages_to_openai(msgs)
         assert len(result) == 3
         assert result[0]["role"] == "user"
         assert result[1]["role"] == "assistant"
@@ -155,7 +155,7 @@ class TestMessagesToOpenAI:
         """Verify arguments dict is serialized to JSON string in OpenAI format."""
         tc = ToolUseBlock(id="call_x", name="func", input={"a": [1, 2], "b": True})
         msgs = [Message(role="assistant", blocks=[tc])]
-        result = _messages_to_openai(msgs)
+        result = messages_to_openai(msgs)
 
         args_str = result[0]["tool_calls"][0]["function"]["arguments"]
         assert isinstance(args_str, str)
@@ -176,7 +176,7 @@ class TestToolsToOpenAI:
                 "required": ["city"],
             },
         )]
-        result = _tools_to_openai(tools)
+        result = tools_to_openai(tools)
         assert len(result) == 1
         assert result[0]["type"] == "function"
         assert result[0]["function"]["name"] == "get_weather"
@@ -185,12 +185,12 @@ class TestToolsToOpenAI:
         assert result[0]["function"]["parameters"]["required"] == ["city"]
 
     def test_empty_tools(self):
-        result = _tools_to_openai([])
+        result = tools_to_openai([])
         assert result == []
 
     def test_tool_with_empty_schema(self):
         tools = [ToolSchema(name="noop", description="Does nothing")]
-        result = _tools_to_openai(tools)
+        result = tools_to_openai(tools)
         assert result[0]["function"]["parameters"] == {"type": "object", "properties": {}}
 
     def test_multiple_tools(self):
@@ -198,7 +198,7 @@ class TestToolsToOpenAI:
             ToolSchema(name="tool_a", description="Tool A", input_schema={"type": "object", "properties": {"x": {"type": "integer"}}}),
             ToolSchema(name="tool_b", description="Tool B", input_schema={"type": "object", "properties": {"y": {"type": "string"}}}),
         ]
-        result = _tools_to_openai(tools)
+        result = tools_to_openai(tools)
         assert len(result) == 2
         assert result[0]["function"]["name"] == "tool_a"
         assert result[1]["function"]["name"] == "tool_b"

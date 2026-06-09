@@ -49,10 +49,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import code
-import json
 import os
 import sys
 from typing import Any
+
+from mutio.codec.json import JsonObject, dumps as json_dumps
 
 
 DEFAULT_TIMEOUT = 30.0
@@ -155,17 +156,20 @@ def _validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
 # Client 模式
 # ---------------------------------------------------------------------------
 
-def _format_tool_result(result: dict[str, Any]) -> tuple[str, bool]:
+def _format_tool_result(result: JsonObject) -> tuple[str, bool]:
     """把 MCPClient.call_tool 的返回拍成文本。返回 (text, is_error)。"""
     is_error = bool(result.get("isError"))
-    content = result.get("content") or []
+    content_raw = result.get("content")
+    content: list[JsonObject] = []
+    if isinstance(content_raw, list):
+        content = content_raw  # type: ignore[assignment]
     parts: list[str] = []
     for item in content:
-        if isinstance(item, dict) and item.get("type") == "text":
+        if item.get("type") == "text":
             parts.append(str(item.get("text", "")))
     if parts:
         return "\n".join(parts), is_error
-    return json.dumps(result, ensure_ascii=False, indent=2), is_error
+    return json_dumps(result, ensure_ascii=False, indent=2), is_error
 
 
 class _REPLConsole(code.InteractiveConsole):

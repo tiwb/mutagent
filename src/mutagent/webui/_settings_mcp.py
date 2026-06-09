@@ -15,12 +15,10 @@ import asyncio
 import logging
 import re
 from copy import deepcopy
-from typing import Any, ClassVar, TYPE_CHECKING
+from typing import Any, ClassVar, TYPE_CHECKING, cast
 
-import mutagent
-import mutobj
 from mutagent.sandbox import MCPConnection
-from mutagent.sandbox._mcp_impl import MCPConnectionImpl, _sanitize_ns_name
+from mutagent.sandbox._mcp_impl import sanitize_ns_name
 from mutagent.sandbox._namespace_impl import connection_status
 from mutagent.sandbox._signature import format_callable_signature
 from ._settings_page import SettingPanel
@@ -29,7 +27,6 @@ from mutgui.view import ViewId
 from mutobj import field
 
 if TYPE_CHECKING:
-    from ._conversation import Conversation
     from ._settings_page import SettingsPage
 
 logger = logging.getLogger(__name__)
@@ -46,11 +43,6 @@ _RUNTIME_CRITICAL_FIELDS = (
 )
 
 _KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-
-def _connection_impl(conn: MCPConnection) -> MCPConnectionImpl:
-    return mutobj.implementation_of(conn, MCPConnectionImpl)
-
 
 # ═══════════════════════════════════════════════════════════════
 #  Declaration
@@ -69,9 +61,9 @@ class MCPSettingPanel(SettingPanel):
     panel_placement: ClassVar[str] = "settings:10/20"
     panel_width: ClassVar[int] = 640
 
-    _drafts: dict[str, dict[str, Any]] = field(default_factory=dict[str, Any])
-    _conns: dict[str, MCPConnection] = field(default_factory=dict[str, MCPConnection])
-    _async_error: str = ""
+    drafts: dict[str, dict[str, Any]] = field(default_factory=dict[str, Any])
+    conns: dict[str, MCPConnection] = field(default_factory=dict[str, MCPConnection])
+    async_error: str = ""
 
     id: ViewId = "mcp-settings-panel"
 
@@ -92,8 +84,8 @@ class MCPSettingPanel(SettingPanel):
     error: str = ""
     notice: str = ""
     pending_button: str = ""  # "<key>:connect" / "<key>:disconnect" / "<key>:reconnect" / "<key>:reload"
-    expanded_ns: set = field(default_factory=set)
-    expanded_fn: set = field(default_factory=set)
+    expanded_ns: set[str] = field(default_factory=set[str])
+    expanded_fn: set[str] = field(default_factory=set[str])
 
     def __init__(self: MCPSettingPanel, *, page: SettingsPage) -> None:
         super(MCPSettingPanel, self).__init__()
@@ -229,9 +221,9 @@ def _draft_to_config(draft: dict[str, Any]) -> dict[str, Any]:
             cfg["args"] = list(args)
         if draft.get("shell"):
             cfg["shell"] = True
-        env = draft.get("env") or {}
-        if env:
-            cfg["env"] = dict(env)
+        env_raw = draft.get("env")
+        if env_raw:
+            cfg["env"] = dict(env_raw)
     else:
         cfg["url"] = str(draft.get("url", "")).strip()
         cfg["timeout"] = float(draft.get("timeout", 30.0))
@@ -279,7 +271,7 @@ def _apply_draft_to_form(self: MCPSettingPanel, draft: dict[str, Any]) -> None:
 def _write_config(self: MCPSettingPanel,
                   mcp_sources: dict[str, dict[str, Any]]) -> None:
     config = self.page.conversation.app.config
-    config.set("mcp_sources", mcp_sources, source="webui")
+    config.root.set("mcp_sources", mcp_sources, source="webui")
     config.save()
 
 
@@ -290,13 +282,13 @@ def _load_from_config(self: MCPSettingPanel) -> None:
     conns: dict[原始 key, MCPConnection]
     两者按原始 key 对齐；conn 可能没有（rename/未启动）。
     """
-    cfg_sources = self.page.conversation.app.config.get("mcp_sources", default={}) or {}
-    self._drafts = {
-        key: _draft_from_config(key, deepcopy(cfg))
-        for key, cfg in cfg_sources.items()
+    mcp_sources = self.page.conversation.app.config.root.get_field("mcp_sources", dict[str, Any], default={})
+    self.drafts = {
+        key: _draft_from_config(key, deepcopy(cast(dict[str, Any], cfg)))
+        for key, cfg in mcp_sources.items()
         if isinstance(cfg, dict)
     }
-    self._conns = self.page.conversation.app.sandbox.list_sources()
+    self.conns = self.page.conversation.app.sandbox.list_sources()
     self.current_step = "list"
     self.editing_key = ""
     self.editing_is_new = False
@@ -331,14 +323,14 @@ def _check_name_conflicts(self: MCPSettingPanel,
     is_new = self.editing_is_new
     edit_key = self.editing_key
     others_keys = [
-        k for k in self._drafts
+        k for k in self.drafts
         if (is_new or k != edit_key)
     ]
     if new_name in others_keys:
         return f"Name '{new_name}' already exists."
-    sanitized_new = _sanitize_ns_name(new_name)
+    sanitized_new = sanitize_ns_name(new_name)
     for k in others_keys:
-        if _sanitize_ns_name(k) == sanitized_new:
+        if sanitize_ns_name(k) == sanitized_new:
             return (f"Sanitized name conflict: '{new_name}' → "
                     f"'{sanitized_new}' collides with existing "
                     f"'{k}'.")
@@ -348,7 +340,7 @@ def _check_name_conflicts(self: MCPSettingPanel,
 def _unique_name(self: MCPSettingPanel, base: str) -> str:
     candidate = base
     idx = 2
-    while candidate in self._drafts:
+    while candidate in self.drafts:
         candidate = f"{base}-{idx}"
         idx += 1
     return candidate
@@ -360,7 +352,7 @@ def _unique_name(self: MCPSettingPanel, base: str) -> str:
 
 
 def _conn_state(self: MCPSettingPanel, key: str) -> str:
-    conn = self._conns.get(key)
+    conn = self.conns.get(key)
     if conn is None:
         return "disconnected"
     return conn.state or "disconnected"
@@ -390,7 +382,7 @@ def _state_tag_text(state: str, conn: MCPConnection | None) -> str:
     if state == "failed" and conn is not None and conn.last_error:
         # 复用纯函数 connection_status 的截断逻辑：造一个最小 ns-like shim
         class _Shim:
-            _connection = conn  # 使 connection_status 不返 (None, None)
+            connection = conn  # 使 connection_status 不返 (None, None)
             connection_state = "failed"
             connection_error = conn.last_error
         _, reason = connection_status(_Shim())  # type: ignore[arg-type]
@@ -426,9 +418,9 @@ def _config_changed_at_runtime(draft: dict[str, Any],
 
 
 def _sandbox_loop(self: MCPSettingPanel) -> asyncio.AbstractEventLoop | None:
-    from mutagent.sandbox._env_impl import _get_async_loop
+    from mutagent.sandbox._env_impl import get_async_loop
 
-    return _get_async_loop(self.page.conversation.app.sandbox)
+    return get_async_loop(self.page.conversation.app.sandbox)
 
 
 def _ensure_conn(self: MCPSettingPanel, key: str) -> MCPConnection | None:
@@ -439,10 +431,10 @@ def _ensure_conn(self: MCPSettingPanel, key: str) -> MCPConnection | None:
 
     sandbox 注册由 ``_do_connect`` 通过 ``connect_source()`` 完成。
     """
-    conn = self._conns.get(key)
+    conn = self.conns.get(key)
     if conn is not None:
         return conn
-    draft = self._drafts.get(key)
+    draft = self.drafts.get(key)
     if draft is None:
         return None
     loop = _sandbox_loop(self)
@@ -455,7 +447,7 @@ def _ensure_conn(self: MCPSettingPanel, key: str) -> MCPConnection | None:
     except Exception as exc:
         _set_message(self, error=f"Init connection failed: {exc}")
         return None
-    self._conns[key] = conn
+    self.conns[key] = conn
     return conn
 
 
@@ -475,16 +467,16 @@ def _submit_async(self: MCPSettingPanel, coro: Any,
         try:
             fut.result()
         except Exception as exc:
-            self._async_error = str(exc) or exc.__class__.__name__
+            self.async_error = str(exc) or exc.__class__.__name__
         else:
-            self._async_error = ""
+            self.async_error = ""
         self.pending_button = ""
-        if self._async_error:
-            _set_message(self, error=self._async_error)
+        if self.async_error:
+            _set_message(self, error=self.async_error)
         else:
             _set_message(self)
         # 反查 sandbox conns（autostart 后端自动新增的 conn 也能拿到）
-        self._conns = self.page.conversation.app.sandbox.list_sources()
+        self.conns = self.page.conversation.app.sandbox.list_sources()
         self.invalidate()
 
     fut = asyncio.run_coroutine_threadsafe(coro, loop)
@@ -500,7 +492,7 @@ async def _do_connect(self: MCPSettingPanel, key: str) -> None:
 
 
 async def _do_disconnect(self: MCPSettingPanel, key: str) -> None:
-    conn = self._conns.get(key)
+    conn = self.conns.get(key)
     if conn is None:
         return
     # 只 close（处理 peers + client + state），
@@ -511,7 +503,7 @@ async def _do_disconnect(self: MCPSettingPanel, key: str) -> None:
 
 
 async def _do_reconnect(self: MCPSettingPanel, key: str) -> None:
-    conn = self._conns.get(key)
+    conn = self.conns.get(key)
     if conn is None:
         await _do_connect(self, key)
         return
@@ -545,7 +537,7 @@ def _btn_reload_tools(key: str, *, view: MCPSettingPanel) -> None:
 
 
 def _edit_source(key: str, *, view: MCPSettingPanel) -> None:
-    draft = view._drafts.get(key)
+    draft = view.drafts.get(key)
     if draft is None:
         return
     view.current_step = "edit"
@@ -607,20 +599,20 @@ def _save_edits(*, view: MCPSettingPanel) -> None:
 
     # rename → 删旧 conn（摘 namespace 触发 close），新 conn 等用户点 Connect
     if is_rename:
-        old_conn = view._conns.pop(old_key, None)
+        old_conn = view.conns.pop(old_key, None)
         if old_conn is not None:
             try:
                 view.page.conversation.app.sandbox.disconnect_source(old_key)
             except Exception as exc:
                 logger.warning("Cleanup old conn '%s' failed: %s", old_key, exc)
-        view._drafts.pop(old_key, None)
+        view.drafts.pop(old_key, None)
 
-    view._drafts[name] = draft
+    view.drafts[name] = draft
     view.editing_key = name
     view.editing_is_new = False
 
     # 落盘
-    sources_payload = {k: _draft_to_config(d) for k, d in view._drafts.items()}
+    sources_payload = {k: _draft_to_config(d) for k, d in view.drafts.items()}
     try:
         _write_config(view, sources_payload)
     except Exception as exc:
@@ -639,18 +631,18 @@ def _delete_source(*, view: MCPSettingPanel) -> None:
         _back_to_list(view=view)
         return
     key = view.editing_key
-    if not key or key not in view._drafts:
+    if not key or key not in view.drafts:
         _back_to_list(view=view)
         return
     # 摘 conn + namespace
-    conn = view._conns.pop(key, None)
+    conn = view.conns.pop(key, None)
     if conn is not None:
         try:
             view.page.conversation.app.sandbox.disconnect_source(key)
         except Exception as exc:
             logger.warning("Cleanup conn '%s' failed: %s", key, exc)
-    view._drafts.pop(key, None)
-    sources_payload = {k: _draft_to_config(d) for k, d in view._drafts.items()}
+    view.drafts.pop(key, None)
+    sources_payload = {k: _draft_to_config(d) for k, d in view.drafts.items()}
     try:
         _write_config(view, sources_payload)
     except Exception as exc:
@@ -662,10 +654,6 @@ def _delete_source(*, view: MCPSettingPanel) -> None:
     view.editing_key = ""
     _set_message(view, notice=f"Removed '{key}'.")
     view.invalidate()
-
-
-async def _close_panel(*, view: MCPSettingPanel) -> None:
-    await view.page.close()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -703,7 +691,7 @@ def _render_message(self: MCPSettingPanel, *, margin_bottom: int = 12
 
 def _render_list_row(self: MCPSettingPanel, key: str,
                      draft: dict[str, Any]) -> dict[str, Any]:
-    conn = self._conns.get(key)
+    conn = self.conns.get(key)
     state = _conn_state(self, key)
     transport = draft["transport"]
     pending = self.pending_button.startswith(f"{key}:")
@@ -724,7 +712,7 @@ def _render_list_row(self: MCPSettingPanel, key: str,
         # 聚合同名 namespace（主 ns + peer namespaces），与 edit 页一致
         merged_funcs: dict[str, Any] = {}
         for ns in [conn.namespace] + conn.peer_namespaces:
-            merged_funcs.update(ns._functions)
+            merged_funcs.update(ns.functions)
         tools_count = len(merged_funcs)
     else:
         tools_count = 0
@@ -840,7 +828,7 @@ def _render_list(self: MCPSettingPanel) -> list[dict[str, Any]]:
     })
 
     rows = [_render_list_row(self, key, draft)
-            for key, draft in self._drafts.items()]
+            for key, draft in self.drafts.items()]
     if not rows:
         rows = [{
             "$component": "antd.Empty",
@@ -918,9 +906,9 @@ def _fn_detail(func: Any, fn_name: str) -> str:
     到 docstring；本函数不再手拼 ``Parameters:`` 表。
     """
     sig = _fn_signature(func)
-    desc = getattr(func, '_mcp_description', None) or ''
+    desc = getattr(func, 'mcp_description', None) or ''
     doc = (getattr(func, '__doc__', '') or '').strip()
-    # 优先用 _mcp_description（MCP tool 的描述）
+    # 优先用 mcp_description（MCP tool 的描述）
     if desc and isinstance(desc, str):
         doc = desc if not doc.startswith(desc) else doc
     elif not desc:
@@ -968,8 +956,8 @@ def _render_function_browser(self: MCPSettingPanel,
         merged_funcs: dict[str, Any] = {}
         merged_descs: dict[str, str] = {}
         for ns in ns_group:
-            merged_funcs.update(ns._functions)
-            merged_descs.update(ns._descriptions)
+            merged_funcs.update(ns.functions)
+            merged_descs.update(ns.descriptions)
         if not merged_funcs:
             continue
         grouped.append({
@@ -1155,7 +1143,7 @@ def _render_function_browser(self: MCPSettingPanel,
 def _sanitized_hint(name: str) -> str:
     if not name:
         return ""
-    s = _sanitize_ns_name(name)
+    s = sanitize_ns_name(name)
     if s == name:
         return f"运行时名: {s}"
     return f"运行时名: {s}（已 sanitize）"
@@ -1164,7 +1152,7 @@ def _sanitized_hint(name: str) -> str:
 def _render_edit(self: MCPSettingPanel) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     key = self.editing_key
-    conn = self._conns.get(key)
+    conn = self.conns.get(key)
     state = _conn_state(self, key)
 
     items.append({
@@ -1372,7 +1360,7 @@ def _render_edit(self: MCPSettingPanel) -> list[dict[str, Any]]:
         for ns_group in ns_groups.values():
             merged: dict[str, Any] = {}
             for ns in ns_group:
-                merged.update(ns._functions)
+                merged.update(ns.functions)
             total_funcs += len(merged)
 
     func_header_children: list[dict[str, Any]] = [{

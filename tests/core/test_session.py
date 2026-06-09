@@ -15,7 +15,6 @@ from mutagent.core._session_impl import (
     _append_prompt,
     _load,
     _resolve_resume_path,
-    _save,
     _write_header,
 )
 from mutagent.core.messages import (
@@ -87,7 +86,12 @@ def test_session_store_roundtrip(tmp_path: Path):
     )
 
     path = tmp_path / "session.jsonl"
-    _save(path, data)
+    _write_header(path, data.meta)
+    prev_id: str | None = None
+    for prompt in data.context.prompts:
+        prev_id = _append_prompt(path, prompt, parent_id=prev_id)
+    for message in data.context.messages:
+        prev_id = _append_message(path, message, parent_id=prev_id)
     loaded = _load(path)
 
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -191,18 +195,22 @@ def test_agent_session_resume_by_path_and_id(tmp_path: Path):
         Message(role="user", blocks=[TextBlock(text="hi")], id="u1", timestamp=1.0),
         Message(role="assistant", blocks=[TextBlock(text="hello")], id="a1", timestamp=2.0),
     ])
-    path = _save(
-        tmp_path / "resume.jsonl",
-        SessionData(
-            context=context,
-            meta=SessionMeta(
-                session_id="resume123",
-                model="gpt-4.1",
-                cwd="/home/user/project",
-                created_at=1.0,
-            ),
+    path = tmp_path / "resume.jsonl"
+    data = SessionData(
+        context=context,
+        meta=SessionMeta(
+            session_id="resume123",
+            model="gpt-4.1",
+            cwd="/home/user/project",
+            created_at=1.0,
         ),
     )
+    _write_header(path, data.meta)
+    prev_id: str | None = None
+    for prompt in data.context.prompts:
+        prev_id = _append_prompt(path, prompt, parent_id=prev_id)
+    for message in data.context.messages:
+        prev_id = _append_message(path, message, parent_id=prev_id)
     renamed = path.with_name(f"2026-05-28T00-00-00Z_resume123.jsonl")
     path.rename(renamed)
 

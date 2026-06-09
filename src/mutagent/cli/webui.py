@@ -55,7 +55,7 @@ def dispatch_webui(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
     app = App()
     app.load_config(args.config)
     app.setup_agent()
-    console_level = str(app.config.get("logging.console_level", default="WARNING"))
+    console_level = str(app.config.root.get_field("logging.console_level", str, default="WARNING"))
     _ensure_console_logging(console_level)
 
     host = args.host

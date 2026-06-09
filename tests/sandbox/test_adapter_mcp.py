@@ -28,23 +28,23 @@ from mutagent.sandbox._mcp_impl import (
     MCPTransportError,
     StdioMCPClient,
     _extract_content,
-    _is_transport_error,
+    is_transport_error,
     make_client,
 )
-from mutagent.sandbox._signature import _MISSING
+from mutagent.sandbox._signature import MISSING, _MissingSentinel
 from mutagent.sandbox._namespace_impl import (
     Namespace,
     NamespaceRegistry,
-    _render_namespace,
+    render_namespace,
     _render_registry,
 )
 from mutagent.sandbox._env_impl import SandboxEnvRuntime
 
 
 def _set_sandbox(conn, sandbox):
-    """Set _sandbox on MCPConnection's implementation."""
+    """Set sandbox on MCPConnection's implementation."""
     impl = mutobj.implementation_of(conn, MCPConnectionImpl)
-    impl._sandbox = sandbox
+    impl.sandbox = sandbox
 
 
 def _impl(conn):
@@ -143,7 +143,7 @@ class TestHTTPMCPClient:
         assert info["serverInfo"] == {"name": "mock", "version": "0.0.1"}
         assert info["capabilities"] == {"tools": {}}
         assert info["instructions"] == ""  # mock 默认空
-        mock = cast(_MockMCPClient, client._mcp)
+        mock = cast(_MockMCPClient, client.mcp)
         assert mock.connected is True
         assert mock.url == "http://example/mcp"
         assert mock.timeout == 5.0
@@ -155,7 +155,7 @@ class TestHTTPMCPClient:
 
         client = HTTPMCPClient(url="http://example/mcp")
         await client.connect()
-        mock = cast(_MockMCPClient, client._mcp)
+        mock = cast(_MockMCPClient, client.mcp)
         mock.tools_payload = [
             {"name": "foo", "description": "foo tool", "inputSchema": {}},
         ]
@@ -170,7 +170,7 @@ class TestHTTPMCPClient:
 
         client = HTTPMCPClient(url="http://example/mcp")
         await client.connect()
-        mock = cast(_MockMCPClient, client._mcp)
+        mock = cast(_MockMCPClient, client.mcp)
         mock.call_tool_result = {
             "content": [{"type": "text", "text": '{"ok": true}'}],
         }
@@ -187,7 +187,7 @@ class TestHTTPMCPClient:
 
         client = HTTPMCPClient(url="http://example/mcp")
         await client.connect()
-        mock = cast(_MockMCPClient, client._mcp)
+        mock = cast(_MockMCPClient, client.mcp)
         mock.call_tool_result = {
             "isError": True,
             "content": [{"type": "text", "text": "fail"}],
@@ -204,7 +204,7 @@ class TestHTTPMCPClient:
         await client.connect()
         await client.close()
 
-        assert cast(_MockMCPClient, client._mcp).closed is True
+        assert cast(_MockMCPClient, client.mcp).closed is True
 
     @pytest.mark.asyncio
     async def test_connect_missing_instructions_attr(self, monkeypatch):
@@ -292,7 +292,7 @@ class TestBridgeDispatch:
             "url": "http://example/mcp",
         })
         await conn.ensure_connected()
-        assert conn.namespace._description == "Use this server for X and Y."
+        assert conn.namespace.description == "Use this server for X and Y."
 
     @pytest.mark.asyncio
     async def test_http_falls_back_to_server_title(self, monkeypatch):
@@ -307,7 +307,7 @@ class TestBridgeDispatch:
             "url": "http://example/mcp",
         })
         await conn.ensure_connected()
-        assert conn.namespace._description == "My Nice Server"
+        assert conn.namespace.description == "My Nice Server"
 
     @pytest.mark.asyncio
     async def test_stdio_fills_description_from_instructions(self, monkeypatch):
@@ -319,7 +319,7 @@ class TestBridgeDispatch:
 
         conn = MCPConnection("s", {"command": "cmd"})
         await conn.ensure_connected()
-        assert conn.namespace._description == "Stdio server docs."
+        assert conn.namespace.description == "Stdio server docs."
 
     def test_stdio_default_transport(self):
         client = make_client("play", {
@@ -374,7 +374,7 @@ class TestToolFuncCrossThread:
         _set_sandbox(conn, sandbox)
 
         await conn.ensure_connected()
-        echo = conn.namespace._functions["echo"]
+        echo = conn.namespace.functions["echo"]
         main_loop = asyncio.get_running_loop()
 
         # 在非 asyncio 线程调用 tool_func —— 精确模拟 pysandbox 线程池
@@ -410,7 +410,7 @@ class TestToolFuncCrossThread:
         _set_sandbox(conn, sandbox)
 
         await conn.ensure_connected()
-        ping = conn.namespace._functions["ping"]
+        ping = conn.namespace.functions["ping"]
         main_loop = asyncio.get_running_loop()
 
         def worker():
@@ -421,58 +421,58 @@ class TestToolFuncCrossThread:
 
 
 # ============================================================
-# _is_transport_error
+# is_transport_error
 # ============================================================
 
 class TestIsTransportError:
 
     def test_mcp_transport_error(self):
-        assert _is_transport_error(MCPTransportError("x")) is True
+        assert is_transport_error(MCPTransportError("x")) is True
 
     def test_mcp_tool_error_is_not_transport(self):
-        assert _is_transport_error(MCPToolError("user-facing")) is False
+        assert is_transport_error(MCPToolError("user-facing")) is False
 
     def test_broken_pipe(self):
-        assert _is_transport_error(BrokenPipeError("pipe")) is True
+        assert is_transport_error(BrokenPipeError("pipe")) is True
 
     def test_connection_reset(self):
-        assert _is_transport_error(ConnectionResetError("reset")) is True
+        assert is_transport_error(ConnectionResetError("reset")) is True
 
     def test_eof(self):
-        assert _is_transport_error(EOFError()) is True
+        assert is_transport_error(EOFError()) is True
 
     def test_httpx_connect_error(self):
-        assert _is_transport_error(httpx.ConnectError("x")) is True
+        assert is_transport_error(httpx.ConnectError("x")) is True
 
     def test_httpx_read_error(self):
-        assert _is_transport_error(httpx.ReadError("x")) is True
+        assert is_transport_error(httpx.ReadError("x")) is True
 
     def test_httpx_status_404_is_transport(self):
         req = httpx.Request("POST", "http://x/")
         resp = httpx.Response(404, request=req)
         exc = httpx.HTTPStatusError("not found", request=req, response=resp)
-        assert _is_transport_error(exc) is True
+        assert is_transport_error(exc) is True
 
     def test_httpx_status_410_is_transport(self):
         req = httpx.Request("POST", "http://x/")
         resp = httpx.Response(410, request=req)
         exc = httpx.HTTPStatusError("gone", request=req, response=resp)
-        assert _is_transport_error(exc) is True
+        assert is_transport_error(exc) is True
 
     def test_httpx_status_500_is_not_transport(self):
         req = httpx.Request("POST", "http://x/")
         resp = httpx.Response(500, request=req)
         exc = httpx.HTTPStatusError("oops", request=req, response=resp)
-        assert _is_transport_error(exc) is False
+        assert is_transport_error(exc) is False
 
     def test_runtime_closed_unexpectedly(self):
-        assert _is_transport_error(RuntimeError("MCP server closed unexpectedly")) is True
+        assert is_transport_error(RuntimeError("MCP server closed unexpectedly")) is True
 
     def test_other_runtime_error(self):
-        assert _is_transport_error(RuntimeError("MCP error -32601: method not found")) is False
+        assert is_transport_error(RuntimeError("MCP error -32601: method not found")) is False
 
     def test_value_error_is_not_transport(self):
-        assert _is_transport_error(ValueError("bad")) is False
+        assert is_transport_error(ValueError("bad")) is False
 
 
 # ============================================================
@@ -527,7 +527,7 @@ class TestMCPConnectionStateMachine:
         assert conn.state == "disconnected"
         assert _impl(conn).client is None
         assert conn.namespace.connection_state == "disconnected"
-        assert conn.namespace._connection is conn
+        assert conn.namespace.connection is conn
 
     @pytest.mark.asyncio
     async def test_reconnect_success(self, monkeypatch):
@@ -545,8 +545,8 @@ class TestMCPConnectionStateMachine:
 
         assert conn.state == "connected"
         assert _impl(conn).client is fake
-        assert "echo" in conn.namespace._functions
-        assert conn.namespace._description == "hello"
+        assert "echo" in conn.namespace.functions
+        assert conn.namespace.description == "hello"
         assert conn.namespace.connection_state == "connected"
 
     @pytest.mark.asyncio
@@ -682,13 +682,13 @@ class TestMCPConnectionStateMachine:
         conn = MCPConnection("ns", {"transport": "http", "url": "http://x"})
         _set_sandbox(conn, _sandbox_with_loop(loop))
         await conn.reconnect()
-        assert "old" in conn.namespace._functions
+        assert "old" in conn.namespace.functions
 
         # server 重启，tool 列表变了
         fake.tools = [{"name": "new", "description": "", "inputSchema": {}}]
         await conn.reconnect()
-        assert "new" in conn.namespace._functions
-        assert "old" not in conn.namespace._functions  # 旧 tool 被删
+        assert "new" in conn.namespace.functions
+        assert "old" not in conn.namespace.functions  # 旧 tool 被删
 
 
 class TestToolFuncAutoReconnect:
@@ -842,7 +842,7 @@ class TestNamespaceRender:
     def _mcp_ns(self, name, state, error=None, functions=None):
         ns = Namespace(name, description="")
         # 模拟有 connection（非 None 即可触发 MCP 渲染分支）
-        ns._connection = type("_FakeConn", (), {"last_attempt_at": None})()
+        ns.connection = type("_FakeConn", (), {"last_attempt_at": None})()
         ns.connection_state = state
         ns.connection_error = error
         for fname in functions or []:
@@ -885,7 +885,7 @@ class TestNamespaceRender:
 
     def test_render_namespace_failed_hint(self):
         ns = self._mcp_ns("weather", "failed", error="ECONNREFUSED")
-        text = _render_namespace(ns)
+        text = render_namespace(ns)
         assert "Connection failed: ECONNREFUSED" in text
         assert "Calling any function will retry" in text
 
@@ -1118,7 +1118,7 @@ class TestMakeToolFuncSignature:
                 )
 
         class _DummyConn:
-            _sandbox = _DummySandbox()
+            sandbox = _DummySandbox()
             client = None
 
             async def ensure_connected(self): return None
@@ -1194,8 +1194,8 @@ class TestMakeToolFuncSignature:
             "required": [],
         }
         fn, _ = self._make_func("probe", schema)
-        assert getattr(fn, "_mcp_input_schema") == schema
-        assert getattr(fn, "_mcp_description") == "desc"
+        assert getattr(fn, "mcp_input_schema") == schema
+        assert getattr(fn, "mcp_description") == "desc"
         assert callable(getattr(fn, "_async_original"))
 
     def test_empty_schema_has_empty_signature(self):
@@ -1215,8 +1215,8 @@ class TestMakeToolFuncSignature:
         }
         fn, inspect = self._make_func("browser_console_messages", schema)
         sig = inspect.signature(fn)
-        assert sig.parameters["all"].default is _MISSING
-        assert sig.parameters["filename"].default is _MISSING
+        assert sig.parameters["all"].default is MISSING
+        assert sig.parameters["filename"].default is MISSING
         assert str(sig) == (
             "(level: 'str' = 'info', all: 'bool' = <omit>, "
             "filename: 'str' = <omit>)"
@@ -1247,7 +1247,7 @@ class TestMakeToolFuncSignature:
 
         class _DummyConn:
             def __init__(self):
-                self._sandbox = _sandbox_with_loop(
+                self.sandbox = _sandbox_with_loop(
                     cast(asyncio.AbstractEventLoop, object()),
                 )
                 self.client = _DummyClient()
@@ -1309,7 +1309,7 @@ class TestMakeToolFuncSignature:
 
         class _DummyConn:
             def __init__(self):
-                self._sandbox = _sandbox_with_loop(
+                self.sandbox = _sandbox_with_loop(
                     cast(asyncio.AbstractEventLoop, object()),
                 )
                 self.client = _DummyClient()
@@ -1374,7 +1374,7 @@ class TestMakeToolFuncSignature:
 
         class _DummyConn:
             def __init__(self):
-                self._sandbox = _sandbox_with_loop(
+                self.sandbox = _sandbox_with_loop(
                     cast(asyncio.AbstractEventLoop, object()),
                 )
                 self.client = _DummyClient()

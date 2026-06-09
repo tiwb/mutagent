@@ -88,7 +88,7 @@ class LocalFetchImpl(FetchImpl):
 
 
 @mutobj.impl(LocalFetchImpl.fetch)
-async def _local_fetch(self: LocalFetchImpl, url: str, format: str = "markdown") -> str:
+async def local_fetch_impl_fetch(self: LocalFetchImpl, url: str, format: str = "markdown") -> str:
     """本地提取实现。"""
     try:
         raw_html = await _httpx_get(url)

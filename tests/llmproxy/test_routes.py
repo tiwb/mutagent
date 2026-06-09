@@ -70,7 +70,7 @@ def test_runtime_invalidates_provider_cache_on_config_change():
     assert isinstance(first.provider, OpenAIApiClient)
     assert first.provider.api_key == "sk-test"
 
-    config.set(
+    config.root.set(
         "providers.openai",
         {
             "type": "OpenAI",

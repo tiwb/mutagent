@@ -5,7 +5,7 @@ from __future__ import annotations
 import mutobj
 
 import logging
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 from mutgui import Action, ActionContext, ActionRef, ActionToolbar, Bind, Callback, View, ViewBlock
 

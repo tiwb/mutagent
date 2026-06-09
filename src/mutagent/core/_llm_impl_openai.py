@@ -1,11 +1,19 @@
 """mutagent.core._provider_impl_openai -- OpenAI Chat Completions API provider."""
 
-import json
 import logging
-from typing import Any, AsyncGenerator, AsyncIterator, ClassVar
+from typing import AsyncGenerator, AsyncIterator, ClassVar
 
 import httpx
 
+from mutio.codec.json import (
+    JSONDecodeError,
+    JsonObject,
+    JsonValue,
+    dumps,
+    get_field,
+    loads,
+    narrow_value,
+)
 from mutio.net.client import HttpClient
 from ._llm_impl import get_default_context_window
 from .messages import (
@@ -40,15 +48,16 @@ class OpenAIApiClient(LLMApiClient):
     base_url: str
     api_key: str
 
-    def __init__(self, spec: dict):
-        if not spec.get("auth_token"):
+    def __init__(self, spec: JsonObject):
+        auth_token = get_field(spec, "auth_token", str, default="")
+        if not auth_token:
             raise ValueError("OpenAIProvider requires 'auth_token' in model spec.")
-        model_id = spec.get("model_id", "")
+        model_id = get_field(spec, "model_id", str, default="")
         super().__init__(
             model_id=model_id,
             context_window=get_default_context_window(model_id),
-            base_url=spec.get("base_url", "https://api.openai.com/v1"),
-            api_key=spec["auth_token"],
+            base_url=get_field(spec, "base_url", str, default="https://api.openai.com/v1"),
+            api_key=auth_token,
         )
 
     async def send(
@@ -59,7 +68,7 @@ class OpenAIApiClient(LLMApiClient):
         stream: bool = True,
     ) -> AsyncGenerator[StreamEvent, None]:
         """Send messages to OpenAI-compatible API and yield streaming events."""
-        openai_messages = _messages_to_openai(messages)
+        openai_messages = messages_to_openai(messages)
         if prompts:
             # 将 prompts 转换为 system 消息插入到最前面
             for msg in reversed(prompts):
@@ -67,12 +76,12 @@ class OpenAIApiClient(LLMApiClient):
                     if isinstance(block, TextBlock) and block.text:
                         openai_messages.insert(0, {"role": "system", "content": block.text})
 
-        payload: dict[str, Any] = {
+        payload: JsonObject = {
             "model": self.model_id,
             "messages": openai_messages,
         }
         if tools:
-            payload["tools"] = _tools_to_openai(tools)
+            payload["tools"] = tools_to_openai(tools)
 
         headers = {
             "authorization": f"Bearer {self.api_key}",
@@ -80,10 +89,10 @@ class OpenAIApiClient(LLMApiClient):
         }
 
         if stream:
-            async for event in _send_stream(self.base_url, payload, headers):
+            async for event in send_stream(self.base_url, payload, headers):
                 yield event
         else:
-            async for event in _send_no_stream(self.base_url, payload, headers):
+            async for event in send_no_stream(self.base_url, payload, headers):
                 yield event
 
 
@@ -91,7 +100,7 @@ class OpenAIApiClient(LLMApiClient):
 # Message → OpenAI API 转换
 # ---------------------------------------------------------------------------
 
-def _messages_to_openai(messages: list[Message]) -> list[dict[str, Any]]:
+def messages_to_openai(messages: list[Message]) -> list[JsonObject]:
     """Convert internal Message list to OpenAI messages format.
 
     处理 blocks 模型：
@@ -99,12 +108,12 @@ def _messages_to_openai(messages: list[Message]) -> list[dict[str, Any]]:
     - user 消息中 ToolResultBlock → 生成 role:"tool" 结果消息
     - ThinkingBlock 忽略
     """
-    result: list[dict[str, Any]] = []
+    result: list[JsonObject] = []
     for msg in messages:
         if msg.role == "assistant":
             # 构建 assistant 消息
             content_parts: list[str] = []
-            tool_calls_list: list[dict[str, Any]] = []
+            tool_calls_list: list[JsonObject] = []
 
             for block in msg.blocks:
                 if isinstance(block, TextBlock) and block.text:
@@ -115,12 +124,12 @@ def _messages_to_openai(messages: list[Message]) -> list[dict[str, Any]]:
                         "type": "function",
                         "function": {
                             "name": block.name,
-                            "arguments": json.dumps(block.input),
+                            "arguments": dumps(block.input),
                         },
                     })
                 # ThinkingBlock, ImageBlock 等 → 忽略
 
-            entry: dict[str, Any] = {"role": "assistant"}
+            entry: JsonObject = {"role": "assistant"}
             content = "\n".join(content_parts) if content_parts else None
             entry["content"] = content
             if tool_calls_list:
@@ -129,8 +138,8 @@ def _messages_to_openai(messages: list[Message]) -> list[dict[str, Any]]:
         else:
             # user / system 消息
             content_parts = []
-            image_parts: list[dict[str, Any]] = []
-            tool_results: list[dict[str, Any]] = []
+            image_parts: list[JsonObject] = []
+            tool_results: list[JsonObject] = []
             for block in msg.blocks:
                 if isinstance(block, TextBlock) and block.text:
                     content_parts.append(block.text)
@@ -155,7 +164,7 @@ def _messages_to_openai(messages: list[Message]) -> list[dict[str, Any]]:
 
             if image_parts:
                 # 多模态：content 是 array
-                parts: list[dict[str, Any]] = []
+                parts: list[JsonObject] = []
                 if content_parts:
                     parts.append({"type": "text", "text": "\n".join(content_parts)})
                 parts.extend(image_parts)
@@ -168,19 +177,19 @@ def _messages_to_openai(messages: list[Message]) -> list[dict[str, Any]]:
     return _merge_consecutive_openai(result)
 
 
-def _merge_consecutive_openai(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _merge_consecutive_openai(messages: list[JsonObject]) -> list[JsonObject]:
     """Merge consecutive same-role messages for OpenAI format.
 
     Tool-role messages are never merged (each has a unique tool_call_id).
     """
     if not messages:
         return messages
-    merged: list[dict[str, Any]] = [messages[0]]
+    merged: list[JsonObject] = [messages[0]]
     for msg in messages[1:]:
         prev = merged[-1]
         if msg["role"] == prev["role"] and msg["role"] not in ("tool",):
-            prev_content = prev.get("content") or ""
-            cur_content = msg.get("content") or ""
+            prev_content = get_field(prev, "content", str, default="")
+            cur_content = get_field(msg, "content", str, default="")
             if prev_content and cur_content:
                 prev["content"] = prev_content + "\n\n" + cur_content
             elif cur_content:
@@ -190,9 +199,9 @@ def _merge_consecutive_openai(messages: list[dict[str, Any]]) -> list[dict[str, 
     return merged
 
 
-def _tools_to_openai(tools: list[ToolSchema]) -> list[dict[str, Any]]:
+def tools_to_openai(tools: list[ToolSchema]) -> list[JsonObject]:
     """Convert internal ToolSchema list to OpenAI tools format."""
-    result = []
+    result: list[JsonObject] = []
     for tool in tools:
         result.append({
             "type": "function",
@@ -209,11 +218,12 @@ def _tools_to_openai(tools: list[ToolSchema]) -> list[dict[str, Any]]:
 # OpenAI API → 内部模型转换
 # ---------------------------------------------------------------------------
 
-def _response_from_openai(data: dict[str, Any]) -> Response:
+def _response_from_openai(data: JsonObject) -> Response:
     """Convert OpenAI API response to internal Response."""
-    choice = data.get("choices", [{}])[0]
-    message_data = choice.get("message", {})
-    finish_reason = choice.get("finish_reason") or ""
+    choices = get_field(data, "choices", list[JsonObject], default=[])
+    choice = choices[0] if choices else JsonObject()
+    message_data = get_field(choice, "message", JsonObject, default={})
+    finish_reason = get_field(choice, "finish_reason", str, default="")
 
     stop_reason_map = {
         "stop": "end_turn",
@@ -226,29 +236,32 @@ def _response_from_openai(data: dict[str, Any]) -> Response:
     blocks: list[ContentBlock] = []
 
     # Text content
-    content = message_data.get("content", "") or ""
+    content = get_field(message_data, "content", str, default="")
     if content:
         blocks.append(TextBlock(text=content))
 
     # Tool calls
-    for tc_data in message_data.get("tool_calls", []):
-        func = tc_data.get("function", {})
+    tool_calls = get_field(message_data, "tool_calls", list[JsonObject], default=[])
+    for tc_data in tool_calls:
+        func = get_field(tc_data, "function", JsonObject, default={})
+        args_str = get_field(func, "arguments", str, default="{}")
         try:
-            arguments = json.loads(func.get("arguments", "{}"))
-        except json.JSONDecodeError:
-            arguments = {}
+            arguments = narrow_value(loads(args_str), JsonObject)
+        except (JSONDecodeError, TypeError):
+            arguments = JsonObject()
         blocks.append(ToolUseBlock(
-            id=tc_data.get("id", ""),
-            name=func.get("name", ""),
+            id=get_field(tc_data, "id", str, default=""),
+            name=get_field(func, "name", str, default=""),
             input=arguments,
         ))
 
     # Usage
-    usage_data = data.get("usage", {})
+    raw_usage = get_field(data, "usage", JsonObject, default={})
+    prompt_details = get_field(raw_usage, "prompt_tokens_details", JsonObject, default={})
     usage = Usage(
-        input_tokens=usage_data.get("prompt_tokens", 0),
-        output_tokens=usage_data.get("completion_tokens", 0),
-        cache_read_input_tokens=usage_data.get("prompt_tokens_details", {}).get("cached_tokens", 0),
+        input_tokens=get_field(raw_usage, "prompt_tokens", int, default=0),
+        output_tokens=get_field(raw_usage, "completion_tokens", int, default=0),
+        cache_read_input_tokens=get_field(prompt_details, "cached_tokens", int, default=0),
     )
 
     message = Message(role="assistant", blocks=blocks)
@@ -259,9 +272,20 @@ def _response_from_openai(data: dict[str, Any]) -> Response:
 # HTTP 发送
 # ---------------------------------------------------------------------------
 
-async def _send_no_stream(
+def _extract_error_msg(data: JsonValue, status_code: int, prefix: str) -> str:
+    """从 API 错误响应 JSON 中提取错误消息。"""
+    if isinstance(data, dict):
+        error = data.get("error")
+        if isinstance(error, dict):
+            msg = error.get("message")
+            if isinstance(msg, str):
+                return f"{prefix} ({status_code}): {msg}"
+    return f"{prefix} ({status_code}): {dumps(data)}"
+
+
+async def send_no_stream(
     base_url: str,
-    payload: dict[str, Any],
+    payload: JsonObject,
     headers: dict[str, str],
 ) -> AsyncIterator[StreamEvent]:
     """Non-streaming path for OpenAI API."""
@@ -271,17 +295,20 @@ async def _send_no_stream(
             headers=headers,
             json=payload,
         )
-    data = resp.json()
+    data_raw: JsonValue = resp.json()
     if resp.status_code != 200:
-        error_msg = data.get("error", {}).get("message", json.dumps(data))
+        error_msg = _extract_error_msg(data_raw, resp.status_code, "OpenAI API error")
         logger.warning("OpenAI API error (%d): %s", resp.status_code, error_msg)
         yield StreamEvent(
             type="error",
-            error=f"OpenAI API error ({resp.status_code}): {error_msg}",
+            error=error_msg,
         )
         return
 
-    response = _response_from_openai(data)
+    if not isinstance(data_raw, dict):
+        yield StreamEvent(type="error", error="OpenAI API response is not a JSON object")
+        return
+    response = _response_from_openai(data_raw)
 
     for block in response.message.blocks:
         if isinstance(block, TextBlock) and block.text:
@@ -293,9 +320,9 @@ async def _send_no_stream(
     yield StreamEvent(type="response_done", response=response)
 
 
-async def _send_stream(
+async def send_stream(
     base_url: str,
-    payload: dict[str, Any],
+    payload: JsonObject,
     headers: dict[str, str],
 ) -> AsyncIterator[StreamEvent]:
     """Streaming path: parse OpenAI SSE and yield StreamEvents."""
@@ -312,20 +339,20 @@ async def _send_stream(
             if resp.status_code != 200:
                 body = await resp.aread()
                 try:
-                    data = json.loads(body)
-                    error_msg = data.get("error", {}).get("message", json.dumps(data))
+                    error_data = loads(body)
+                    error_msg = _extract_error_msg(error_data, resp.status_code, "OpenAI API error")
                 except Exception:
-                    error_msg = f"HTTP {resp.status_code}"
+                    error_msg = f"OpenAI API error ({resp.status_code}): HTTP {resp.status_code}"
                 logger.warning("OpenAI API stream error (%d): %s", resp.status_code, error_msg)
                 yield StreamEvent(
                     type="error",
-                    error=f"OpenAI API error ({resp.status_code}): {error_msg}",
+                    error=error_msg,
                 )
                 return
 
             text_parts: list[str] = []
             # Track tool call state by index
-            tool_call_data: dict[int, dict[str, Any]] = {}
+            tool_call_data: dict[int, JsonObject] = {}
             stop_reason = ""
             usage = Usage()
             finish_reason = ""
@@ -342,14 +369,14 @@ async def _send_stream(
                     tool_use_blocks: list[ToolUseBlock] = []
                     for idx in sorted(tool_call_data.keys()):
                         tc_info = tool_call_data[idx]
-                        json_str = tc_info.get("args_json", "")
+                        json_str = get_field(tc_info, "args_json", str, default="")
                         try:
-                            arguments = json.loads(json_str) if json_str else {}
-                        except json.JSONDecodeError:
-                            arguments = {}
+                            arguments = narrow_value(loads(json_str), JsonObject) if json_str else JsonObject()
+                        except (JSONDecodeError, TypeError):
+                            arguments = JsonObject()
                         tool_use_blocks.append(ToolUseBlock(
-                            id=tc_info.get("id", ""),
-                            name=tc_info.get("name", ""),
+                            id=get_field(tc_info, "id", str, default=""),
+                            name=get_field(tc_info, "name", str, default=""),
                             input=arguments,
                         ))
                         yield StreamEvent(type="tool_use_end")
@@ -379,56 +406,60 @@ async def _send_stream(
                     break
 
                 try:
-                    data = json.loads(data_str)
-                except json.JSONDecodeError:
+                    data_raw = loads(data_str)
+                except JSONDecodeError:
                     continue
+
+                # SSE 事件体始终是 JSON object
+                if not isinstance(data_raw, dict):
+                    continue
+                data: JsonObject = data_raw
 
                 # Usage chunk
                 if data.get("usage"):
-                    usage_data = data["usage"]
-                    if "prompt_tokens" in usage_data:
-                        usage.input_tokens = usage_data["prompt_tokens"]
-                    if "completion_tokens" in usage_data:
-                        usage.output_tokens = usage_data["completion_tokens"]
-                    prompt_details = usage_data.get("prompt_tokens_details", {})
-                    if isinstance(prompt_details, dict) and "cached_tokens" in prompt_details:
-                        usage.cache_read_input_tokens = prompt_details["cached_tokens"]
+                    raw_usage = narrow_value(data["usage"], JsonObject)
+                    usage.input_tokens = get_field(raw_usage, "prompt_tokens", int, default=usage.input_tokens)
+                    usage.output_tokens = get_field(raw_usage, "completion_tokens", int, default=usage.output_tokens)
+                    prompt_details = get_field(raw_usage, "prompt_tokens_details", JsonObject, default={})
+                    usage.cache_read_input_tokens = get_field(prompt_details, "cached_tokens", int, default=usage.cache_read_input_tokens)
 
-                choices = data.get("choices", [])
+                choices = get_field(data, "choices", list[JsonValue], default=[])
                 if not choices:
                     continue
 
-                delta = choices[0].get("delta", {})
-                fr = choices[0].get("finish_reason")
+                choice = narrow_value(choices[0], JsonObject)
+                delta = get_field(choice, "delta", JsonObject, default={})
+                fr = get_field(choice, "finish_reason", str, default="")
                 if fr:
                     finish_reason = fr
 
                 # Text content
-                content = delta.get("content")
+                content = get_field(delta, "content", str, default="")
                 if content:
                     text_parts.append(content)
                     yield StreamEvent(type="text_delta", text=content)
 
                 # Tool calls
-                for tc_delta in delta.get("tool_calls", []):
-                    idx = tc_delta.get("index", 0)
+                tc_deltas = get_field(delta, "tool_calls", list[JsonObject], default=[])
+                for tc_delta in tc_deltas:
+                    idx = get_field(tc_delta, "index", int, default=0)
                     if idx not in tool_call_data:
-                        func = tc_delta.get("function", {})
+                        func = get_field(tc_delta, "function", JsonObject, default={})
                         tool_call_data[idx] = {
-                            "id": tc_delta.get("id", ""),
-                            "name": func.get("name", ""),
-                            "args_json": func.get("arguments", ""),
+                            "id": get_field(tc_delta, "id", str, default=""),
+                            "name": get_field(func, "name", str, default=""),
+                            "args_json": get_field(func, "arguments", str, default=""),
                         }
                         tc = ToolUseBlock(
-                            id=tc_delta.get("id", ""),
-                            name=func.get("name", ""),
+                            id=narrow_value(tool_call_data[idx]["id"], str),
+                            name=narrow_value(tool_call_data[idx]["name"], str),
                         )
                         yield StreamEvent(type="tool_use_start", tool_call=tc)
                     else:
-                        func = tc_delta.get("function", {})
-                        args_chunk = func.get("arguments", "")
+                        func = get_field(tc_delta, "function", JsonObject, default={})
+                        args_chunk = get_field(func, "arguments", str, default="")
                         if args_chunk:
-                            tool_call_data[idx]["args_json"] += args_chunk
+                            tool_call_data[idx]["args_json"] = narrow_value(tool_call_data[idx]["args_json"], str) + args_chunk
                             yield StreamEvent(
                                 type="tool_use_delta",
                                 tool_json_delta=args_chunk,

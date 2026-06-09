@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, AsyncGenerator, ClassVar
 from mutobj import Declaration
 
 if TYPE_CHECKING:
+    from mutio.codec.json import JsonObject
     from .messages import Message, StreamEvent, ToolSchema
 
 
@@ -21,7 +22,7 @@ class LLMApiClient(Declaration):
     子类通过 mutobj 子类发现机制自动注册。
     配置中指定类路径，resolve_class 自动加载。
 
-    子类需实现 ``from_spec`` 和 ``send`` 方法。
+    子类需实现 ``send`` 方法。
     """
 
     api_type: ClassVar[str] = ""
@@ -30,7 +31,7 @@ class LLMApiClient(Declaration):
 
 
     @staticmethod
-    def from_spec(spec: dict) -> LLMApiClient:
+    def from_spec(spec: JsonObject) -> LLMApiClient:
         """从模型 spec 创建 provider 实例。
 
         支持 api_type 短名（``"Anthropic"`` / ``"OpenAI"`` / ``"Copilot"``）。

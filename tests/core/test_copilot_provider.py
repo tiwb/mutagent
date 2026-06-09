@@ -105,7 +105,7 @@ class TestCopilotApiClient:
         with (
             patch.object(provider.auth, "get_headers", return_value={"authorization": "Bearer jwt"}),
             patch(
-                "mutagent.core._llm_impl_copilot._send_no_stream",
+                "mutagent.core._llm_impl_copilot.send_no_stream",
                 side_effect=fake_send_no_stream,
             ),
         ):

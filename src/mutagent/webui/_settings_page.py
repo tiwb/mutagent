@@ -64,7 +64,7 @@ class SettingPanel(View):
 # ── helpers ──────────────────────────────────────────────────
 
 
-def _resolve_panel_attr(cls, attr_name: str, default: str = "") -> str:
+def _resolve_panel_attr(cls: type, attr_name: str, default: str = "") -> str:
     """Extract a string class-attribute from a mutobj Declaration subclass.
 
     Class-level attrs on Declaration subclasses are wrapped in AttributeDescriptor
@@ -281,8 +281,7 @@ async def settings_page_deactivate(self: SettingsPage) -> None:
 
 @mutobj.impl(SettingsPage.close)
 async def settings_page_close(self: SettingsPage) -> None:
-    if self.conversation is not None:
-        await self.conversation.navigate_to("")
+    await self.conversation.navigate_to("")
 
 
 @mutobj.impl(SettingsPage.list_panels)
@@ -295,14 +294,13 @@ def settings_page_list_panels(self: SettingsPage) -> list[SettingPanel]:
 
 
 async def _on_menu_click(view: SettingsPage, panel_id: str = "") -> None:
-    if not panel_id or view.conversation is None:
+    if not panel_id:
         return
     await view.conversation.navigate_to(f"settings/{panel_id}")
 
 
 async def _on_back_click(view: SettingsPage, *_: Any) -> None:
-    if view.conversation is not None:
-        await view.conversation.navigate_to("")
+    await view.conversation.navigate_to("")
 
 
 # ── Settings 域 Actions ────────────────────────────
@@ -321,5 +319,5 @@ class OpenSettingsAction(Action):
 
 
 # 导入 settings panel 子类以触发 mutobj 注册（SettingsPage 发现子类前需要）
-from . import _settings_llm  # noqa: E402,F401
-from . import _settings_mcp  # noqa: E402,F401
+from . import _settings_llm as _settings_llm # noqa: E402,F401
+from . import _settings_mcp as _settings_mcp  # noqa: E402,F401

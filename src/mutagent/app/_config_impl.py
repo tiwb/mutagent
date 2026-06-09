@@ -1,7 +1,8 @@
 """Config 默认实现。
 
-提供 Config.get / set / on_change / affects / resolve_model / list_models /
-load / save 的默认实现。
+提供 ConfigSection.get / get_field / set / on_change / affacts/ section 和
+Config.root / resolve_model / list_models / load / load_from_dict / save
+的默认实现。
 使用 ConfigExt 存储运行时状态（data + listeners）。
 """
 
@@ -11,18 +12,21 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import mutobj
-from mutagent.app.config import ChangeCallback, CancelFn, Config, ConfigChangeEvent
+from mutio.codec.json import JsonObject, JsonValue
+from mutagent.app.config import (
+    ChangeCallback, CancelFn, Config, ConfigChangeEvent, ConfigSection,
+)
 
 
 # ── Extension ──────────────────────────────────────────────
 
 class ConfigExt(mutobj.Extension[Config]):
     """Config 的运行时状态。"""
-    data: dict = {}
-    listeners: list = []  # list[tuple[str, ChangeCallback]]
+    data: JsonObject = {}
+    listeners: list[tuple[str, ChangeCallback]] = []
 
 
 def _cext(self: Config) -> ConfigExt:
@@ -31,7 +35,7 @@ def _cext(self: Config) -> ConfigExt:
 
 # ── Helpers ────────────────────────────────────────────────
 
-def _expand_env(value: Any) -> Any:
+def _expand_env(value: JsonValue) -> JsonValue:
     """递归展开配置值中的环境变量引用。"""
     if isinstance(value, str):
         return re.sub(
@@ -68,32 +72,30 @@ def _do_match(pp: list[str], pi: int, kp: list[str], ki: int) -> bool:
     return pi == len(pp) and ki == len(kp)
 
 
-def _resolve_paths_inplace(data: dict, config_dir: Path) -> None:
+def _resolve_paths_inplace(data: JsonObject, config_dir: Path) -> None:
     """将 data 中的相对 path 条目解析为绝对路径。"""
     raw_paths = data.get("path")
     if not isinstance(raw_paths, list):
         return
     resolved: list[str] = []
     for p in raw_paths:
-        pp = Path(p)
+        pp = Path(str(p))
         if not pp.is_absolute():
             pp = (config_dir / pp).resolve()
         resolved.append(str(pp))
-    data["path"] = resolved
+    data["path"] = resolved  # type: ignore[reportArgumentType]
 
 
 def _resolve_default_model(config: Config) -> str | None:
     """解析默认模型名。找不到时返回 None。"""
-    default = config.get("default_model", default="")
+    default = config.root.get_field("default_model", str, default="")
     if default:
         return default
-    providers = config.get("providers", default={})
-    if not providers:
-        return None
-    for _prov_name, prov_conf in providers.items():
-        models = prov_conf.get("models", [])
+    providers = config.root.section("providers")
+    for _prov_name, prov_sec in providers.sections():
+        models = prov_sec.get("models", default=[])
         if isinstance(models, list) and models:
-            return models[0]
+            return str(models[0])
         elif isinstance(models, dict) and models:
             return next(iter(models))
     return None
@@ -102,38 +104,72 @@ def _resolve_default_model(config: Config) -> str | None:
 # ── Config @impl ───────────────────────────────────────────
 # 基础操作
 
-@mutobj.impl(Config.get)
-def config_get(self: Config, name: str, *, default: Any = None) -> Any:
-    """读取配置值。name 为点分路径，递归展开环境变量。"""
-    ext = _cext(self)
+from mutio.codec.json import check_type
+
+
+def _full_path(prefix: str, name: str) -> str:
+    """拼接 section 前缀与相对路径。"""
+    if not prefix:
+        return name
+    if not name:
+        return prefix
+    return f"{prefix}.{name}"
+
+
+@mutobj.impl(ConfigSection.get)
+def config_section_get(self: ConfigSection, name: str, *, default: Any = None) -> Any:
+    """读取配置值。name 为相对路径，递归展开环境变量。"""
+    ext = _cext(self.config)
+    full_name = _full_path(self.prefix, name)
     node = ext.data
-    for key in name.split("."):
+    for key in full_name.split("."):
         if not isinstance(node, dict) or key not in node:
             return default
         node = node[key]
     return _expand_env(node)
 
 
-@mutobj.impl(Config.set)
-def config_set(self: Config, name: str, value: Any, *, source: str = "") -> None:
-    """按点分路径写入 data，触发匹配的 on_change 回调。"""
-    ext = _cext(self)
+@mutobj.impl(ConfigSection.get_field)
+def config_section_get_field(self: ConfigSection, name: str, type: Any = None, /, *, default: Any = None) -> Any:
+    """类型化读取。值不匹配 type 时抛 TypeError，泛型只检测外容器类型。"""
+    ext = _cext(self.config)
+    full_name = _full_path(self.prefix, name)
     node = ext.data
-    keys = name.split(".")
+    for key in full_name.split("."):
+        if not isinstance(node, dict) or key not in node:
+            return default
+        node = node[key]
+    value = _expand_env(node)
+    if not check_type(value, type):
+        raise TypeError(
+            f"Config key '{name}': expected {type}, "
+            f"got {value.__class__.__name__}"
+        )
+    return value
+
+
+@mutobj.impl(ConfigSection.set)
+def config_section_set(self: ConfigSection, name: str, value: JsonValue, *, source: str = "") -> None:
+    """按点分路径写入 data，触发匹配的 on_change 回调。"""
+    full_name = _full_path(self.prefix, name)
+    ext = _cext(self.config)
+    node: Any = ext.data
+    keys = full_name.split(".")
     for key in keys[:-1]:
         node = node.setdefault(key, {})
     node[keys[-1]] = value
-    event = ConfigChangeEvent(key=name, source=source, config=self)
+    event = ConfigChangeEvent(key=full_name, source=source, config=self.config)
     for pattern, cb in ext.listeners:
-        if self.affects(pattern, name):
+        if self.affects(pattern, full_name):
             cb(event)
 
 
-@mutobj.impl(Config.on_change)
-def config_on_change(self: Config, pattern: str, callback: ChangeCallback) -> CancelFn:
+@mutobj.impl(ConfigSection.on_change)
+def config_section_on_change(self: ConfigSection, pattern: str, callback: ChangeCallback) -> CancelFn:
     """注册监听。返回 Disposable 用于取消。"""
-    ext = _cext(self)
-    entry = (pattern, callback)
+    ext = _cext(self.config)
+    full_pattern = _full_path(self.prefix, pattern)
+    entry = (full_pattern, callback)
     ext.listeners.append(entry)
     called = False
     def dispose() -> None:
@@ -145,8 +181,8 @@ def config_on_change(self: Config, pattern: str, callback: ChangeCallback) -> Ca
     return dispose
 
 
-@mutobj.impl(Config.affects)
-def config_affects(self: Config, pattern: str, key: str) -> bool:
+@mutobj.impl(ConfigSection.affects)
+def config_section_affects(self: ConfigSection, pattern: str, key: str) -> bool:
     pattern_parts = pattern.split(".")
     key_parts = key.split(".")
 
@@ -170,29 +206,60 @@ def config_affects(self: Config, pattern: str, key: str) -> bool:
     return False
 
 
+@mutobj.impl(Config.root.getter)
+def config_root(self: Config) -> ConfigSection:
+    """返回根 Section（前缀空）。"""
+    return ConfigSection(config=self, prefix="")
+
+
+@mutobj.impl(ConfigSection.section)
+def config_section_section(self: ConfigSection, name: str) -> ConfigSection:
+    """返回更深层的子路径视图。"""
+    return ConfigSection(config=self.config, prefix=_full_path(self.prefix, name))
+
+
+@mutobj.impl(ConfigSection.sections)
+def config_section_sections(self: ConfigSection) -> Iterable[tuple[str, ConfigSection]]:
+    """遍历直接子 section。仅当底层值为 dict 的键才返回。"""
+    ext = _cext(self.config)
+    node = ext.data
+    if self.prefix:
+        for key in self.prefix.split("."):
+            if not isinstance(node, dict) or key not in node:
+                return
+            node = node[key]
+    if not isinstance(node, dict):
+        return
+    for key, value in node.items():
+        if isinstance(value, dict):
+            yield key, ConfigSection(config=self.config, prefix=_full_path(self.prefix, key))
+
+
 # ── 模型解析 ───────────────────────────────────────────
 
 @mutobj.impl(Config.resolve_model)
-def config_resolve_model(self: Config, name: str | None = None) -> dict | None:
+def config_resolve_model(self: Config, name: str | None = None) -> JsonObject | None:
     if name is None:
         name = _resolve_default_model(self)
         if name is None:
             return None
-    providers = self.get("providers", default={})
+    providers = self.root.get_field("providers", JsonObject, default={})
     if not providers:
         return None
     for prov_name, prov_conf in providers.items():
+        if not isinstance(prov_conf, dict):
+            continue
         models = prov_conf.get("models", [])
         if isinstance(models, list):
             if name in models:
-                result = {k: v for k, v in prov_conf.items() if k != "models"}
+                result: JsonObject = {k: v for k, v in prov_conf.items() if k != "models"}
                 result["model_id"] = name
                 result["provider_name"] = prov_name
                 return result
         elif isinstance(models, dict):
             if name in models:
                 model_val = models[name]
-                result = {k: v for k, v in prov_conf.items() if k != "models"}
+                result: JsonObject = {k: v for k, v in prov_conf.items() if k != "models"}
                 result["provider_name"] = prov_name
                 if isinstance(model_val, str):
                     result["model_id"] = model_val
@@ -208,10 +275,14 @@ def config_resolve_model(self: Config, name: str | None = None) -> dict | None:
 
 
 @mutobj.impl(Config.list_models)
-def config_list_models(self: Config) -> list[dict]:
-    providers = self.get("providers", default={})
-    result: list[dict] = []
+def config_list_models(self: Config) -> list[JsonObject]:
+    providers = self.root.get_field("providers", JsonObject, default={})
+    if not providers:
+        return []
+    result: list[JsonObject] = []
     for prov_name, prov_conf in providers.items():
+        if not isinstance(prov_conf, dict):
+            continue
         provider_cls_path = prov_conf.get("type", "Anthropic")
         models = prov_conf.get("models", [])
         if isinstance(models, list):
@@ -272,7 +343,7 @@ def config_save(self: Config) -> None:
 
 
 @mutobj.impl(Config.load_from_dict)
-def config_load_from_dict(self: Config, data: dict) -> None:
+def config_load_from_dict(self: Config, data: JsonObject) -> None:
     self.path = None
     ext = _cext(self)
     ext.data = dict(data)

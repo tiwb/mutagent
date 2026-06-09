@@ -11,9 +11,8 @@ from mutagent.cli.ansi import (
     _BOLD, _CYAN, _DIM, _GREEN, _RED, _RESET, _YELLOW,
     bold, bold_cyan, bold_red, cyan, dim, green,
     highlight_markdown_line, red, yellow,
-    _format_tool_call, _format_tool_result, _format_value,
+    format_tool_call, format_tool_result, _format_value,
     _MAX_SINGLE_LINE, _MAX_VALUE_LEN,
-    _colorize_task_line,
 )
 
 
@@ -290,21 +289,21 @@ class TestFormatValue:
 class TestFormatToolCall:
 
     def test_no_args(self):
-        result = _format_tool_call("Module-inspect", {})
+        result = format_tool_call("Module-inspect", {})
         assert result == "  Module-inspect()"
 
     def test_single_string_arg(self):
-        result = _format_tool_call("Module-inspect", {"path": "mutagent.tools"})
+        result = format_tool_call("Module-inspect", {"path": "mutagent.tools"})
         assert 'path="mutagent.tools"' in result
         assert "Module-inspect(" in result
 
     def test_single_line_format(self):
-        result = _format_tool_call("func", {"a": "x"})
+        result = format_tool_call("func", {"a": "x"})
         assert "\n" not in result
         assert result == '  func(a="x")'
 
     def test_multi_line_format(self):
-        result = _format_tool_call("Module-define", {
+        result = format_tool_call("Module-define", {
             "path": "mutagent.my_tool",
             "source": "a" * 70,
         })
@@ -317,19 +316,19 @@ class TestFormatToolCall:
             assert param_line.rstrip().endswith(",")
 
     def test_mixed_types(self):
-        result = _format_tool_call("func", {"name": "test", "count": 5, "verbose": True})
+        result = format_tool_call("func", {"name": "test", "count": 5, "verbose": True})
         assert 'name="test"' in result
         assert "count=5" in result
         assert "verbose=True" in result
 
     def test_value_truncation(self):
-        result = _format_tool_call("func", {"data": "x" * 100})
+        result = format_tool_call("func", {"data": "x" * 100})
         assert "..." in result
 
     def test_long_single_arg_wraps(self):
         # Single arg that makes the line > 80 chars should still be single line
         # if total <= _MAX_SINGLE_LINE, else multi-line
-        result = _format_tool_call("very_long_function_name", {
+        result = format_tool_call("very_long_function_name", {
             "parameter": "a" * 70,
         })
         # This should be multi-line due to total length
@@ -343,13 +342,13 @@ class TestFormatToolCall:
 class TestFormatToolResult:
 
     def test_short_result(self):
-        result = _format_tool_result("Toolkit (class)", is_error=False)
+        result = format_tool_result("Toolkit (class)", is_error=False)
         assert "\u2192" in result
         assert "Toolkit (class)" in result
 
     def test_multiline_within_preview(self):
         content = "Line 1\nLine 2\nLine 3"
-        result = _format_tool_result(content, is_error=False)
+        result = format_tool_result(content, is_error=False)
         assert "Line 1" in result
         assert "Line 2" in result
         assert "Line 3" in result
@@ -357,7 +356,7 @@ class TestFormatToolResult:
 
     def test_multiline_exceeds_preview(self):
         content = "\n".join(f"line {i}" for i in range(10))
-        result = _format_tool_result(content, is_error=False)
+        result = format_tool_result(content, is_error=False)
         assert "line 0" in result
         assert "line 1" in result
         assert "line 2" in result
@@ -366,64 +365,24 @@ class TestFormatToolResult:
 
     def test_error_result(self):
         # In non-tty (test env), no ANSI codes, but function is called
-        result = _format_tool_result("Module not found", is_error=True)
+        result = format_tool_result("Module not found", is_error=True)
         assert "\u2192" in result
         assert "Module not found" in result
 
     def test_empty_content(self):
-        result = _format_tool_result("", is_error=False)
+        result = format_tool_result("", is_error=False)
         assert "\u2192" in result
 
     def test_single_line_result(self):
-        result = _format_tool_result("OK", is_error=False)
+        result = format_tool_result("OK", is_error=False)
         assert "\u2192" in result
         assert "OK" in result
         assert "..." not in result
 
     def test_exactly_preview_lines(self):
         content = "\n".join(f"line {i}" for i in range(4))
-        result = _format_tool_result(content, is_error=False)
+        result = format_tool_result(content, is_error=False)
         # Exactly 4 lines should all be shown, no overflow
         assert "line 3" in result
         assert "..." not in result
 
-
-# ---------------------------------------------------------------------------
-# _colorize_task_line tests
-# ---------------------------------------------------------------------------
-
-class TestColorizeTaskLine:
-
-    def test_completed_task(self):
-        with _with_color(True):
-            result = _colorize_task_line("- [x] done")
-            assert _GREEN in result
-            assert "done" in result
-
-    def test_in_progress_task(self):
-        with _with_color(True):
-            result = _colorize_task_line("- [~] working")
-            assert _YELLOW in result
-            assert "working" in result
-
-    def test_pending_task(self):
-        with _with_color(True):
-            result = _colorize_task_line("- [ ] todo")
-            assert _DIM in result
-            assert "todo" in result
-
-    def test_non_task_line(self):
-        line = "just text"
-        assert _colorize_task_line(line) == line
-
-    def test_no_color(self):
-        with _with_color(False):
-            line = "- [x] done"
-            result = _colorize_task_line(line)
-            # green/dim/yellow return unchanged text when color disabled
-            assert "done" in result
-
-    def test_asterisk_prefix(self):
-        with _with_color(True):
-            result = _colorize_task_line("* [x] done")
-            assert _GREEN in result

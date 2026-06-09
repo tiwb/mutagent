@@ -2,63 +2,73 @@
 
 from __future__ import annotations
 
-import json
 import re
-from typing import Any, Iterator
+from typing import Iterator
+
+from mutio.codec import json
+from mutio.codec.json import JsonObject, JsonValue
 
 _DATE_SUFFIX_RE = re.compile(r"-\d{8}$")
+
+_input_empty: JsonObject = {}
 
 
 def normalize_model_name(model: str) -> str:
     return _DATE_SUFFIX_RE.sub("", model)
 
 
-def anthropic_request_to_openai(body: dict[str, Any]) -> dict[str, Any]:
-    openai_messages: list[dict[str, Any]] = []
+# ---- request translation ----
+
+def anthropic_request_to_openai(body: JsonObject) -> JsonObject:
+    openai_messages: list[JsonObject] = []
     system = body.get("system")
     if isinstance(system, str) and system:
         openai_messages.append({"role": "system", "content": system})
-    elif isinstance(system, list):
-        text = "\n".join(
-            block.get("text", "")
-            for block in system
-            if isinstance(block, dict) and block.get("type") == "text"
-        ).strip()
-        if text:
-            openai_messages.append({"role": "system", "content": text})
+    else:
+        blocks = json.narrow_value(system, list[JsonObject], fallback=None)
+        if blocks is not None:
+            parts: list[str] = []
+            for block in blocks:
+                block_type = json.get_field(block, "type", str, default="")
+                if block_type == "text":
+                    tv = json.get_field(block, "text", str, default="")
+                    if tv:
+                        parts.append(tv)
+            text = "\n".join(parts).strip()
+            if text:
+                openai_messages.append({"role": "system", "content": text})
 
-    for msg in body.get("messages", []):
-        role = msg.get("role", "")
+    for msg in json.get_field(body, "messages", list[JsonObject], default=[]):
+        role = json.get_field(msg, "role", str, default="")
         content = msg.get("content")
         if role == "user":
             user_entry = _anthropic_user_to_openai(content)
             if user_entry is not None:
                 openai_messages.append(user_entry)
             openai_messages.extend(_anthropic_tool_results_to_openai(content))
-            continue
-        if role != "assistant":
-            continue
-        assistant_entry = _anthropic_assistant_to_openai(content)
-        if assistant_entry is not None:
-            openai_messages.append(assistant_entry)
+        elif role == "assistant":
+            assistant_entry = _anthropic_assistant_to_openai(content)
+            if assistant_entry is not None:
+                openai_messages.append(assistant_entry)
 
-    result: dict[str, Any] = {
+    result: JsonObject = {
         "model": normalize_model_name(str(body.get("model", ""))),
         "messages": openai_messages,
     }
     if "max_tokens" in body:
         result["max_tokens"] = body["max_tokens"]
-    if "tools" in body:
+    tools: list[JsonObject] = json.get_field(body, "tools", list[JsonObject], default=[])
+    if tools:
         result["tools"] = [
             {
                 "type": "function",
                 "function": {
-                    "name": tool.get("name", ""),
-                    "description": tool.get("description", ""),
+                    "name": json.get_field(tool, "name", str, default=""),
+                    "description": json.get_field(tool, "description", str, default=""),
                     "parameters": tool.get("input_schema", {"type": "object", "properties": {}}),
                 },
             }
-            for tool in body.get("tools", [])
+            for tool in tools
         ]
     tool_choice = body.get("tool_choice")
     if tool_choice:
@@ -68,46 +78,44 @@ def anthropic_request_to_openai(body: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def openai_request_to_anthropic(body: dict[str, Any]) -> dict[str, Any]:
-    messages: list[dict[str, Any]] = []
-    system_blocks: list[dict[str, Any]] = []
+def openai_request_to_anthropic(body: JsonObject) -> JsonObject:
+    messages: list[JsonObject] = []
+    system_blocks: list[JsonObject] = []
 
-    for msg in body.get("messages", []):
-        role = msg.get("role", "")
+    for msg in json.get_field(body, "messages", list[JsonObject], default=[]):
+        role = json.get_field(msg, "role", str, default="")
         if role == "system":
             text = _openai_content_to_text(msg.get("content"))
             if text:
                 system_blocks.append({"type": "text", "text": text})
-            continue
-        if role == "user":
+        elif role == "user":
             blocks = _openai_content_to_anthropic_blocks(msg.get("content"))
             if blocks:
                 messages.append({"role": "user", "content": _compact_anthropic_content(blocks)})
-            continue
-        if role == "assistant":
-            blocks: list[dict[str, Any]] = []
+        elif role == "assistant":
+            blocks: list[JsonObject] = []
             blocks.extend(_openai_content_to_anthropic_blocks(msg.get("content")))
-            for tc in msg.get("tool_calls", []):
-                func = tc.get("function", {})
-                try:
-                    tool_input = json.loads(func.get("arguments", "{}"))
-                except json.JSONDecodeError:
-                    tool_input = {}
-                blocks.append(
-                    {
-                        "type": "tool_use",
-                        "id": tc.get("id", ""),
-                        "name": func.get("name", ""),
-                        "input": tool_input,
-                    }
-                )
+            for tc in json.get_field(msg, "tool_calls", list[JsonObject], default=[]):
+                func_raw = tc.get("function")
+                if isinstance(func_raw, dict):
+                    try:
+                        tool_input = json.loads(str(func_raw.get("arguments", "{}")))
+                    except json.JSONDecodeError:
+                        tool_input = {}
+                    blocks.append(
+                        {
+                            "type": "tool_use",
+                            "id": json.get_field(tc, "id", str, default=""),
+                            "name": json.get_field(func_raw, "name", str, default=""),
+                            "input": tool_input,
+                        }
+                    )
             if blocks:
                 messages.append({"role": "assistant", "content": blocks})
-            continue
-        if role == "tool":
-            tool_result = {
+        elif role == "tool":
+            tool_result: JsonObject = {
                 "type": "tool_result",
-                "tool_use_id": msg.get("tool_call_id", ""),
+                "tool_use_id": json.get_field(msg, "tool_call_id", str, default=""),
                 "content": _tool_result_content(msg.get("content")),
             }
             if messages and messages[-1]["role"] == "user":
@@ -118,28 +126,27 @@ def openai_request_to_anthropic(body: dict[str, Any]) -> dict[str, Any]:
                 messages.append({"role": "user", "content": [tool_result]})
 
     merged = _merge_consecutive_anthropic_messages(messages)
-    result: dict[str, Any] = {
+    result: JsonObject = {
         "model": normalize_model_name(str(body.get("model", ""))),
         "messages": merged,
-        "max_tokens": int(
-            body.get("max_completion_tokens")
-            or body.get("max_tokens")
-            or 4096
-        ),
+        "max_tokens": json.get_field(body, "max_completion_tokens", int, default=0)
+        or json.get_field(body, "max_tokens", int, default=0)
+        or 4096,
     }
     if system_blocks:
         result["system"] = system_blocks
-    if "tools" in body:
-        result["tools"] = [
-            {
-                "name": tool.get("function", {}).get("name", ""),
-                "description": tool.get("function", {}).get("description", ""),
-                "input_schema": tool.get("function", {}).get(
-                    "parameters", {"type": "object", "properties": {}}
-                ),
-            }
-            for tool in body.get("tools", [])
-        ]
+    tools: list[JsonObject] = json.get_field(body, "tools", list[JsonObject], default=[])
+    if tools:
+        tools_result: list[JsonObject] = []
+        for tool in tools:
+            func_raw = tool.get("function")
+            if isinstance(func_raw, dict):
+                tools_result.append({
+                    "name": json.get_field(func_raw, "name", str, default=""),
+                    "description": json.get_field(func_raw, "description", str, default=""),
+                    "input_schema": func_raw.get("parameters", {"type": "object", "properties": {}}),
+                })
+        result["tools"] = tools_result
     tool_choice = body.get("tool_choice")
     if tool_choice:
         result["tool_choice"] = _openai_tool_choice_to_anthropic(tool_choice)
@@ -148,10 +155,27 @@ def openai_request_to_anthropic(body: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def openai_response_to_anthropic(data: dict[str, Any], *, model: str = "") -> dict[str, Any]:
-    choice = data.get("choices", [{}])[0]
-    message_data = choice.get("message", {})
-    finish_reason = choice.get("finish_reason") or ""
+# ---- response translation ----
+
+def openai_response_to_anthropic(data: JsonObject, *, model: str = "") -> JsonObject:
+    usage_raw = data.get("usage")
+    usage: dict[str, int] = _openai_usage_to_anthropic(usage_raw) if isinstance(usage_raw, dict) else {}
+
+    choices: list[JsonObject] = json.get_field(data, "choices", list[JsonObject], default=[])
+    if not choices:
+        return {
+            "id": json.get_field(data, "id", str, default=""),
+            "type": "message",
+            "role": "assistant",
+            "model": model or json.get_field(data, "model", str, default=""),
+            "content": [],
+            "stop_reason": "end_turn",
+            "stop_sequence": None,
+            "usage": usage,
+        }
+
+    choice = choices[0]
+    finish_reason = json.get_field(choice, "finish_reason", str, default="")
 
     stop_reason_map = {
         "stop": "end_turn",
@@ -159,26 +183,30 @@ def openai_response_to_anthropic(data: dict[str, Any], *, model: str = "") -> di
         "length": "max_tokens",
         "content_filter": "content_filter",
     }
-    content: list[dict[str, Any]] = []
-    text = message_data.get("content") or ""
-    if text:
-        content.append({"type": "text", "text": text})
-    for tool_call in message_data.get("tool_calls", []):
-        func = tool_call.get("function", {})
-        try:
-            tool_input = json.loads(func.get("arguments", "{}"))
-        except json.JSONDecodeError:
-            tool_input = {}
-        content.append(
-            {
-                "type": "tool_use",
-                "id": tool_call.get("id", ""),
-                "name": func.get("name", ""),
-                "input": tool_input,
-            }
-        )
+    content: list[JsonObject] = []
 
-    usage = _openai_usage_to_anthropic(data.get("usage", {}))
+    message_data: JsonObject | None = json.get_field(choice, "message", JsonObject, default=None, fallback=None)
+    if message_data is not None:
+        text = message_data.get("content") or ""
+        if text:
+            content.append({"type": "text", "text": text})
+        for tool_call in json.get_field(message_data, "tool_calls", list[JsonObject], default=[]):
+            func_raw = tool_call.get("function")
+            tool_id = json.get_field(tool_call, "id", str, default="")
+            if isinstance(func_raw, dict):
+                try:
+                    tool_input = json.loads(str(func_raw.get("arguments", "{}")))
+                except json.JSONDecodeError:
+                    tool_input = {}
+                content.append(
+                    {
+                        "type": "tool_use",
+                        "id": tool_id,
+                        "name": json.get_field(func_raw, "name", str, default=""),
+                        "input": tool_input,
+                    }
+                )
+
     return {
         "id": data.get("id", ""),
         "type": "message",
@@ -191,23 +219,23 @@ def openai_response_to_anthropic(data: dict[str, Any], *, model: str = "") -> di
     }
 
 
-def anthropic_response_to_openai(data: dict[str, Any], *, model: str = "") -> dict[str, Any]:
+def anthropic_response_to_openai(data: JsonObject, *, model: str = "") -> JsonObject:
     text_parts: list[str] = []
-    tool_calls: list[dict[str, Any]] = []
-    for block in data.get("content", []):
-        block_type = block.get("type", "")
+    tool_calls: list[JsonObject] = []
+    for block in json.get_field(data, "content", list[JsonObject], default=[]):
+        block_type = json.get_field(block, "type", str, default="")
         if block_type == "text":
-            text = block.get("text", "")
+            text = json.get_field(block, "text", str, default="")
             if text:
                 text_parts.append(text)
         elif block_type == "tool_use":
             tool_calls.append(
                 {
-                    "id": block.get("id", ""),
+                    "id": json.get_field(block, "id", str, default=""),
                     "type": "function",
                     "function": {
-                        "name": block.get("name", ""),
-                        "arguments": json.dumps(block.get("input", {})),
+                        "name": json.get_field(block, "name", str, default=""),
+                        "arguments": json.dumps(block.get("input") or _input_empty),
                     },
                 }
             )
@@ -217,14 +245,16 @@ def anthropic_response_to_openai(data: dict[str, Any], *, model: str = "") -> di
         "tool_use": "tool_calls",
         "max_tokens": "length",
     }
-    message: dict[str, Any] = {
+    message: JsonObject = {
         "role": "assistant",
         "content": "\n".join(text_parts) if text_parts else None,
     }
     if tool_calls:
         message["tool_calls"] = tool_calls
 
-    usage = _anthropic_usage_to_openai(data.get("usage", {}))
+    usage_raw = data.get("usage")
+    usage = _anthropic_usage_to_openai(usage_raw) if isinstance(usage_raw, dict) else JsonObject()
+    stop_reason = json.get_field(data, "stop_reason", str, default="")
     return {
         "id": data.get("id", ""),
         "object": "chat.completion",
@@ -234,14 +264,14 @@ def anthropic_response_to_openai(data: dict[str, Any], *, model: str = "") -> di
             {
                 "index": 0,
                 "message": message,
-                "finish_reason": finish_reason_map.get(
-                    data.get("stop_reason", ""), data.get("stop_reason")
-                ),
+                "finish_reason": finish_reason_map.get(stop_reason, stop_reason),
             }
         ],
         "usage": usage,
     }
 
+
+# ---- SSE streaming ----
 
 def openai_sse_to_anthropic_events(
     openai_lines: Iterator[str],
@@ -269,73 +299,92 @@ def openai_sse_to_anthropic_events(
             yield ("message_stop", json.dumps({"type": "message_stop"}))
             return
         try:
-            data = json.loads(data_str)
+            raw = json.loads(data_str)
         except json.JSONDecodeError:
             continue
-        if data.get("usage"):
-            usage = data["usage"]
-            state.input_tokens = usage.get("prompt_tokens", state.input_tokens)
-            state.output_tokens = usage.get("completion_tokens", state.output_tokens)
-        choices = data.get("choices", [])
+        if not isinstance(raw, dict):
+            continue
+        data: JsonObject = raw
+
+        # usage
+        usage_raw = data.get("usage")
+        has_usage = isinstance(usage_raw, dict)
+        if has_usage:
+            state.input_tokens = json.get_field(usage_raw, "prompt_tokens", int, default=state.input_tokens)
+            state.output_tokens = json.get_field(usage_raw, "completion_tokens", int, default=state.output_tokens)
+
+        # choices
+        choices: list[JsonObject] = json.get_field(data, "choices", list[JsonObject], default=[])
         if not choices:
-            if not state.message_started and data.get("usage"):
+            if not state.message_started and has_usage:
                 state.message_started = True
                 yield ("message_start", json.dumps(state.message_start()))
             continue
+
         choice = choices[0]
-        delta = choice.get("delta", {})
-        finish_reason = choice.get("finish_reason")
-        if finish_reason:
-            state.stop_reason = {
-                "stop": "end_turn",
-                "tool_calls": "tool_use",
-                "length": "max_tokens",
-                "content_filter": "content_filter",
-            }.get(finish_reason, finish_reason) or ""
-        if not state.message_started:
-            state.message_started = True
-            yield ("message_start", json.dumps(state.message_start()))
-        content = delta.get("content")
-        if content:
-            if state.current_block_type != "text":
-                if state.current_block_type:
-                    yield ("content_block_stop", json.dumps({"type": "content_block_stop", "index": state.block_index}))
-                yield ("content_block_start", json.dumps(state.start_text_block()))
-            yield (
-                "content_block_delta",
-                json.dumps(
-                    {
-                        "type": "content_block_delta",
-                        "index": state.block_index,
-                        "delta": {"type": "text_delta", "text": content},
-                    }
-                ),
-            )
-        for tc_delta in delta.get("tool_calls", []):
-            if state.current_block_type != "tool_use":
-                if state.current_block_type:
-                    yield ("content_block_stop", json.dumps({"type": "content_block_stop", "index": state.block_index}))
-                yield (
-                    "content_block_start",
-                    json.dumps(
-                        state.start_tool_block(
-                            tc_delta.get("id", ""),
-                            tc_delta.get("function", {}).get("name", ""),
-                        )
-                    ),
-                )
-            args_chunk = tc_delta.get("function", {}).get("arguments", "")
-            if args_chunk:
+
+        # delta
+        delta = json.narrow_value(choice.get("delta"), JsonObject, fallback=None)
+        if delta is not None:
+            finish_reason = json.get_field(choice, "finish_reason", str, default="")
+            if finish_reason:
+                state.stop_reason = {
+                    "stop": "end_turn",
+                    "tool_calls": "tool_use",
+                    "length": "max_tokens",
+                    "content_filter": "content_filter",
+                }.get(finish_reason, finish_reason) or ""
+            if not state.message_started:
+                state.message_started = True
+                yield ("message_start", json.dumps(state.message_start()))
+            content = delta.get("content")
+            if content:
+                if state.current_block_type != "text":
+                    if state.current_block_type:
+                        yield ("content_block_stop", json.dumps({"type": "content_block_stop", "index": state.block_index}))
+                    yield ("content_block_start", json.dumps(state.start_text_block()))
                 yield (
                     "content_block_delta",
                     json.dumps(
                         {
                             "type": "content_block_delta",
                             "index": state.block_index,
-                            "delta": {"type": "input_json_delta", "partial_json": args_chunk},
+                            "delta": {"type": "text_delta", "text": content},
                         }
                     ),
                 )
+            for tc_delta in json.get_field(delta, "tool_calls", list[JsonObject], default=[]):
+                if state.current_block_type != "tool_use":
+                    if state.current_block_type:
+                        yield ("content_block_stop", json.dumps({"type": "content_block_stop", "index": state.block_index}))
+                    func_raw2 = tc_delta.get("function")
+                    tool_name = ""
+                    if isinstance(func_raw2, dict):
+                        tool_name = json.get_field(func_raw2, "name", str, default="")
+                    yield (
+                        "content_block_start",
+                        json.dumps(
+                            state.start_tool_block(
+                                json.get_field(tc_delta, "id", str, default=""),
+                                tool_name,
+                            )
+                        ),
+                    )
+                func_raw3 = tc_delta.get("function")
+                args_chunk = ""
+                if isinstance(func_raw3, dict):
+                    args_chunk = json.get_field(func_raw3, "arguments", str, default="")
+                if args_chunk:
+                    yield (
+                        "content_block_delta",
+                        json.dumps(
+                            {
+                                "type": "content_block_delta",
+                                "index": state.block_index,
+                                "delta": {"type": "input_json_delta", "partial_json": args_chunk},
+                            }
+                        ),
+                    )
 
 
 def anthropic_sse_to_openai_chunks(
@@ -353,70 +402,82 @@ def anthropic_sse_to_openai_chunks(
             continue
         data_str = line[6:]
         try:
-            data = json.loads(data_str)
+            raw = json.loads(data_str)
         except json.JSONDecodeError:
             event_type = ""
             continue
+        if not isinstance(raw, dict):
+            event_type = ""
+            continue
+        data: JsonObject = raw
+
         if event_type == "message_start":
-            message = data.get("message", {})
-            state.message_id = message.get("id", "")
-            state.model = state.model or message.get("model", "")
-            usage = message.get("usage", {})
-            state.prompt_tokens = int(usage.get("input_tokens", 0))
+            message: JsonObject | None = json.narrow_value(data.get("message"), JsonObject, fallback=None)
+            if message is not None:
+                state.message_id = json.get_field(message, "id", str, default="")
+                state.model = state.model or json.get_field(message, "model", str, default="")
+                usage_data = json.narrow_value(message.get("usage"), JsonObject, fallback=None)
+                if usage_data is not None:
+                    state.prompt_tokens = json.get_field(usage_data, "input_tokens", int, default=0)
         elif event_type == "content_block_start":
-            block = data.get("content_block", {})
-            state.current_index = int(data.get("index", 0))
-            state.current_block_type = block.get("type", "")
-            if state.current_block_type == "tool_use":
-                state.tool_names[state.current_index] = block.get("name", "")
-                payload = state.chunk_payload(
-                    {
-                        "tool_calls": [
-                            {
-                                "index": state.current_index,
-                                "id": block.get("id", ""),
-                                "type": "function",
-                                "function": {
-                                    "name": block.get("name", ""),
-                                    "arguments": "",
-                                },
-                            }
-                        ]
-                    }
-                )
-                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            block_raw = json.narrow_value(data.get("content_block"), JsonObject, fallback=None)
+            if block_raw is not None:
+                state.current_index = json.get_field(data, "index", int, default=0)
+                state.current_block_type = json.get_field(block_raw, "type", str, default="")
+                if state.current_block_type == "tool_use":
+                    state.tool_names[state.current_index] = json.get_field(block_raw, "name", str, default="")
+                    payload = state.chunk_payload(
+                        {
+                            "tool_calls": [
+                                {
+                                    "index": state.current_index,
+                                    "id": block_raw.get("id", ""),
+                                    "type": "function",
+                                    "function": {
+                                        "name": block_raw.get("name", ""),
+                                        "arguments": "",
+                                    },
+                                }
+                            ]
+                        }
+                    )
+                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
         elif event_type == "content_block_delta":
-            delta = data.get("delta", {})
-            delta_type = delta.get("type", "")
-            if delta_type == "text_delta":
-                payload = state.chunk_payload({"content": delta.get("text", "")})
-                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-            elif delta_type == "input_json_delta":
-                payload = state.chunk_payload(
-                    {
-                        "tool_calls": [
-                            {
-                                "index": state.current_index,
-                                "function": {
-                                    "arguments": delta.get("partial_json", ""),
-                                },
-                            }
-                        ]
-                    }
-                )
-                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            block_delta = json.narrow_value(data.get("delta"), JsonObject, fallback=None)
+            if block_delta is not None:
+                delta_type = json.get_field(block_delta, "type", str, default="")
+                if delta_type == "text_delta":
+                    payload = state.chunk_payload({"content": json.get_field(block_delta, "text", str, default="")})
+                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                elif delta_type == "input_json_delta":
+                    payload = state.chunk_payload(
+                        {
+                            "tool_calls": [
+                                {
+                                    "index": state.current_index,
+                                    "function": {
+                                        "arguments": json.get_field(block_delta, "partial_json", str, default=""),
+                                    },
+                                }
+                            ]
+                        }
+                    )
+                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
         elif event_type == "message_delta":
-            stop_reason = data.get("delta", {}).get("stop_reason", "")
+            msg_delta = json.narrow_value(data.get("delta"), JsonObject, fallback=None)
+            stop_reason = ""
+            if msg_delta is not None:
+                stop_reason = json.get_field(msg_delta, "stop_reason", str, default="")
             state.finish_reason = {
                 "end_turn": "stop",
                 "tool_use": "tool_calls",
                 "max_tokens": "length",
                 "content_filter": "content_filter",
             }.get(stop_reason, stop_reason) or ""
-            usage = data.get("usage", {})
-            state.completion_tokens = int(usage.get("output_tokens", state.completion_tokens))
-            if usage.get("input_tokens"):
-                state.prompt_tokens = int(usage["input_tokens"])
+            delta_usage = json.narrow_value(data.get("usage"), JsonObject, fallback=None)
+            if delta_usage is not None:
+                state.completion_tokens = json.get_field(delta_usage, "output_tokens", int, default=state.completion_tokens)
+                state.prompt_tokens = json.get_field(delta_usage, "input_tokens", int, default=state.prompt_tokens)
             payload = state.finish_payload()
             yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
         elif event_type == "message_stop":
@@ -428,7 +489,9 @@ def anthropic_sse_to_openai_chunks(
         event_type = ""
 
 
-def summarize_openai_sse(lines: list[str]) -> dict[str, Any]:
+# ---- SSE summarization ----
+
+def summarize_openai_sse(lines: list[str]) -> JsonObject:
     finish_reason = ""
     usage: dict[str, int] = {}
     for line in lines:
@@ -438,24 +501,28 @@ def summarize_openai_sse(lines: list[str]) -> dict[str, Any]:
         if data_str == "[DONE]":
             continue
         try:
-            data = json.loads(data_str)
+            raw = json.loads(data_str)
         except json.JSONDecodeError:
             continue
-        current_usage = data.get("usage", {})
-        if "prompt_tokens" in current_usage:
-            usage["input_tokens"] = int(current_usage["prompt_tokens"])
-        if "completion_tokens" in current_usage:
-            usage["output_tokens"] = int(current_usage["completion_tokens"])
-        prompt_details = current_usage.get("prompt_tokens_details", {})
-        if isinstance(prompt_details, dict) and "cached_tokens" in prompt_details:
-            usage["cache_read_input_tokens"] = int(prompt_details["cached_tokens"])
-        for choice in data.get("choices", []):
+        if not isinstance(raw, dict):
+            continue
+        data: JsonObject = raw
+
+        current_usage: JsonObject | None = json.narrow_value(data.get("usage"), JsonObject, fallback=None)
+        if current_usage is not None:
+            usage["input_tokens"] = json.get_field(current_usage, "prompt_tokens", int, default=usage.get("input_tokens", 0))
+            usage["output_tokens"] = json.get_field(current_usage, "completion_tokens", int, default=usage.get("output_tokens", 0))
+            prompt_details = json.narrow_value(current_usage.get("prompt_tokens_details"), JsonObject, fallback=None)
+            if prompt_details is not None and "cached_tokens" in prompt_details:
+                usage["cache_read_input_tokens"] = json.get_field(prompt_details, "cached_tokens", int, default=0)
+
+        for choice in json.get_field(data, "choices", list[JsonObject], default=[]):
             if choice.get("finish_reason"):
                 finish_reason = str(choice["finish_reason"])
     return {"finish_reason": finish_reason, "usage": usage}
 
 
-def summarize_anthropic_sse(lines: list[str]) -> dict[str, Any]:
+def summarize_anthropic_sse(lines: list[str]) -> JsonObject:
     event_type = ""
     stop_reason = ""
     usage: dict[str, int] = {}
@@ -466,40 +533,50 @@ def summarize_anthropic_sse(lines: list[str]) -> dict[str, Any]:
         if not line.startswith("data: "):
             continue
         try:
-            data = json.loads(line[6:])
+            raw = json.loads(line[6:])
         except json.JSONDecodeError:
             event_type = ""
             continue
+        if not isinstance(raw, dict):
+            event_type = ""
+            continue
+        data: JsonObject = raw
+
         if event_type == "message_start":
-            start_usage = data.get("message", {}).get("usage", {})
-            if "input_tokens" in start_usage:
-                usage["input_tokens"] = int(start_usage["input_tokens"])
+            start_message = json.narrow_value(data.get("message"), JsonObject, fallback=None)
+            if start_message is not None:
+                start_usage = json.narrow_value(start_message.get("usage"), JsonObject, fallback=None)
+                if start_usage is not None and "input_tokens" in start_usage:
+                    usage["input_tokens"] = json.get_field(start_usage, "input_tokens", int, default=0)
         elif event_type == "message_delta":
-            delta = data.get("delta", {})
-            if delta.get("stop_reason"):
-                stop_reason = str(delta["stop_reason"])
-            update = data.get("usage", {})
-            if "input_tokens" in update:
+            md_delta = json.narrow_value(data.get("delta"), JsonObject, fallback=None)
+            if md_delta is not None:
+                sr = md_delta.get("stop_reason")
+                if sr:
+                    stop_reason = str(sr)
+            md_usage = json.narrow_value(data.get("usage"), JsonObject, fallback=None)
+            if md_usage is not None:
                 usage["input_tokens"] = max(
                     usage.get("input_tokens", 0),
-                    int(update["input_tokens"]),
+                    json.get_field(md_usage, "input_tokens", int, default=0),
                 )
-            if "output_tokens" in update:
-                usage["output_tokens"] = int(update["output_tokens"])
+                usage["output_tokens"] = json.get_field(md_usage, "output_tokens", int, default=0)
         event_type = ""
     return {"stop_reason": stop_reason, "usage": usage}
 
 
-def _anthropic_user_to_openai(content: Any) -> dict[str, Any] | None:
+# ---- internal helpers ----
+
+def _anthropic_user_to_openai(content: JsonValue) -> JsonObject | None:
     blocks = _expand_anthropic_content(content)
     if not blocks:
         return None
     text_parts: list[str] = []
-    image_parts: list[dict[str, Any]] = []
+    image_parts: list[JsonObject] = []
     for block in blocks:
-        block_type = block.get("type", "")
+        block_type = json.get_field(block, "type", str, default="")
         if block_type == "text":
-            text = block.get("text", "")
+            text = json.get_field(block, "text", str, default="")
             if text:
                 text_parts.append(text)
         elif block_type == "image":
@@ -507,7 +584,7 @@ def _anthropic_user_to_openai(content: Any) -> dict[str, Any] | None:
             if image_part is not None:
                 image_parts.append(image_part)
     if image_parts:
-        payload: list[dict[str, Any]] = []
+        payload: list[JsonObject] = []
         if text_parts:
             payload.append({"type": "text", "text": "\n".join(text_parts)})
         payload.extend(image_parts)
@@ -517,8 +594,8 @@ def _anthropic_user_to_openai(content: Any) -> dict[str, Any] | None:
     return None
 
 
-def _anthropic_tool_results_to_openai(content: Any) -> list[dict[str, Any]]:
-    results: list[dict[str, Any]] = []
+def _anthropic_tool_results_to_openai(content: JsonValue) -> list[JsonObject]:
+    results: list[JsonObject] = []
     for block in _expand_anthropic_content(content):
         if block.get("type") != "tool_result":
             continue
@@ -532,16 +609,16 @@ def _anthropic_tool_results_to_openai(content: Any) -> list[dict[str, Any]]:
     return results
 
 
-def _anthropic_assistant_to_openai(content: Any) -> dict[str, Any] | None:
+def _anthropic_assistant_to_openai(content: JsonValue) -> JsonObject | None:
     blocks = _expand_anthropic_content(content)
     if not blocks:
         return None
     text_parts: list[str] = []
-    tool_calls: list[dict[str, Any]] = []
+    tool_calls: list[JsonObject] = []
     for block in blocks:
-        block_type = block.get("type", "")
+        block_type = json.get_field(block, "type", str, default="")
         if block_type == "text":
-            text = block.get("text", "")
+            text = json.get_field(block, "text", str, default="")
             if text:
                 text_parts.append(text)
         elif block_type == "tool_use":
@@ -551,11 +628,11 @@ def _anthropic_assistant_to_openai(content: Any) -> dict[str, Any] | None:
                     "type": "function",
                     "function": {
                         "name": block.get("name", ""),
-                        "arguments": json.dumps(block.get("input", {})),
+                        "arguments": json.dumps(block.get("input") or _input_empty),
                     },
                 }
             )
-    entry: dict[str, Any] = {
+    entry: JsonObject = {
         "role": "assistant",
         "content": "\n".join(text_parts) if text_parts else None,
     }
@@ -564,52 +641,63 @@ def _anthropic_assistant_to_openai(content: Any) -> dict[str, Any] | None:
     return entry
 
 
-def _anthropic_image_to_openai(block: dict[str, Any]) -> dict[str, Any] | None:
-    source = block.get("source", {})
-    if source.get("type") == "url" and source.get("url"):
-        return {"type": "image_url", "image_url": {"url": source["url"]}}
-    if source.get("type") == "base64" and source.get("data"):
-        media_type = source.get("media_type", "image/png")
-        return {
-            "type": "image_url",
-            "image_url": {"url": f"data:{media_type};base64,{source['data']}"},
-        }
+def _anthropic_image_to_openai(block: JsonObject) -> JsonObject | None:
+    source_raw = block.get("source")
+    if not isinstance(source_raw, dict):
+        return None
+    source_type = json.get_field(source_raw, "type", str, default="")
+    if source_type == "url":
+        url = json.get_field(source_raw, "url", str, default="")
+        if url:
+            return {"type": "image_url", "image_url": {"url": url}}
+    if source_type == "base64":
+        data = json.get_field(source_raw, "data", str, default="")
+        if data:
+            media_type = json.get_field(source_raw, "media_type", str, default="image/png")
+            return {
+                "type": "image_url",
+                "image_url": {"url": f"data:{media_type};base64,{data}"},
+            }
     return None
 
 
-def _openai_content_to_text(content: Any) -> str:
+def _openai_content_to_text(content: JsonValue) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return "\n".join(
-            part.get("text", "")
-            for part in content
-            if isinstance(part, dict) and part.get("type") == "text"
-        ).strip()
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                tv = part.get("text", "")
+                if isinstance(tv, str):
+                    parts.append(tv)
+        return "\n".join(parts).strip()
     return ""
 
 
-def _openai_content_to_anthropic_blocks(content: Any) -> list[dict[str, Any]]:
+def _openai_content_to_anthropic_blocks(content: JsonValue) -> list[JsonObject]:
     if isinstance(content, str):
         return [{"type": "text", "text": content}] if content else []
     if not isinstance(content, list):
         return []
-    blocks: list[dict[str, Any]] = []
+    blocks: list[JsonObject] = []
     for part in content:
         if not isinstance(part, dict):
             continue
         part_type = part.get("type", "")
         if part_type == "text":
-            text = part.get("text", "")
-            if text:
-                blocks.append({"type": "text", "text": text})
+            tv = part.get("text", "")
+            if isinstance(tv, str) and tv:
+                blocks.append({"type": "text", "text": tv})
         elif part_type == "image_url":
-            blocks.append(_openai_image_to_anthropic(part.get("image_url", {})))
+            image_raw = part.get("image_url", {})
+            if isinstance(image_raw, dict):
+                blocks.append(_openai_image_to_anthropic(image_raw))
     return [block for block in blocks if block]
 
 
-def _openai_image_to_anthropic(image: dict[str, Any]) -> dict[str, Any]:
-    url = image.get("url", "")
+def _openai_image_to_anthropic(image: JsonObject) -> JsonObject:
+    url = json.get_field(image, "url", str, default="")
     if url.startswith("data:") and ";base64," in url:
         prefix, data = url.split(";base64,", 1)
         media_type = prefix[5:] or "image/png"
@@ -627,19 +715,21 @@ def _openai_image_to_anthropic(image: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _tool_result_content(content: Any) -> str:
+def _tool_result_content(content: JsonValue) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return "\n".join(
-            block.get("text", "")
-            for block in content
-            if isinstance(block, dict) and block.get("type") == "text"
-        )
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                tv = block.get("text", "")
+                if isinstance(tv, str):
+                    parts.append(tv)
+        return "\n".join(parts)
     return json.dumps(content, ensure_ascii=False)
 
 
-def _expand_anthropic_content(content: Any) -> list[dict[str, Any]]:
+def _expand_anthropic_content(content: JsonValue) -> list[JsonObject]:
     if isinstance(content, list):
         return [block for block in content if isinstance(block, dict)]
     if isinstance(content, str) and content:
@@ -647,16 +737,16 @@ def _expand_anthropic_content(content: Any) -> list[dict[str, Any]]:
     return []
 
 
-def _compact_anthropic_content(content: list[dict[str, Any]]) -> str | list[dict[str, Any]]:
+def _compact_anthropic_content(content: list[JsonObject]) -> str | list[JsonObject]:
     if len(content) == 1 and content[0].get("type") == "text":
         return str(content[0].get("text", ""))
     return content
 
 
-def _merge_consecutive_anthropic_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _merge_consecutive_anthropic_messages(messages: list[JsonObject]) -> list[JsonObject]:
     if not messages:
         return []
-    merged: list[dict[str, Any]] = [messages[0]]
+    merged: list[JsonObject] = [messages[0]]
     for message in messages[1:]:
         prev = merged[-1]
         if prev["role"] != message["role"]:
@@ -668,7 +758,7 @@ def _merge_consecutive_anthropic_messages(messages: list[dict[str, Any]]) -> lis
     return merged
 
 
-def _anthropic_tool_choice_to_openai(tool_choice: Any) -> Any:
+def _anthropic_tool_choice_to_openai(tool_choice: JsonValue) -> JsonValue:
     if isinstance(tool_choice, str):
         return "required" if tool_choice == "any" else tool_choice
     if not isinstance(tool_choice, dict):
@@ -684,7 +774,7 @@ def _anthropic_tool_choice_to_openai(tool_choice: Any) -> Any:
     return choice_type or tool_choice
 
 
-def _openai_tool_choice_to_anthropic(tool_choice: Any) -> Any:
+def _openai_tool_choice_to_anthropic(tool_choice: JsonValue) -> JsonValue:
     if isinstance(tool_choice, str):
         if tool_choice == "required":
             return {"type": "any"}
@@ -692,37 +782,43 @@ def _openai_tool_choice_to_anthropic(tool_choice: Any) -> Any:
     if not isinstance(tool_choice, dict):
         return tool_choice
     if tool_choice.get("type") == "function":
+        func_raw = tool_choice.get("function")
+        name = ""
+        if isinstance(func_raw, dict):
+            name = json.get_field(func_raw, "name", str, default="")
         return {
             "type": "tool",
-            "name": tool_choice.get("function", {}).get("name", ""),
+            "name": name,
         }
     return tool_choice
 
 
-def _openai_usage_to_anthropic(usage: dict[str, Any]) -> dict[str, int]:
+def _openai_usage_to_anthropic(usage: JsonObject) -> dict[str, int]:
     result: dict[str, int] = {}
     if "prompt_tokens" in usage:
-        result["input_tokens"] = int(usage["prompt_tokens"])
+        result["input_tokens"] = json.get_field(usage, "prompt_tokens", int, default=0)
     if "completion_tokens" in usage:
-        result["output_tokens"] = int(usage["completion_tokens"])
-    prompt_details = usage.get("prompt_tokens_details", {})
+        result["output_tokens"] = json.get_field(usage, "completion_tokens", int, default=0)
+    prompt_details = usage.get("prompt_tokens_details")
     if isinstance(prompt_details, dict) and "cached_tokens" in prompt_details:
-        result["cache_read_input_tokens"] = int(prompt_details["cached_tokens"])
+        result["cache_read_input_tokens"] = json.get_field(prompt_details, "cached_tokens", int, default=0)
     return result
 
 
-def _anthropic_usage_to_openai(usage: dict[str, Any]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
+def _anthropic_usage_to_openai(usage: JsonObject) -> JsonObject:
+    result: JsonObject = {}
     if "input_tokens" in usage:
-        result["prompt_tokens"] = int(usage["input_tokens"])
+        result["prompt_tokens"] = json.get_field(usage, "input_tokens", int, default=0)
     if "output_tokens" in usage:
-        result["completion_tokens"] = int(usage["output_tokens"])
+        result["completion_tokens"] = json.get_field(usage, "output_tokens", int, default=0)
     if "cache_read_input_tokens" in usage:
         result["prompt_tokens_details"] = {
-            "cached_tokens": int(usage["cache_read_input_tokens"])
+            "cached_tokens": json.get_field(usage, "cache_read_input_tokens", int, default=0)
         }
     return result
 
+
+# ---- SSE state classes ----
 
 class _OpenAIToAnthropicState:
     def __init__(self, *, model: str) -> None:
@@ -734,7 +830,7 @@ class _OpenAIToAnthropicState:
         self.message_started = False
         self.stop_reason = ""
 
-    def message_start(self) -> dict[str, Any]:
+    def message_start(self) -> JsonObject:
         return {
             "type": "message_start",
             "message": {
@@ -752,7 +848,7 @@ class _OpenAIToAnthropicState:
             },
         }
 
-    def start_text_block(self) -> dict[str, Any]:
+    def start_text_block(self) -> JsonObject:
         self.block_index += 1
         self.current_block_type = "text"
         return {
@@ -761,7 +857,7 @@ class _OpenAIToAnthropicState:
             "content_block": {"type": "text", "text": ""},
         }
 
-    def start_tool_block(self, tool_id: str, name: str) -> dict[str, Any]:
+    def start_tool_block(self, tool_id: str, name: str) -> JsonObject:
         self.block_index += 1
         self.current_block_type = "tool_use"
         return {
@@ -788,7 +884,7 @@ class _AnthropicToOpenAIState:
         self.finish_reason = ""
         self.tool_names: dict[int, str] = {}
 
-    def chunk_payload(self, delta: dict[str, Any]) -> dict[str, Any]:
+    def chunk_payload(self, delta: JsonObject) -> JsonObject:
         choice_delta = dict(delta)
         if not self.role_emitted:
             choice_delta["role"] = "assistant"
@@ -807,7 +903,7 @@ class _AnthropicToOpenAIState:
             ],
         }
 
-    def finish_payload(self) -> dict[str, Any]:
+    def finish_payload(self) -> JsonObject:
         return {
             "id": self.message_id,
             "object": "chat.completion.chunk",
@@ -822,7 +918,7 @@ class _AnthropicToOpenAIState:
             ],
         }
 
-    def usage_payload(self) -> dict[str, Any] | None:
+    def usage_payload(self) -> JsonObject | None:
         if not self.prompt_tokens and not self.completion_tokens:
             return None
         return {

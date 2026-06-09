@@ -18,7 +18,7 @@ from typing import Any
 
 from mutagent.app.app import App
 from mutagent.cli.ansi import (
-    bold_cyan, bold_red, dim, _format_tool_call, _format_tool_result,
+    bold_cyan, bold_red, dim, format_tool_call, format_tool_result,
     highlight_markdown_line,
 )
 from mutagent.core.messages import Message, StreamEvent, TextBlock, ToolResultBlock, ToolUseBlock
@@ -64,11 +64,11 @@ class TerminalRenderer:
         elif event.type == "tool_exec_start" and isinstance(event.tool_call, ToolUseBlock):
             name = event.tool_call.name
             args = event.tool_call.input
-            call_str = _format_tool_call(name, args)
+            call_str = format_tool_call(name, args)
             print(f"\n{dim(call_str)}", flush=True)
         elif event.type == "tool_exec_end" and isinstance(event.tool_call, ToolResultBlock):
             is_error = event.tool_call.is_error
-            result_str = _format_tool_result(
+            result_str = format_tool_result(
                 event.tool_call.content, is_error,
             )
             print(result_str, flush=True)
@@ -241,11 +241,10 @@ def dispatch_terminal(parser: argparse.ArgumentParser, args: argparse.Namespace)
         session.sync(app.agent.context)
     except Exception:
         logger.exception("Failed to persist final session state")
-    if sandbox is not None:
-        try:
-            asyncio.run_coroutine_threadsafe(sandbox.close(), loop).result(timeout=5)
-        except Exception:
-            pass
+    try:
+        asyncio.run_coroutine_threadsafe(sandbox.close(), loop).result(timeout=5)
+    except Exception:
+        pass
     try:
         asyncio.run_coroutine_threadsafe(loop.shutdown_asyncgens(), loop).result(timeout=2)
     except Exception:

@@ -12,6 +12,7 @@ from mutagent.sandbox.entry_mcp import PySandboxTools
 from ._conversation import Conversation
 from mutgui import Channel, ModuleRegistry, ViewPort
 from mutio.mcp.view import MCPView
+from mutio.codec.json import JsonObject, get_field, narrow_value
 from mutio.net.server import HTMLResponse, Server, StaticView, WebSocketConnection, WebSocketDisconnect
 
 if TYPE_CHECKING:
@@ -49,8 +50,7 @@ async def web_ui_server_on_startup(self: WebUIServer) -> None:
         # bind_main_loop 注入 _async_loop，供 MCPSettingsPanel 的
         # _submit_async 跨线程投递协程使用（Connect/Disconnect/Reconnect 等按钮）
         sandbox = self.app.sandbox
-        if sandbox is not None:
-            sandbox.bind_main_loop()
+        sandbox.bind_main_loop()
     except Exception:
         logger.exception("connect_sources failed during WebUI startup")
 
@@ -141,32 +141,32 @@ def web_ui_server_init__(
     conversation = self.conversation
     from mutio.net.server import View as HttpView, WebSocketView
 
-    class _HTTPRoot(HttpView):
+    class _HTTPRoot(HttpView):  # pyright: ignore[reportUnusedClass]
         path = "/"
 
         async def get(self, request: Any) -> HTMLResponse:
             logger.info("Serving WebUI root HTML")
             return HTMLResponse(_render_root_html(registry))
 
-    class _WSView(WebSocketView):
+    class _WSView(WebSocketView):  # pyright: ignore[reportUnusedClass]
         path = "/ws"
 
         async def connect(self, ws: WebSocketConnection) -> None:
             logger.info("WebUI WebSocket connected")
             await ws.accept()
-            first_message = await ws.receive_json()
-            if first_message.get("type") != "mount.attach":
+            first_message = narrow_value(await ws.receive_json(), JsonObject)
+            if get_field(first_message, "type", str, default="") != "mount.attach":
                 await ws.close(code=4400, reason="expected mount.attach")
                 return
             for message in _runtime_messages(registry):
                 await ws.send_json(message)
             channel = WebSocketChannel(ws)
-            viewport = ViewPort(conversation, channel, _client=first_message.get("client"))
+            viewport = ViewPort(conversation, channel, _client=get_field(first_message, "client", JsonObject, default=None, fallback=None))
             await viewport.initialize()
             await conversation.rendered()
             try:
                 while True:
-                    event = await ws.receive_json()
+                    event = narrow_value(await ws.receive_json(), JsonObject)
                     logger.debug("WebUI received frontend event: %s", event)
                     await viewport.handle_event(event)
             except WebSocketDisconnect:
@@ -185,9 +185,9 @@ def web_ui_server_init__(
 
     # PySandbox MCP endpoint —— 注入 sandbox 后注册 MCPView，
     # PySandboxTools.path == "/mcp" 会自动挂接到该 view。
-    PySandboxTools._env = self.app.sandbox
+    PySandboxTools.env = self.app.sandbox
 
-    class _MCPView(MCPView):
+    class _MCPView(MCPView):  # pyright: ignore[reportUnusedClass]
         path = "/mcp"
         name = "mutagent-webui"
         version = mutagent.__version__

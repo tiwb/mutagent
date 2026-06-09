@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, ClassVar
+from typing import ClassVar
 
 from mutio.mcp.toolset import MCPToolSet
 from mutio.mcp.protocol import ToolResult
@@ -18,17 +18,17 @@ class PySandboxTools(MCPToolSet):
     """
     path = "/mcp"
     # 启动期注入的类级单例（ClassVar 避免被 mutobj 包成 per-instance AttributeDescriptor）
-    _env: ClassVar[SandboxEnv | None] = None
+    env: ClassVar[SandboxEnv | None] = None
 
     async def pysandbox(self, code: str) -> str | ToolResult:
-        if self._env is None:
+        if self.env is None:
             return ToolResult.error("Sandbox not initialized")
         loop = asyncio.get_running_loop()
         # 注入主 loop 供 _wrap_async 投递 async NamespaceTools 方法
-        self._env.bind_main_loop()
-        result = await loop.run_in_executor(None, self._env.exec_code, code)
+        self.env.bind_main_loop()
+        result = await loop.run_in_executor(None, self.env.exec_code, code)
 
-        text, is_error = self._env.format_result(result)
+        text, is_error = self.env.format_result(result)
         if is_error:
             return ToolResult.error(text)
         return text

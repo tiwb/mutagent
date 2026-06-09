@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from mutagent.app.app import App
 from mutagent.cli.terminal import _build_agent_session, add_terminal_subcommand
 from mutagent.core.context import AgentContext
-from mutagent.core._session_impl import SessionData, SessionMeta, _resolve_resume_path, _save
+from mutagent.core._session_impl import SessionMeta, _append_message, _resolve_resume_path, _write_header
 from mutagent.core.messages import Message, TextBlock
 from mutagent.core.session import AgentSession
 
@@ -37,22 +37,9 @@ def test_terminal_subcommand_accepts_resume_without_value():
 
 
 def test_resume_lookup_matches_session_suffix(tmp_path: Path):
-    context = AgentContext()
-    context.messages.append(Message(role="user", blocks=[TextBlock(text="hi")], id="u1"))
-    path = _save(
-        tmp_path / "seed.jsonl",
-        SessionData(
-            context=context,
-            meta=SessionMeta(
-                session_id="abc123",
-                model="gpt-5",
-                cwd="/home/user/project",
-                created_at=1.0,
-            ),
-        ),
-    )
     target = tmp_path / "2026-05-28T00-00-00Z_abc123.jsonl"
-    path.rename(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("{}\n", encoding="utf-8")
 
     session = AgentSession()
     session.start_new(session_dir=tmp_path, cwd="/home/user/project", model="gpt-5")
@@ -61,19 +48,19 @@ def test_resume_lookup_matches_session_suffix(tmp_path: Path):
 
 
 def test_build_agent_session_resumes_latest_for_empty_resume_value(tmp_path: Path, monkeypatch):
-    context = AgentContext()
-    context.messages.append(Message(role="user", blocks=[TextBlock(text="hi")], id="u1"))
-    _save(
-        tmp_path / "2026-05-28T00-00-00Z_latest123.jsonl",
-        SessionData(
-            context=context,
-            meta=SessionMeta(
-                session_id="latest123",
-                model="gpt-5",
-                cwd="/home/user/project",
-                created_at=1.0,
-            ),
+    file_path = tmp_path / "2026-05-28T00-00-00Z_latest123.jsonl"
+    _write_header(
+        file_path,
+        SessionMeta(
+            session_id="latest123",
+            model="gpt-5",
+            cwd="/home/user/project",
+            created_at=1.0,
         ),
+    )
+    _append_message(
+        file_path,
+        Message(role="user", blocks=[TextBlock(text="hi")], id="u1"),
     )
     app = App()
     object.__setattr__(

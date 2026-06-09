@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 import mutobj
 
-from mutagent.app.config import Config
+from mutagent.app.config import Config, ConfigSection
 from mutagent.app._config_impl import _expand_env, _resolve_paths_inplace
 
 
@@ -34,22 +36,28 @@ class TestConfigDeclaration:
         assert issubclass(Config, mutobj.Declaration)
 
     def test_declared_methods(self):
-        assert mutobj.get_declaration_func(Config, "get") is not None
-        assert mutobj.get_declaration_func(Config, "set") is not None
-        assert mutobj.get_declaration_func(Config, "on_change") is not None
+        # Config 独有方法（root 是 @property，用 test_stub_root_returns_section 验证）
+        assert mutobj.get_declaration_func(Config, "load") is not None
+        assert mutobj.get_declaration_func(Config, "resolve_model") is not None
+        # get/set/on_change 在 ConfigSection 上
+        assert mutobj.get_declaration_func(ConfigSection, "get") is not None
+        assert mutobj.get_declaration_func(ConfigSection, "set") is not None
+        assert mutobj.get_declaration_func(ConfigSection, "on_change") is not None
 
-    def test_stub_get_returns_default(self):
+    def test_stub_root_returns_section(self):
         config = Config()
-        assert config.get("anything") is None
-        assert config.get("anything", default="fallback") == "fallback"
+        root = config.root
+        assert isinstance(root, ConfigSection)
+        assert root.config is config
+        assert root.prefix == ""
 
     def test_stub_set_does_nothing(self):
         config = Config()
-        config.set("key", "value")  # should not raise
+        config.root.set("key", "value")  # should not raise
 
     def test_stub_on_change_returns_cancel_fn(self):
         config = Config()
-        d = config.on_change("pattern", lambda e: None)
+        d = config.root.on_change("pattern", lambda e: None)
         assert callable(d)
         d()  # should not raise
 
@@ -62,38 +70,103 @@ class TestConfigGet:
 
     def test_get_simple_key(self):
         config = _make_config({"foo": "bar"})
-        assert config.get("foo") == "bar"
+        assert config.root.get("foo") == "bar"
 
     def test_get_missing_key_returns_default(self):
         config = _make_config({"foo": "bar"})
-        assert config.get("missing") is None
-        assert config.get("missing", default="fallback") == "fallback"
+        assert config.root.get("missing") is None
+        assert config.root.get("missing", default="fallback") == "fallback"
 
     def test_get_dotted_path(self):
         config = _make_config({"a": {"b": {"c": 42}}})
-        assert config.get("a.b.c") == 42
+        assert config.root.get("a.b.c") == 42
 
     def test_get_dotted_path_missing_segment(self):
         config = _make_config({"a": {"b": 1}})
-        assert config.get("a.x.y", default="nope") == "nope"
+        assert config.root.get("a.x.y", default="nope") == "nope"
 
     def test_empty_data(self):
         config = _make_config()
-        assert config.get("anything", default="default") == "default"
+        assert config.root.get("anything", default="default") == "default"
+
+
+# ---------------------------------------------------------------------------
+# Config.get_field() tests
+# ---------------------------------------------------------------------------
+
+class TestConfigGetAs:
+
+    def test_get_field_str(self):
+        config = _make_config({"foo": "bar"})
+        assert config.root.get_field("foo", str) == "bar"
+
+    def test_get_field_int(self):
+        config = _make_config({"port": 8080})
+        assert config.root.get_field("port", int) == 8080
+
+    def test_get_field_bool(self):
+        config = _make_config({"debug": True})
+        assert config.root.get_field("debug", bool) is True
+
+    def test_get_field_float(self):
+        config = _make_config({"threshold": 0.5})
+        assert config.root.get_field("threshold", float) == 0.5
+
+    def test_get_field_dict(self):
+        config = _make_config({"providers": {"openai": {"type": "openai"}}})
+        result = config.root.get_field("providers", dict)
+        assert isinstance(result, dict)
+        assert result["openai"]["type"] == "openai"
+
+    def test_get_field_list(self):
+        config = _make_config({"items": [1, 2, 3]})
+        result = config.root.get_field("items", list)
+        assert result == [1, 2, 3]
+
+    def test_get_field_default_on_missing(self):
+        config = _make_config({"x": 1})
+        assert config.root.get_field("missing", int, default=42) == 42
+
+    def test_get_field_type_mismatch_raises(self):
+        config = _make_config({"foo": "bar"})
+        with pytest.raises(TypeError, match="expected.*int"):
+            config.root.get_field("foo", int)
+
+    def test_get_field_none_value(self):
+        config = _make_config({"maybe": None})
+        result = config.root.get_field("maybe", type(None))  # or type(None)
+        assert result is None
+
+    def test_get_field_dotted_path(self):
+        config = _make_config({"a": {"b": {"c": 42}}})
+        assert config.root.get_field("a.b.c", int) == 42
+
+    def test_get_field_empty_config_returns_default(self):
+        config = _make_config()
+        assert config.root.get_field("anything", str, default="fallback") == "fallback"
+
+    def test_get_field_dict_generic(self):
+        """dict泛型递归检测key和value类型。"""
+        from mutio.codec.json import JsonValue
+        config = _make_config({"providers": {"openai": {"type": "openai"}}})
+        result = config.root.get_field("providers", dict[str, JsonValue])
+        assert isinstance(result, dict)
+
+
 
 
 class TestConfigSet:
 
     def test_set_creates_path(self):
         config = _make_config()
-        config.set("a.b.c", 42)
-        assert config.get("a.b.c") == 42
+        config.root.set("a.b.c", 42)
+        assert config.root.get("a.b.c") == 42
 
     def test_set_triggers_callback(self):
         events = []
         config = _make_config()
-        config.on_change("a.*", lambda e: events.append(e))
-        config.set("a.b", 1)
+        config.root.on_change("a.*", lambda e: events.append(e))
+        config.root.set("a.b", 1)
         assert len(events) == 1
         assert events[0].key == "a.b"
         assert events[0].config is config
@@ -101,8 +174,8 @@ class TestConfigSet:
     def test_set_does_not_trigger_unrelated(self):
         events = []
         config = _make_config()
-        config.on_change("a.*", lambda e: events.append(e))
-        config.set("b.c", 1)
+        config.root.on_change("a.*", lambda e: events.append(e))
+        config.root.set("b.c", 1)
         assert len(events) == 0
 
 
@@ -111,57 +184,57 @@ class TestConfigOnChange:
     def test_cancel_removes_listener(self):
         events = []
         config = _make_config()
-        cancel = config.on_change("a", lambda e: events.append(e))
-        config.set("a", 1)
+        cancel = config.root.on_change("a", lambda e: events.append(e))
+        config.root.set("a", 1)
         assert len(events) == 1
         cancel()
-        config.set("a", 2)
+        config.root.set("a", 2)
         assert len(events) == 1  # 不再触发
 
     def test_ancestor_triggers(self):
         """set("providers") 应触发 on_change("providers.anthropic.auth_token")"""
         events = []
         config = _make_config()
-        config.on_change("providers.anthropic.auth_token", lambda e: events.append(e))
-        config.set("providers", {"anthropic": {"auth_token": "new"}})
+        config.root.on_change("providers.anthropic.auth_token", lambda e: events.append(e))
+        config.root.set("providers", {"anthropic": {"auth_token": "new"}})
         assert len(events) == 1
 
     def test_double_star_wildcard(self):
         events = []
         config = _make_config()
-        config.on_change("providers.**", lambda e: events.append(e))
-        config.set("providers.anthropic.auth_token", "new")
+        config.root.on_change("providers.**", lambda e: events.append(e))
+        config.root.set("providers.anthropic.auth_token", "new")
         assert len(events) == 1
 
 
 # ---------------------------------------------------------------------------
-# Config.affects() tests
+# ConfigSection.affects() tests
 # ---------------------------------------------------------------------------
 
 class TestConfigAffects:
 
     def test_exact_match(self):
         config = Config()
-        assert config.affects("a.b.c", "a.b.c") is True
+        assert config.root.affects("a.b.c", "a.b.c") is True
 
     def test_single_wildcard(self):
         config = Config()
-        assert config.affects("providers.*", "providers.anthropic") is True
-        assert config.affects("providers.*", "providers.anthropic.auth_token") is False
+        assert config.root.affects("providers.*", "providers.anthropic") is True
+        assert config.root.affects("providers.*", "providers.anthropic.auth_token") is False
 
     def test_double_wildcard(self):
         config = Config()
-        assert config.affects("providers.**", "providers.anthropic") is True
-        assert config.affects("providers.**", "providers.anthropic.auth_token") is True
+        assert config.root.affects("providers.**", "providers.anthropic") is True
+        assert config.root.affects("providers.**", "providers.anthropic.auth_token") is True
 
     def test_ancestor_match(self):
         config = Config()
-        assert config.affects("providers.anthropic.auth_token", "providers") is True
-        assert config.affects("providers.**", "providers") is True
+        assert config.root.affects("providers.anthropic.auth_token", "providers") is True
+        assert config.root.affects("providers.**", "providers") is True
 
     def test_no_match(self):
         config = Config()
-        assert config.affects("providers.*", "agents.xxx") is False
+        assert config.root.affects("providers.*", "agents.xxx") is False
 
 
 # ---------------------------------------------------------------------------
@@ -379,40 +452,40 @@ class TestEnvExpansion:
     def test_expand_dollar_var(self, monkeypatch):
         monkeypatch.setenv("TEST_KEY", "secret123")
         config = _make_config({"auth_token": "$TEST_KEY"})
-        assert config.get("auth_token") == "secret123"
+        assert config.root.get("auth_token") == "secret123"
 
     def test_expand_dollar_brace_var(self, monkeypatch):
         monkeypatch.setenv("MY_TOKEN", "abc")
         config = _make_config({"token": "${MY_TOKEN}"})
-        assert config.get("token") == "abc"
+        assert config.root.get("token") == "abc"
 
     def test_undefined_var_preserved(self):
         config = _make_config({"key": "$UNDEFINED_VAR_XYZ"})
-        assert config.get("key") == "$UNDEFINED_VAR_XYZ"
+        assert config.root.get("key") == "$UNDEFINED_VAR_XYZ"
 
     def test_expand_nested_dict(self, monkeypatch):
         monkeypatch.setenv("NESTED_VAL", "deep")
         config = _make_config({"outer": {"inner": {"val": "$NESTED_VAL"}}})
-        assert config.get("outer.inner.val") == "deep"
+        assert config.root.get("outer.inner.val") == "deep"
 
     def test_expand_in_list(self, monkeypatch):
         monkeypatch.setenv("LIST_VAL", "item")
         config = _make_config({"items": ["$LIST_VAL", "static"]})
-        result = config.get("items")
+        result = config.root.get("items")
         assert result == ["item", "static"]
 
     def test_non_string_values_unchanged(self):
         config = _make_config({"count": 42, "flag": True})
-        assert config.get("count") == 42
-        assert config.get("flag") is True
+        assert config.root.get("count") == 42
+        assert config.root.get("flag") is True
 
     def test_expand_mixed_text(self, monkeypatch):
         monkeypatch.setenv("HOST", "localhost")
         config = _make_config({"url": "http://$HOST:8080/api"})
-        assert config.get("url") == "http://localhost:8080/api"
+        assert config.root.get("url") == "http://localhost:8080/api"
 
     def test_expand_multiple_vars(self, monkeypatch):
         monkeypatch.setenv("PROTO", "https")
         monkeypatch.setenv("DOMAIN", "example.com")
         config = _make_config({"url": "$PROTO://$DOMAIN"})
-        assert config.get("url") == "https://example.com"
+        assert config.root.get("url") == "https://example.com"

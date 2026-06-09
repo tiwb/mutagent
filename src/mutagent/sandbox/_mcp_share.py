@@ -20,7 +20,8 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
-from mutagent.sandbox._signature import _MISSING, format_signature
+from mutagent.sandbox._signature import MISSING, format_signature
+from mutio.codec.json import JsonObject
 from mutio.mcp.protocol import (
     INTERNAL_ERROR,
     INVALID_PARAMS,
@@ -48,18 +49,18 @@ def _all_namespaces(sandbox: "SandboxEnv") -> dict[str, "Namespace"]:
     """收集 sandbox 当前可见的全部 namespace（拍平成单 provider）。
 
     与 ``_build_namespace_dict``（exec_code 路径）共享合并软辑——
-    均走 :func:`mutagent.sandbox._app_impl._collect_namespaces`，保证
+    均走 :func:`mutagent.sandbox._app_impl.collect_namespaces`，保证
     export 函数集与本地可见函数集严格一致。
 
     ``MergedNamespaceView`` 拍平成单 :class:`Namespace`：
     - ``description`` / ``provider_kind`` 取 :func:`primary_of`
     - ``functions`` 集 = view 合并后的 active 集，不丢 external 的非冲突函数
     """
-    from mutagent.sandbox._env_impl import _collect_namespaces
+    from mutagent.sandbox._env_impl import collect_namespaces
     from mutagent.sandbox._namespace_impl import MergedNamespaceView, flatten_view
 
     result: dict[str, "Namespace"] = {}
-    for name, ns in _collect_namespaces(sandbox).items():
+    for name, ns in collect_namespaces(sandbox).items():
         if isinstance(ns, MergedNamespaceView):
             result[name] = flatten_view(ns)
         else:
@@ -127,7 +128,7 @@ def _describe_function(fn: Any) -> dict[str, Any]:
         sig_str = "(...)"
     else:
         sig_str = format_signature(sig)
-        params_list = []
+        _params: list[dict[str, Any]] = []
         for p in sig.parameters.values():
             # VAR_POSITIONAL / VAR_KEYWORD 无法通过 RPC 承载，跳过
             if p.kind in (
@@ -142,7 +143,7 @@ def _describe_function(fn: Any) -> dict[str, Any]:
             if p.annotation is not inspect.Parameter.empty:
                 entry["annotation"] = _annotation_to_str(p.annotation)
             if p.default is not inspect.Parameter.empty:
-                if p.default is _MISSING:
+                if p.default is MISSING:
                     entry["default_missing"] = True
                 elif _default_is_json_safe(p.default):
                     entry["default"] = p.default
@@ -150,7 +151,8 @@ def _describe_function(fn: Any) -> dict[str, Any]:
                     # 非 JSON 原生默认值：只留 repr 供展示，不允许回传
                     # （客户端将该参数视为必填，退化安全）
                     entry["default_repr"] = repr(p.default)
-            params_list.append(entry)
+            _params.append(entry)
+        params_list = _params
     doc = inspect.getdoc(fn) or ""
     result: dict[str, Any] = {
         "signature": sig_str,
@@ -182,12 +184,12 @@ def register_pysandbox_methods(
 
     async def _handle_list(params: dict[str, Any]) -> dict[str, Any]:
         namespaces = _all_namespaces(sandbox)
-        items = []
+        items: list[JsonObject] = []
         for name, ns in sorted(namespaces.items()):
             items.append({
                 "name": name,
-                "description": ns._description or "",
-                "function_count": len(ns._functions),
+                "description": ns.description or "",
+                "function_count": len(ns.functions),
             })
         return {"namespaces": items}
 
@@ -201,11 +203,11 @@ def register_pysandbox_methods(
             raise JsonRpcError(
                 METHOD_NOT_FOUND, f"Namespace not found: {ns_name}")
         functions: dict[str, dict[str, Any]] = {}
-        for fn_name, fn in ns._functions.items():
+        for fn_name, fn in ns.functions.items():
             functions[fn_name] = _describe_function(fn)
         return {
             "name": ns_name,
-            "description": ns._description or "",
+            "description": ns.description or "",
             "functions": functions,
         }
 
@@ -225,7 +227,7 @@ def register_pysandbox_methods(
         if ns is None:
             raise JsonRpcError(
                 METHOD_NOT_FOUND, f"Namespace not found: {ns_name}")
-        fn = ns._functions.get(fn_name)
+        fn = ns.functions.get(fn_name)
         if fn is None:
             raise JsonRpcError(
                 METHOD_NOT_FOUND,

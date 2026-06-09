@@ -339,7 +339,7 @@ def _current_session_model(conversation: Conversation) -> str:
     )
 
 
-def _start_session(conversation: Conversation) -> AgentSession:
+def start_session(conversation: Conversation) -> AgentSession:
     conversation.session = AgentSession()
     conversation.session.start_new(
         session_dir=_default_session_dir(),
@@ -352,19 +352,18 @@ def _start_session(conversation: Conversation) -> AgentSession:
 async def start_new_session(conversation: Conversation) -> None:
     """Clear all messages + reset state + create new AgentSession. Navigate to main if needed."""
     from ._conversation import (
-        _reset_context_usage,
-        _reset_runtime_state,
-        _refresh_shell,
+        reset_context_usage,
+        reset_runtime_state,
+        refresh_shell,
     )
 
     context = conversation.agent.context
-    if context is not None:
-        context.messages = []
-        _reset_context_usage(context)
+    context.messages = []
+    reset_context_usage(context)
     conversation.message_list.replace_items([])
-    _reset_runtime_state(conversation)
-    _start_session(conversation)
-    _refresh_shell(conversation)
+    reset_runtime_state(conversation)
+    start_session(conversation)
+    refresh_shell(conversation)
     if conversation.current_route:
         await conversation.navigate_to("")
     else:
@@ -374,18 +373,16 @@ async def start_new_session(conversation: Conversation) -> None:
 async def resume_session(conversation: Conversation, session_path: str | Path) -> None:
     """Load a saved session into the agent context and rebuild UI items."""
     from ._conversation import (
-        _reset_context_usage,
-        _rebuild_items_from_messages,
-        _reset_runtime_state,
-        _refresh_shell,
+        reset_context_usage,
+        rebuild_items_from_messages,
+        reset_runtime_state,
+        refresh_shell,
     )
 
     context = conversation.agent.context
-    if context is None:
-        return
     conversation.session.resume(session_path, context)
-    _reset_context_usage(context)
-    conversation.message_list.replace_items(_rebuild_items_from_messages(context.messages))
-    _reset_runtime_state(conversation)
-    _refresh_shell(conversation)
+    reset_context_usage(context)
+    conversation.message_list.replace_items(rebuild_items_from_messages(context.messages))
+    reset_runtime_state(conversation)
+    refresh_shell(conversation)
     await conversation.navigate_to("")

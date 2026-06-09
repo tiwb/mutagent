@@ -11,6 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 import mutobj
+from mutio.codec.json import JsonObject, get_field
 
 from .context import AgentContext
 from .messages import (
@@ -38,7 +39,7 @@ class SessionMeta:
     cwd: str = ""
     created_at: float = 0.0
     head_entry_id: str = ""
-    extra: dict[str, Any] = field(default_factory=dict)
+    extra: JsonObject = field(default_factory=JsonObject)
 
 
 @dataclass
@@ -98,7 +99,7 @@ def _session_filename(ts: float, session_id: str) -> str:
     return f"{_file_timestamp(ts)}_{session_id}.jsonl"
 
 
-def _append_jsonl(path: Path, entry: dict[str, Any]) -> None:
+def _append_jsonl(path: Path, entry: JsonObject) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8", newline="\n") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -111,7 +112,7 @@ def _filter_persisted_blocks(blocks: list[ContentBlock]) -> list[ContentBlock]:
     ]
 
 
-def _block_to_dict(block: ContentBlock) -> dict[str, Any]:
+def _block_to_dict(block: ContentBlock) -> JsonObject:
     if isinstance(block, TextBlock):
         return {"type": "text", "text": block.text}
     if isinstance(block, ImageBlock):
@@ -191,7 +192,7 @@ def _block_from_dict(data: dict[str, Any]) -> ContentBlock:
     raise ValueError(f"Unknown block type: {block_type!r}")
 
 
-def _message_to_dict(message: Message) -> dict[str, Any]:
+def _message_to_dict(message: Message) -> JsonObject:
     blocks = [_block_to_dict(block) for block in _filter_persisted_blocks(message.blocks)]
     return {
         "role": message.role,
@@ -209,28 +210,32 @@ def _message_to_dict(message: Message) -> dict[str, Any]:
     }
 
 
-def _message_from_dict(data: dict[str, Any]) -> Message:
-    blocks = [_block_from_dict(block) for block in data.get("content", [])]
-    timestamp = data.get("timestamp", 0.0)
-    if isinstance(timestamp, str):
-        timestamp = _from_iso(timestamp)
+def _message_from_dict(data: JsonObject) -> Message:
+    blocks = [_block_from_dict(block) for block in get_field(data, "content", list[dict[str, Any]], default=[])]
+    timestamp_raw = data.get("timestamp", 0.0)
+    if isinstance(timestamp_raw, str):
+        timestamp = _from_iso(timestamp_raw)
+    elif isinstance(timestamp_raw, (int, float)):
+        timestamp = float(timestamp_raw)
+    else:
+        timestamp = 0.0
     return Message(
-        role=data.get("role", "user"),
+        role=get_field(data, "role", str, default="user"),
         blocks=blocks,
-        id=data.get("id", ""),
-        label=data.get("label", ""),
-        sender=data.get("sender", ""),
-        model=data.get("model", ""),
+        id=get_field(data, "id", str, default=""),
+        label=get_field(data, "label", str, default=""),
+        sender=get_field(data, "sender", str, default=""),
+        model=get_field(data, "model", str, default=""),
         timestamp=float(timestamp or 0.0),
-        duration=float(data.get("duration", 0.0)),
-        input_tokens=int(data.get("input_tokens", 0)),
-        output_tokens=int(data.get("output_tokens", 0)),
-        cacheable=bool(data.get("cacheable", True)),
-        priority=int(data.get("priority", 0)),
+        duration=get_field(data, "duration", float, default=0.0),
+        input_tokens=get_field(data, "input_tokens", int, default=0),
+        output_tokens=get_field(data, "output_tokens", int, default=0),
+        cacheable=get_field(data, "cacheable", bool, default=True),
+        priority=get_field(data, "priority", int, default=0),
     )
 
 
-def _header_entry(meta: SessionMeta) -> dict[str, Any]:
+def _header_entry(meta: SessionMeta) -> JsonObject:
     session_id = meta.session_id or _create_session_id()
     created_at = meta.created_at or _now_ts()
     return {
@@ -252,9 +257,9 @@ def _append_parented_entry(
     entry_id: str,
     parent_id: str | None,
     timestamp: float,
-    payload: dict[str, Any],
+    payload: JsonObject,
 ) -> str:
-    entry = {
+    entry: JsonObject = {
         "type": entry_type,
         "id": entry_id,
         "parentId": parent_id,
@@ -334,37 +339,12 @@ def _append_model_change(
     )
 
 
-def _save(path: str | Path, data: SessionData) -> Path:
-    file_path = _normalize_path(path)
-    meta = SessionMeta(
-        session_id=data.meta.session_id,
-        title=data.meta.title,
-        model=data.meta.model,
-        cwd=data.meta.cwd,
-        created_at=data.meta.created_at,
-        head_entry_id=data.meta.head_entry_id,
-        extra=dict(data.meta.extra),
-    )
-    _write_header(file_path, meta)
-    head_id: str | None = None
-    for prompt in data.context.prompts:
-        head_id = _append_prompt(file_path, prompt, parent_id=head_id)
-    if meta.model:
-        head_id = _append_model_change(
-            file_path,
-            model=meta.model,
-            parent_id=head_id,
-        )
-    for message in data.context.messages:
-        head_id = _append_message(file_path, message, parent_id=head_id)
-    return file_path
-
 
 def _load(path: str | Path) -> SessionData:
     file_path = _normalize_path(path)
     context = AgentContext()
     meta = SessionMeta()
-    model_changes: list[dict[str, Any]] = []
+    model_changes: list[JsonObject] = []
     head_entry_id = ""
 
     with file_path.open("r", encoding="utf-8") as f:

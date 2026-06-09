@@ -9,7 +9,7 @@ Namespace 构造和 on_remove 回调等内部细节不暴露。
 
 from __future__ import annotations
 
-from typing import Any, Iterator, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import mutobj
 

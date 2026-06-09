@@ -93,7 +93,7 @@ class WebToolkit(Toolkit):
         """
         ...
 
-    def _customize_schema(self, method_name: str, schema: ToolSchema) -> ToolSchema:
+    def customize_schema(self, method_name: str, schema: ToolSchema) -> ToolSchema:
         """根据已发现的实现动态调整工具 schema。"""
         ...
 

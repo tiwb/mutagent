@@ -8,6 +8,7 @@ import httpx
 import mutobj
 
 from mutio.net.client import HttpClient
+from mutio.codec.json import JsonObject, get_field
 from mutagent.core.messages import ToolSchema
 from .web_toolkit import FetchImpl, SearchImpl, WebToolkit
 
@@ -24,11 +25,6 @@ _MAX_CONTENT_CHARS = 50000
 # ---------------------------------------------------------------------------
 # Provider 发现
 # ---------------------------------------------------------------------------
-
-def _discover_impls(base_cls: type) -> dict[str, type]:
-    """发现所有已注册的实现子类，返回 {name: cls} 映射。"""
-    return {cls.name: cls for cls in mutobj.discover_subclasses(base_cls)}
-
 
 # ---------------------------------------------------------------------------
 # 内置 raw 获取
@@ -59,7 +55,7 @@ async def _httpx_get_raw(url: str) -> str:
 @mutobj.impl(WebToolkit.search)
 async def web_toolkit_search(self: WebToolkit, query: str, max_results: int = 5, impl: str = "") -> str:
     """搜索 Web 并返回结果摘要。"""
-    search_impls = _discover_impls(SearchImpl)
+    search_impls = {cls.name: cls for cls in mutobj.discover_subclasses(SearchImpl)}
     if not search_impls:
         return "No search implementation available. Ensure a SearchImpl is registered."
     name = impl or "jina"
@@ -83,7 +79,7 @@ async def web_toolkit_fetch(self: WebToolkit, url: str, format: str = "markdown"
         return await _httpx_get_raw(url)
 
     # html/markdown 格式：需要 FetchImpl
-    fetch_impls = _discover_impls(FetchImpl)
+    fetch_impls = {cls.name: cls for cls in mutobj.discover_subclasses(FetchImpl)}
     if not fetch_impls:
         return (
             f"Format \"{format}\" requires content extraction dependencies.\n"
@@ -103,7 +99,7 @@ async def web_toolkit_fetch(self: WebToolkit, url: str, format: str = "markdown"
 # WebToolkit._customize_schema 实现
 # ---------------------------------------------------------------------------
 
-@mutobj.impl(WebToolkit._customize_schema)
+@mutobj.impl(WebToolkit.customize_schema)
 def web_toolkit_customize_schema(self: WebToolkit, method_name: str, schema: ToolSchema) -> ToolSchema:
     """根据已发现的实现动态调整工具 schema。"""
     if method_name == "search":
@@ -121,7 +117,7 @@ def web_toolkit_customize_schema(self: WebToolkit, method_name: str, schema: Too
 
     if method_name == "fetch":
         fetch_impls = mutobj.discover_subclasses(FetchImpl)
-        props = dict(schema.input_schema.get("properties", {}))
+        props = get_field(schema.input_schema, "properties", JsonObject, default=JsonObject())
         if fetch_impls:
             impl_list = ", ".join(f"{c.name} ({c.description})" for c in fetch_impls)
             desc = f"Fetch web page content as text. Available: {impl_list}."
@@ -142,7 +138,7 @@ def web_toolkit_customize_schema(self: WebToolkit, method_name: str, schema: Too
             desc = "Fetch raw web page content (HTML)."
             props.pop("format", None)
             props.pop("impl", None)
-        new_input = dict(schema.input_schema)
+        new_input: JsonObject = {**schema.input_schema}
         new_input["properties"] = props
         new_input["required"] = ["url"]
         return ToolSchema(

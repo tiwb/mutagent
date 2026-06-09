@@ -166,11 +166,11 @@ def _role_meta(role: str, model: str = "", timestamp: float = 0.0) -> str:
 
 # 类型驱动的 ChatItem -> ChatItemView 映射缓存。
 # 按 mutobj 注册表 generation 失效，首次/变更时重建一次，其余 O(1)。
-_view_map_cache: dict[type[ChatItem], type[ChatItemView]] = {}
+_view_map_cache: dict[type[ChatItem], type[ChatItemView[Any]]] = {}
 _view_map_generation: int = -1
 
 
-def _resolve_view_class(item_type: type[ChatItem]) -> type[ChatItemView]:
+def _resolve_view_class(item_type: type[ChatItem]) -> type[ChatItemView[Any]]:
     """按 ChatItem 类型查 ChatItemView 子类。"""
     global _view_map_generation
     gen = mutobj.get_registry_generation()
@@ -196,7 +196,7 @@ def _resolve_view_class(item_type: type[ChatItem]) -> type[ChatItemView]:
 
 
 @mutobj.impl(ChatItemView.for_item)
-def chat_item_view_for_item(cls: type[ChatItemView], item: ChatItem) -> ChatItemView:
+def chat_item_view_for_item(cls: type[ChatItemView[Any]], item: ChatItem) -> ChatItemView[Any]:
     view_cls = _resolve_view_class(type(item))
     return view_cls(item=item)
 

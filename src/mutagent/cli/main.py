@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import mutagent
-from mutagent.app.app import App
 
 
 def main() -> None:

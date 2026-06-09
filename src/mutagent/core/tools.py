@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import mutobj
 
@@ -33,16 +33,14 @@ class ToolSet(mutobj.Declaration):
     auto_discover: bool = False
     agent: Agent | None = None
 
-    def add(self, source: Any, methods: list[str] | None = None) -> None:
-        """Add tools from a source.
+    def add(self, source: Toolkit, methods: list[str] | None = None) -> None:
+        """Add tools from a Toolkit instance.
 
         Args:
-            source: Tool source, can be:
-                - An object instance: register its public methods as tools.
-                - A single callable: register as one tool.
-            methods: When source is an object, specify which method names
-                to register. None registers all public methods defined
-                directly on the class (not inherited).
+            source: A Toolkit instance whose public methods are registered as tools.
+            methods: Specify which method names to register.
+                None registers all public methods defined directly on the class
+                (not inherited).
         """
         ...
 
@@ -100,12 +98,12 @@ class Toolkit(mutobj.Declaration):
         owner: 拥有此 Toolkit 的 ToolSet 实例。
             由 ToolSet 在 add() 或 auto-discover 时设置。
             通过 owner 可访问绑定链：owner.agent → Session。
-        _discoverable: 控制是否被 auto-discover 发现。
+        discoverable: 控制是否被 auto-discover 发现。
             设为 False 则 auto-discover 跳过此类，但仍可通过 .add() 手动注册。
             子类不设置则继承默认值 True。
-        _tool_methods: 方法级白名单。
+        tool_methods: 方法级白名单。
             设置后只暴露列表中的方法为工具。未设置则暴露所有公开方法（向后兼容）。
-        _tool_prefix: 工具名前缀。
+        tool_prefix: 工具名前缀。
             None = 从类名自动推导，空字符串 = 无前缀（工具名即方法名）。
 
     Example::
@@ -117,11 +115,11 @@ class Toolkit(mutobj.Declaration):
     """
 
     owner: ToolSet | None = None
-    _discoverable: ClassVar[bool] = True
-    _tool_methods: ClassVar[list[str] | None] = None
-    _tool_prefix: ClassVar[str | None] = None
+    discoverable: ClassVar[bool] = True
+    tool_methods: ClassVar[list[str] | None] = None
+    tool_prefix: ClassVar[str | None] = None
 
-    def _customize_schema(self, method_name: str, schema: ToolSchema) -> ToolSchema:
+    def customize_schema(self, method_name: str, schema: ToolSchema) -> ToolSchema:
         """动态调整工具 schema。子类可覆盖。
 
         在 ToolSet 生成 schema 后调用，允许 Toolkit 实例

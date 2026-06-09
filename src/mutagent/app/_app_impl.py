@@ -9,6 +9,8 @@ import os
 import sys
 from pathlib import Path
 
+from mutio.codec.json import JsonObject, get_field
+
 import mutobj
 from mutagent.app.config import Config
 from mutagent.core.agent import Agent
@@ -35,12 +37,12 @@ You are mutagent assistant.
 
 
 @mutobj.impl(App.load_config)
-def app_load_config(self, config_path: str = ".mutagent/config.json") -> None:
+def app_load_config(self: App, config_path: str = ".mutagent/config.json") -> None:
     self.config = Config()
     self.config.load(config_path)
 
     # Set environment variables from config
-    for key, value in self.config.get("env", default={}).items():
+    for key, value in self.config.root.get_field("env", dict[str, str], default={}).items():
         os.environ[key] = value
 
     # Auto-register .mutagent/ directories to sys.path
@@ -52,17 +54,17 @@ def app_load_config(self, config_path: str = ".mutagent/config.json") -> None:
             sys.path.insert(0, mutagent_dir)
 
     # Extend sys.path from config
-    for p_str in self.config.get("path", default=[]):
+    for p_str in [p for p in self.config.root.get_field("path", list[str], default=[])]:
         if p_str not in sys.path:
             sys.path.insert(0, p_str)
 
     # Load extension modules
-    for module_name in self.config.get("modules", default=[]):
+    for module_name in [m for m in self.config.root.get_field("modules", list[str], default=[])]:
         importlib.import_module(module_name)
 
 
 @mutobj.impl(App.setup_agent)
-def app_setup_agent(self, system_prompt: str = "") -> Agent:
+def app_setup_agent(self: App, system_prompt: str = "") -> Agent:
     from datetime import datetime
 
     spec = self.config.resolve_model()
@@ -74,7 +76,7 @@ def app_setup_agent(self, system_prompt: str = "") -> Agent:
 
     # --- Logging setup ---
     session_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_dir = Path(self.config.get("logging.log_dir", default=".mutagent/logs"))
+    log_dir = Path(self.config.root.get_field("logging.log_dir", str, default=".mutagent/logs"))
 
     # 1. Create LogStore (in-memory, no capacity limit)
     log_store = LogStore()
@@ -89,7 +91,7 @@ def app_setup_agent(self, system_prompt: str = "") -> Agent:
     root_logger.addHandler(mem_handler)
 
     # 3. File handler (default on)
-    if self.config.get("logging.file_log", default=True):
+    if self.config.root.get_field("logging.file_log", bool, default=True):
         log_dir.mkdir(parents=True, exist_ok=True)
         file_handler = logging.FileHandler(
             log_dir / f"{session_ts}.log", encoding="utf-8"
@@ -128,7 +130,7 @@ def app_setup_agent(self, system_prompt: str = "") -> Agent:
 
 
 @mutobj.impl(App.connect_sources)
-async def app_connect_sources(self) -> None:
+async def app_connect_sources(self: App) -> None:
     """在 agent 将运行的 event loop 上连接 mcp_sources
 
     MCP 连接采用「长生命周期代理 + 懒连 + 自动重连」模型：
@@ -140,9 +142,9 @@ async def app_connect_sources(self) -> None:
     - ``retry_cooldown``（默认 5s，0 禁用）：失败后冷却期内不重试。
     """
     sandbox = self.sandbox
-    mcp_sources = self.config.get("mcp_sources", default={}) or {}
+    mcp_sources = self.config.root.get_field("mcp_sources", dict[str, JsonObject], default={})
     for ns_name, server_cfg in mcp_sources.items():
-        autostart = bool(server_cfg.get("autostart", True))
+        autostart = get_field(server_cfg, "autostart", bool, default=True)
         try:
             conn = MCPConnection(ns_name, server_cfg)
         except Exception as e:
@@ -157,7 +159,7 @@ async def app_connect_sources(self) -> None:
                 try:
                     await c.ensure_connected()
                     logger.info("MCP source '%s' connected (%d functions)",
-                                n, len(c.namespace._functions))
+                                n, len(c.namespace.functions))
                 except Exception as exc:
                     logger.warning(
                         "MCP source '%s' autostart failed: %s", n, exc)

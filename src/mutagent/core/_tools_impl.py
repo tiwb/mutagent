@@ -38,7 +38,7 @@ class ToolEntry:
     """
 
     name: str
-    callable: Callable
+    callable: Callable[..., Any]
     schema: ToolSchema
     source: Any
 
@@ -46,10 +46,10 @@ class ToolEntry:
 class ToolSetRuntime(mutobj.Extension[ToolSet]):
     """ToolSet internal runtime state."""
 
-    entries: dict[str, ToolEntry] | None = None
-    added_classes: set[type] | None = None
-    discovered: dict[type, dict[str, Any]] | None = None
-    last_registry_generation: int | None = None
+    entries: dict[str, ToolEntry] = mutobj.field(default_factory=dict[str, ToolEntry])
+    added_classes: set[type] = mutobj.field(default_factory=set[type])
+    discovered: dict[type, dict[str, Any]] = mutobj.field(default_factory=dict[type, dict[str, Any]])
+    last_registry_generation: int = 0
     current_tool_call: ToolUseBlock | None = None
     active_ui: _HasClose | None = None
 
@@ -59,27 +59,17 @@ def _runtime(tool_set: ToolSet) -> ToolSetRuntime:
 
 
 def _get_entries(self: ToolSet) -> dict[str, ToolEntry]:
-    """Get or initialize the internal entries dict (manually added tools)."""
-    rt = _runtime(self)
-    entries = rt.entries
-    if entries is None:
-        entries = {}
-        rt.entries = entries
-    return entries
+    """Get the internal entries dict (manually added tools)."""
+    return _runtime(self).entries
 
 
 def _get_added_classes(self: ToolSet) -> set[type]:
-    """Get or initialize the set of classes added via add()."""
-    rt = _runtime(self)
-    added = rt.added_classes
-    if added is None:
-        added = set()
-        rt.added_classes = added
-    return added
+    """Get the set of classes added via add()."""
+    return _runtime(self).added_classes
 
 
 def _get_discovered(self: ToolSet) -> dict[type, dict[str, Any]]:
-    """Get or initialize the auto-discovered toolkit state.
+    """Get the auto-discovered toolkit state.
 
     Returns dict mapping toolkit class -> {
         'instance': object,
@@ -88,20 +78,15 @@ def _get_discovered(self: ToolSet) -> dict[type, dict[str, Any]]:
         'module': str,       # module name for version tracking
     }
     """
-    rt = _runtime(self)
-    discovered = rt.discovered
-    if discovered is None:
-        discovered = {}
-        rt.discovered = discovered
-    return discovered
+    return _runtime(self).discovered
 
 
-def _get_current_tool_call(tool_set: ToolSet) -> ToolUseBlock | None:
+def get_current_tool_call(tool_set: ToolSet) -> ToolUseBlock | None:
     rt = ToolSetRuntime.get(tool_set)
     return None if rt is None else rt.current_tool_call
 
 
-def _get_active_ui(tool_set: ToolSet) -> _HasClose | None:
+def get_active_ui(tool_set: ToolSet) -> _HasClose | None:
     rt = ToolSetRuntime.get(tool_set)
     return None if rt is None else rt.active_ui
 
@@ -121,10 +106,10 @@ def _make_late_bound(instance: Any, method_name: str):
     """
     actual = getattr(instance, method_name)
     if inspect.iscoroutinefunction(actual):
-        async def wrapper(**kwargs):  # type: ignore[reportRedeclaration]
+        async def wrapper(**kwargs: Any):  # type: ignore[reportRedeclaration]
             return await getattr(instance, method_name)(**kwargs)
     else:
-        def wrapper(**kwargs):
+        def wrapper(**kwargs: Any):
             return getattr(instance, method_name)(**kwargs)
 
     # Copy metadata for schema generation
@@ -143,7 +128,7 @@ def _get_tool_prefix(cls: type) -> str:
 
     优先使用 _tool_prefix 显式指定，否则从类名推导（去掉 Toolkit 后缀）。
     """
-    explicit = cls.__dict__.get('_tool_prefix')
+    explicit = cls.__dict__.get('tool_prefix')
     if explicit is not None:
         return explicit
     name = cls.__name__
@@ -175,16 +160,16 @@ def _discover_toolkit_classes() -> list[type]:
 def _get_public_methods(cls: type) -> list[str]:
     """Get public method names defined directly on the class.
 
-    If the class defines ``_tool_methods``, only those methods are returned
+    If the class defines ``tool_methods``, only those methods are returned
     (whitelist mode). Otherwise, all public (non-underscore) callables in
     ``cls.__dict__`` are returned (default behavior, backward compatible).
     """
-    tool_methods = cls.__dict__.get('_tool_methods')
+    tool_methods = cls.__dict__.get('tool_methods')
     if tool_methods is not None:
         return [m for m in tool_methods if m in cls.__dict__]
     return [
         name for name, val in cls.__dict__.items()
-        if not name.startswith("_") and callable(val)
+        if not name.startswith("_") and callable(val) and name != "customize_schema"
     ]
 
 
@@ -205,8 +190,8 @@ def _make_entries_for_toolkit(cls: type, instance: Any) -> dict[str, ToolEntry]:
         decl_method = mutobj.get_declaration_func(cls, method_name) or getattr(cls, method_name)
         schema = _make_schema(decl_method, tool_name)
         # 允许 Toolkit 实例动态调整 schema
-        if hasattr(instance, '_customize_schema'):
-            schema = instance._customize_schema(method_name, schema)
+        if hasattr(instance, 'customize_schema'):
+            schema = instance.customize_schema(method_name, schema)
         entries[tool_name] = ToolEntry(
             name=tool_name,
             callable=late_bound,
@@ -228,7 +213,7 @@ def _refresh_discovered(self: ToolSet) -> None:
     current_gen = mutobj.get_registry_generation()
     rt = _runtime(self)
     last_gen = rt.last_registry_generation
-    if last_gen is not None and last_gen == current_gen:
+    if last_gen == current_gen:
         return
     rt.last_registry_generation = current_gen
 
@@ -394,27 +379,15 @@ def _param_to_schema(param: inspect.Parameter) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 @mutobj.impl(ToolSet.add)
-def tool_set_add(self: ToolSet, source: Any, methods: list[str] | None = None) -> None:
-    """Add tools from a source object or callable."""
+def tool_set_add(self: ToolSet, source: Toolkit, methods: list[str] | None = None) -> None:
+    """Add tools from a Toolkit instance."""
     entries = _get_entries(self)
 
-    if callable(source) and not isinstance(source, type) and methods is None:
-        # Single callable (function or lambda)
-        name = getattr(source, '__name__', 'unknown')
-        schema = _make_schema(source, name)
-        entries[name] = ToolEntry(
-            name=name, callable=source, schema=schema, source=source,
-        )
-        return
-
-    # Object instance: register its methods
     cls = type(source)
     cls_dict = cls.__dict__
 
     # 设置 Toolkit.owner 绑定
-    from .tools import Toolkit
-    if isinstance(source, Toolkit):
-        source.owner = self
+    source.owner = self
 
     # Track this class as manually added (skip in auto-discovery)
     added_classes = _get_added_classes(self)
@@ -435,8 +408,8 @@ def tool_set_add(self: ToolSet, source: Any, methods: list[str] | None = None) -
         decl_method = mutobj.get_declaration_func(cls, method_name) or getattr(cls, method_name)
         schema = _make_schema(decl_method, tool_name)
         # 允许 Toolkit 实例动态调整 schema
-        if hasattr(source, '_customize_schema'):
-            schema = source._customize_schema(method_name, schema)  # type: ignore[reportFunctionMemberAccess]
+        if hasattr(source, 'customize_schema'):
+            schema = source.customize_schema(method_name, schema)
         entries[tool_name] = ToolEntry(
             name=tool_name,
             callable=bound_method,
@@ -540,7 +513,7 @@ async def tool_set_dispatch(
 # Toolkit method implementations
 # ---------------------------------------------------------------------------
 
-@mutobj.impl(Toolkit._customize_schema)
+@mutobj.impl(Toolkit.customize_schema)
 def toolkit_customize_schema(self: Toolkit, method_name: str, schema: ToolSchema) -> ToolSchema:
     """Default implementation: return schema unchanged."""
     return schema

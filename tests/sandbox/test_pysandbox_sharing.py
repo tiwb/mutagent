@@ -31,9 +31,9 @@ from mutagent.sandbox._mcp_impl_sandbox import (
 from mutagent.sandbox._namespace_impl import (
     Namespace,
     NamespaceRegistry,
-    _render_function,
+    render_function,
 )
-from mutagent.sandbox._signature import _MISSING
+from mutagent.sandbox._signature import MISSING, _MissingSentinel
 from mutagent.sandbox._mcp_share import (
     PYSANDBOX_CAPABILITY,
     _describe_function,
@@ -130,10 +130,10 @@ class _FakeMCPClient:
 
 
 class _FakeHTTPClient:
-    """假 ``HTTPMCPClient`` — 仅暴露 ``_mcp`` 属性，被 PysandboxPeerClient 用。"""
+    """假 ``HTTPMCPClient`` — 仅暴露 ``mcp`` 属性，被 PysandboxPeerClient 用。"""
 
     def __init__(self, dispatch: JsonRpcDispatcher) -> None:
-        self._mcp = _FakeMCPClient(dispatch)
+        self.mcp = _FakeMCPClient(dispatch)
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +227,7 @@ class TestPeerBuild:
             name = "mutbot_local"
             state = "connected"
             last_error = None
-            _sandbox = _sandbox_with_loop(
+            sandbox = _sandbox_with_loop(
                 cast(asyncio.AbstractEventLoop, object()),
             )  # ns_func 不会被调用就不需要
 
@@ -241,11 +241,11 @@ class TestPeerBuild:
         ns = namespaces[0]
         assert ns.name == "mutbot"
         # D6: 描述带来源标记
-        assert "(shared from mutbot_local)" in ns._description
+        assert "(shared from mutbot_local)" in ns.description
         # 函数集齐
-        assert set(ns._functions.keys()) == {"status", "logs", "boom"}
+        assert set(ns.functions.keys()) == {"status", "logs", "boom"}
         # 与 conn 共享状态
-        assert ns._connection is conn
+        assert ns.connection is conn
         assert ns.connection_state == "connected"
 
 
@@ -263,7 +263,7 @@ class _FakeHTTPClientForConn:
 
     def __init__(self, dispatch: JsonRpcDispatcher,
                  capabilities: dict, tools: list[dict]) -> None:
-        self._mcp = _FakeMCPClient(dispatch)
+        self.mcp = _FakeMCPClient(dispatch)
         self._init_result = {
             "serverInfo": {"name": "fake", "title": "Fake Server"},
             "capabilities": capabilities,
@@ -315,7 +315,7 @@ class TestMCPConnectionPeerIntegration:
         try:
             conn = _mcp_impl.MCPConnection(
                 "mutbot_remote", {"url": "http://x"})
-            _impl(conn)._sandbox = _sandbox_with_loop(loop)
+            _impl(conn).sandbox = _sandbox_with_loop(loop)
             loop.run_until_complete(conn.reconnect())
             return conn, loop
         except Exception:
@@ -331,7 +331,7 @@ class TestMCPConnectionPeerIntegration:
             monkeypatch=monkeypatch)
         try:
             # tool 路径：echo 注册到主 namespace
-            assert "echo" in conn.namespace._functions
+            assert "echo" in conn.namespace.functions
             # peer 路径：mutbot namespace 融合进来
             assert len(_impl(conn).peer_namespaces) == 1
             assert _impl(conn).peer_namespaces[0].name == "mutbot"
@@ -350,8 +350,8 @@ class TestMCPConnectionPeerIntegration:
             monkeypatch=monkeypatch)
         try:
             # D2: pysandbox tool 被过滤
-            assert "pysandbox" not in conn.namespace._functions
-            assert "other" in conn.namespace._functions
+            assert "pysandbox" not in conn.namespace.functions
+            assert "other" in conn.namespace.functions
         finally:
             loop.run_until_complete(conn.close())
             loop.close()
@@ -366,7 +366,7 @@ class TestMCPConnectionPeerIntegration:
         try:
             assert _impl(conn).peer_namespaces == []
             # 没有 capability 时不过滤 pysandbox tool
-            assert "pysandbox" in conn.namespace._functions
+            assert "pysandbox" in conn.namespace.functions
         finally:
             loop.run_until_complete(conn.close())
             loop.close()
@@ -415,7 +415,7 @@ class TestMCPConnectionPeerIntegration:
         try:
             conn = _mcp_impl.MCPConnection(
                 "mutbot_remote", {"url": "http://x"})
-            _impl(conn)._sandbox = _sandbox_with_loop(loop)
+            _impl(conn).sandbox = _sandbox_with_loop(loop)
             # 不再抛错：conn 成功 connected，peer 列表含同名 ns
             loop.run_until_complete(conn.reconnect())
             assert conn.state == "connected"
@@ -532,7 +532,7 @@ class TestDescribeFunctionParams:
 
     def test_missing_sentinel_becomes_default_missing_flag(self) -> None:
 
-        def upload(paths=_MISSING):
+        def upload(paths=MISSING):
             return paths
 
         entry = _describe_function(upload)
@@ -589,7 +589,7 @@ class TestMakeNamespaceFuncSignature:
             name = "peer"
             state = "connected"
             last_error = None
-            _sandbox = _sandbox_with_loop(
+            sandbox = _sandbox_with_loop(
                 cast(asyncio.AbstractEventLoop, object()),
             )  # 本组测试不触发调用
         return _FakeConn()
@@ -671,7 +671,7 @@ class TestPeerBuildWithParams:
             name = "mutbot_local"
             state = "connected"
             last_error = None
-            _sandbox = _sandbox_with_loop(cast(asyncio.AbstractEventLoop, object()))
+            sandbox = _sandbox_with_loop(cast(asyncio.AbstractEventLoop, object()))
 
         conn = _FakeConn()
         client = _FakeHTTPClient(dispatch)
@@ -682,14 +682,14 @@ class TestPeerBuildWithParams:
         ns = namespaces[0]
 
         # logs(level: str = "INFO", last_n: int = 10)
-        logs = ns._functions["logs"]
+        logs = ns.functions["logs"]
         sig = inspect.signature(logs)
         assert list(sig.parameters) == ["level", "last_n"]
         assert sig.parameters["level"].default == "INFO"
         assert sig.parameters["last_n"].default == 10
 
         # status() — 无参
-        status = ns._functions["status"]
+        status = ns.functions["status"]
         assert list(inspect.signature(status).parameters) == []
 
         # 原 bug 断言：help 形式（func.__doc__）不再以 "logs(" 开头
@@ -701,7 +701,7 @@ class TestPeerBuildWithParams:
         sandbox = cast(SandboxEnv, _FakeSandbox())
         ns = Namespace("mutbot", description="mutbot runtime introspection")
 
-        def browser_file_upload(paths=_MISSING) -> dict[str, Any]:
+        def browser_file_upload(paths=MISSING) -> dict[str, Any]:
             return {"paths": paths}
 
         ns.register(
@@ -716,7 +716,7 @@ class TestPeerBuildWithParams:
             name = "mutbot_local"
             state = "connected"
             last_error = None
-            _sandbox = _sandbox_with_loop(cast(asyncio.AbstractEventLoop, object()))
+            sandbox = _sandbox_with_loop(cast(asyncio.AbstractEventLoop, object()))
 
         conn = _FakeConn()
         client = _FakeHTTPClient(dispatch)
@@ -725,9 +725,9 @@ class TestPeerBuildWithParams:
         namespaces = asyncio.run(
             build_peer_namespaces(conn, init_result, client))  # type: ignore[arg-type]
         peer_ns = namespaces[0]
-        upload = peer_ns._functions["browser_file_upload"]
+        upload = peer_ns.functions["browser_file_upload"]
         sig = inspect.signature(upload)
-        assert sig.parameters["paths"].default is _MISSING
+        assert sig.parameters["paths"].default is MISSING
         # iter3: _MISSING.__repr__ → <omit>
         assert str(sig) == "(paths=<omit>)"
 
@@ -743,7 +743,7 @@ class TestWrapAsyncSignature:
     覆盖 SDD ``refactor-wrapper-faithful-signature.md`` Phase 3 缺失步骤：
     - wrapper.__signature__ 持有去除 self 的真签名
     - 位置调用通过 sig.bind().apply_defaults() 规范化
-    - _render_function 输出中签名仅出现一次（原 bug 终结）
+    - render_function 输出中签名仅出现一次（原 bug 终结）
     """
 
     def test_signature_with_positional_params(self) -> None:
@@ -845,10 +845,10 @@ class TestWrapAsyncSignature:
             sig.bind()
 
     def test_render_function_single_signature(self) -> None:
-        """_render_function 对 wrapper 输出中签名字符串仅出现一次。
+        """render_function 对 wrapper 输出中签名字符串仅出现一次。
 
         原 bug：_make_namespace_func 把签名拼进 __doc__ 首行 + inspect.signature
-        又展示一份 → 双签名。验证 _render_function 只输出一份。
+        又展示一份 → 双签名。验证 render_function 只输出一份。
         """
 
         app = SandboxEnv()
@@ -867,7 +867,7 @@ class TestWrapAsyncSignature:
 
         wrapper = _wrap_async(app, method)
         wrapper.__name__ = "logs"
-        output = _render_function(wrapper, ns_name="test", fn_name="logs")
+        output = render_function(wrapper, ns_name="test", fn_name="logs")
 
         # 签名字符串 "(level: " 应该恰好出现一次
         assert output.count("(level:") == 1, (

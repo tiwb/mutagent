@@ -26,8 +26,8 @@ class SandboxToolkit(Toolkit):
         _state: 跨 tool call 共享的 REPL 变量字典（per-toolkit 实例隔离）。
     """
 
-    _tool_prefix = ""
-    _tool_methods = ["pysandbox"]
+    tool_prefix = ""
+    tool_methods = ["pysandbox"]
 
     _env: SandboxEnv
     _state: dict[str, Any]

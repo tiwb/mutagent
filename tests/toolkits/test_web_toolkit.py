@@ -229,10 +229,10 @@ class TestCustomizeSchema:
 class TestWebToolkitConfig:
 
     def test_no_api_key(self, toolkit):
-        assert toolkit.config.get("WebToolkit.jina_api_key") is None
+        assert toolkit.config.root.get("WebToolkit.jina_api_key") is None
 
     def test_with_api_key(self, toolkit_with_key):
-        assert toolkit_with_key.config.get("WebToolkit.jina_api_key") == "test-key-123"
+        assert toolkit_with_key.config.root.get("WebToolkit.jina_api_key") == "test-key-123"
 
 
 # ---------------------------------------------------------------------------

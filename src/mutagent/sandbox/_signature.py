@@ -33,6 +33,8 @@ import logging
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from mutio.codec.json import JsonObject, JsonValue
+
 logger = logging.getLogger(__name__)
 
 
@@ -51,7 +53,7 @@ class _MissingSentinel:
         return False
 
 
-_MISSING = _MissingSentinel()
+MISSING = _MissingSentinel()
 
 
 class _RawAnnotation:
@@ -78,7 +80,7 @@ _JSON_TYPE_MAP = {
 }
 
 
-def json_type_to_annotation(ptype: Any) -> str:
+def json_type_to_annotation(ptype: JsonValue) -> str:
     """JSON Schema ``type`` → Python 类型展示字符串。
 
     - 基础类型走映射表
@@ -105,7 +107,7 @@ def json_type_to_annotation(ptype: Any) -> str:
 
 # 渲染折行宽度阈值。signature 多行折行 / Annotations JSON 折行共用。
 # 80 列 = PEP 8 / Black 默认；agent 训练数据中高频出现的「Python 标准行宽」。
-_RENDER_LINE_WIDTH = 80
+RENDER_LINE_WIDTH = 80
 
 # 按「三处投影职责唯一」原则，已被 signature / Args 段表达的 schema
 # 字段不重复出现在 Annotations 段：
@@ -120,11 +122,6 @@ _SCHEMA_KEYS_TAKEN_BY_SIGNATURE = frozenset({
     "enum",
     "description",
 })
-
-
-def _format_json_literal(value: Any) -> str:
-    """返回 JSON 风格字面量。"""
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
 def _literal_part(value: Any) -> str:
@@ -161,7 +158,7 @@ def _format_literal_annotation(enum_values: Iterable[Any]) -> str | None:
 
 
 def _format_json_compact(
-    obj: Any,
+    obj: JsonValue,
     *,
     max_width: int,
     current_indent: int = 0,
@@ -230,9 +227,9 @@ def _format_json_compact(
 
 
 def format_annotations_section(
-    properties: Mapping[str, Any],
+    properties: JsonObject,
     *,
-    line_width: int = _RENDER_LINE_WIDTH,
+    line_width: int = RENDER_LINE_WIDTH,
 ) -> str:
     """根据 MCP schema properties 渲染 ``Annotations:`` 段。
 
@@ -245,11 +242,9 @@ def format_annotations_section(
     返回以 ``"Annotations:"`` 顶格头起始、后跟多个 ``    name: <json>``
     行的多行字符串；无字段时返空串。
     """
-    if not isinstance(properties, Mapping):
-        return ""
     entries: list[str] = []
     for pname, pinfo in properties.items():
-        if not isinstance(pname, str) or not isinstance(pinfo, Mapping):
+        if not isinstance(pinfo, Mapping):
             continue
         # 保顺剔除已被 signature / Args 段表达的字段
         remaining: dict[str, Any] = {
@@ -269,25 +264,24 @@ def format_annotations_section(
     return "Annotations:\n" + "\n".join(entries)
 
 
-def mcp_schema_to_specs(input_schema: Mapping[str, Any]) -> list[dict[str, Any]]:
+def mcp_schema_to_specs(input_schema: JsonObject) -> list[dict[str, Any]]:
     """把 MCP tool 的 ``input_schema``（JSON Schema）转为 ``ParamSpec`` 列表。
 
     - ``properties`` 的顺序被保留（Python 3.7+ dict 保序）
     - ``required`` 成员 → ``required=True``；其余参数显式写 ``required=False``
     - ``default`` 原样透传（JSON 原生值，可安全回传）
-    - optional-no-default 参数注入 ``default=_MISSING``，避免被错误构造成必填
+    - optional-no-default 参数注入 ``default=MISSING``，避免被错误构造成必填
     - ``enum`` → ``annotation`` 升级为 ``Literal[...]``（python first + IDE 补全）
     - ``type`` → ``annotation`` 字符串（仅在无 enum 时使用）
     """
     specs: list[dict[str, Any]] = []
     properties = input_schema.get("properties") or {}
-    required = set(input_schema.get("required") or [])
+    required_raw = input_schema.get("required")
+    required: set[str] = {str(x) for x in required_raw} if isinstance(required_raw, list) else set()
     if not isinstance(properties, Mapping):
         return specs
     for pname, pinfo in properties.items():
-        if not isinstance(pname, str):
-            continue
-        info = pinfo if isinstance(pinfo, Mapping) else {}
+        info = pinfo if isinstance(pinfo, Mapping) else JsonObject()
         spec: dict[str, Any] = {"name": pname}
         if pname in required:
             spec["required"] = True
@@ -296,7 +290,7 @@ def mcp_schema_to_specs(input_schema: Mapping[str, Any]) -> list[dict[str, Any]]
         if "default" in info:
             spec["default"] = info["default"]
         elif pname not in required:
-            spec["default"] = _MISSING
+            spec["default"] = MISSING
         # enum 优先升级 annotation 为 Literal[...]；堆退到 type 映射。
         # 字符串透传，与 _RawAnnotation 展示机制兼容。
         enum_values = info.get("enum")
@@ -350,7 +344,7 @@ def build_signature(specs: Iterable[Mapping[str, Any]]) -> inspect.Signature:
         if required is None:
             required = not has_default
         kind_hint = spec.get("kind")
-        kind: inspect._ParameterKind
+        kind: Any  # inspect._ParameterKind is private
         if kind_hint == "POSITIONAL_ONLY":
             kind = inspect.Parameter.POSITIONAL_ONLY
             if has_default:
@@ -382,7 +376,7 @@ def build_signature(specs: Iterable[Mapping[str, Any]]) -> inspect.Signature:
 
         # default：字段存在（即使值为 None）才算有默认值
         if spec.get("default_missing"):
-            default = _MISSING
+            default = MISSING
         else:
             default = spec["default"] if "default" in spec else inspect.Parameter.empty
 

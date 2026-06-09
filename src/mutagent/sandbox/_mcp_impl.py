@@ -12,6 +12,7 @@
 """
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -21,10 +22,13 @@ import sys
 import time
 from typing import Any, Optional, Union
 
+from mutio.codec.json import JsonObject, JsonValue, get_field, loads as _json_loads
+
 import httpx
 import mutobj
 
 from mutagent.sandbox._env_impl import (
+    peek_registry,
     sandbox_env_add_namespace,
     sandbox_env_remove_provider,
 )
@@ -71,7 +75,7 @@ _TRANSPORT_EXCEPTIONS: tuple[type[BaseException], ...] = (
 )
 
 
-def _is_transport_error(exc: BaseException) -> bool:
+def is_transport_error(exc: BaseException) -> bool:
     """判定异常是否属于「传输错误」。
 
     传输错误意味着连接本身已不可用，应触发重连。
@@ -96,7 +100,24 @@ def _is_transport_error(exc: BaseException) -> bool:
 # 内容提取
 # ---------------------------------------------------------------------------
 
-def _extract_content(result: dict[str, Any]) -> Any:
+
+def _extract_texts(content: JsonValue) -> list[str]:
+    """从 MCP content 数组提取 text 字段。"""
+    if not isinstance(content, list):
+        return []
+    texts: list[str] = []
+    for c in content:
+        if not isinstance(c, dict):
+            continue
+        t = c.get("text", "")
+        if not isinstance(t, str):
+            continue
+        tp = c.get("type")
+        if isinstance(tp, str) and tp == "text":
+            texts.append(t)
+    return texts
+
+def _extract_content(result: JsonObject) -> Any:
     """从 MCP tool 调用结果中提取内容。
 
     - isError=True 抛 :class:`MCPToolError`（业务错误，不触发重连）
@@ -106,10 +127,10 @@ def _extract_content(result: dict[str, Any]) -> Any:
     """
     content = result.get("content", [])
     if result.get("isError"):
-        texts = [c.get("text", "") for c in content if c.get("type") == "text"]
+        texts = _extract_texts(content)
         raise MCPToolError('\n'.join(texts) if texts else "MCP tool call failed")
 
-    texts = [c.get("text", "") for c in content if c.get("type") == "text"]
+    texts = _extract_texts(content)
     if len(texts) == 1:
         try:
             return json.loads(texts[0])
@@ -117,7 +138,7 @@ def _extract_content(result: dict[str, Any]) -> Any:
             return texts[0]
     elif texts:
         return '\n'.join(texts)
-    return content
+    return content if isinstance(content, list) else []
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +156,7 @@ class StdioMCPClient:
         # env 语义：None / {} → 直接继承父进程（Popen env=None）；
         # 非空 → 用 ``os.environ | env`` 合并下发，避免完全覆盖丢 PATH 等系统变量
         self._env = dict(env) if env else None
-        self._process: subprocess.Popen | None = None
+        self._process: subprocess.Popen[str] | None = None
         self._request_id = 0
 
     def _merged_env(self) -> dict[str, str] | None:
@@ -143,7 +164,7 @@ class StdioMCPClient:
             return None
         return {**os.environ, **self._env}
 
-    async def connect(self) -> dict[str, Any]:
+    async def connect(self) -> JsonObject:
         """启动 MCP server 子进程并完成 initialize 握手。"""
         merged_env = self._merged_env()
         try:
@@ -186,12 +207,19 @@ class StdioMCPClient:
         self._send_notification("notifications/initialized", {})
         return result
 
-    async def list_tools(self) -> list[dict[str, Any]]:
+    async def list_tools(self) -> list[JsonObject]:
         """获取 server 的 tool 列表。"""
         result = await self._request("tools/list", {})
-        return result.get("tools", [])
+        tools = result.get("tools", [])
+        if isinstance(tools, list):
+            tools_list: list[JsonObject] = []
+            for t in tools:
+                if isinstance(t, dict):
+                    tools_list.append(t)
+            return tools_list
+        return []
 
-    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+    async def call_tool(self, name: str, arguments: JsonObject) -> Any:
         """调用 tool 并返回结果。"""
         result = await self._request("tools/call", {
             "name": name,
@@ -220,7 +248,7 @@ class StdioMCPClient:
                     pass
             self._process = None
 
-    async def _request(self, method: str, params: dict) -> dict:
+    async def _request(self, method: str, params: JsonObject) -> JsonObject:
         """发送 JSON-RPC 请求并等待响应。"""
         self._request_id += 1
         msg = {
@@ -236,7 +264,7 @@ class StdioMCPClient:
         response = await loop.run_in_executor(None, self._send_and_receive, line)
         return response
 
-    def _send_and_receive(self, line: str) -> dict:
+    def _send_and_receive(self, line: str) -> JsonObject:
         """同步发送请求并读取响应。
 
         进程退出 / pipe 断 / stdout EOF 全部 wrap 为 :class:`MCPTransportError`，
@@ -262,20 +290,28 @@ class StdioMCPClient:
             if not resp_line:
                 raise MCPTransportError("MCP server closed unexpectedly")
             try:
-                resp = json.loads(resp_line)
+                resp_value = _json_loads(resp_line)
             except json.JSONDecodeError:
                 # 非 JSON 行通常是 server 把 logger 误写到 stdout — 跳过
                 continue
+            if not isinstance(resp_value, dict):
+                continue
+            resp: JsonObject = resp_value
             # 跳过通知（没有 id 的消息）
             if "id" in resp:
                 if "error" in resp:
                     err = resp["error"]
-                    # JSON-RPC 协议层错误：业务错而非传输断 — 仍按非传输处理
-                    raise RuntimeError(
-                        f"MCP error {err.get('code')}: {err.get('message')}")
-                return resp.get("result", {})
+                    if isinstance(err, dict):
+                        code = err.get("code", 0)
+                        msg = err.get("message", "Unknown error")
+                        raise RuntimeError(f"MCP error {code}: {msg}")
+                    raise RuntimeError("MCP error (unknown format)")
+                result = resp.get("result", {})
+                if isinstance(result, dict):
+                    return result
+                return {}
 
-    def _send_notification(self, method: str, params: dict) -> None:
+    def _send_notification(self, method: str, params: JsonObject) -> None:
         """发送 JSON-RPC 通知（不期望响应）。"""
         msg = {
             "jsonrpc": "2.0",
@@ -303,39 +339,39 @@ class HTTPMCPClient:
     """
 
     def __init__(self, url: str, timeout: float = 30.0):
-        self._mcp = MCPClient(url=url, timeout=timeout)
+        self.mcp = MCPClient(url=url, timeout=timeout)
 
-    async def connect(self) -> dict[str, Any]:
+    async def connect(self) -> JsonObject:
         """连接并完成 initialize 握手。"""
         try:
-            await self._mcp.connect()
+            await self.mcp.connect()
         except Exception as exc:
-            if _is_transport_error(exc):
+            if is_transport_error(exc):
                 raise MCPTransportError(f"MCP connect failed: {exc}") from exc
             raise
         return {
-            "serverInfo": self._mcp.server_info,
-            "capabilities": self._mcp.server_capabilities,
-            "instructions": getattr(self._mcp, "server_instructions", ""),
+            "serverInfo": self.mcp.server_info,
+            "capabilities": self.mcp.server_capabilities,
+            "instructions": getattr(self.mcp, "server_instructions", ""),
         }
 
-    async def list_tools(self) -> list[dict[str, Any]]:
+    async def list_tools(self) -> list[JsonObject]:
         """获取 server 的 tool 列表。"""
         try:
-            return await self._mcp.list_tools()
+            return await self.mcp.list_tools()
         except Exception as exc:
-            if _is_transport_error(exc):
+            if is_transport_error(exc):
                 raise MCPTransportError(f"list_tools failed: {exc}") from exc
             raise
 
-    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+    async def call_tool(self, name: str, arguments: JsonObject) -> Any:
         """调用 tool 并返回结果。"""
         try:
-            result = await self._mcp.call_tool(name, **arguments)
+            result = await self.mcp.call_tool(name, **arguments)
         except MCPToolError:
             raise
         except Exception as exc:
-            if _is_transport_error(exc):
+            if is_transport_error(exc):
                 raise MCPTransportError(f"call_tool failed: {exc}") from exc
             raise
         return _extract_content(result)
@@ -343,7 +379,7 @@ class HTTPMCPClient:
     async def close(self) -> None:
         """关闭连接。"""
         try:
-            await self._mcp.close()
+            await self.mcp.close()
         except Exception as exc:  # 关闭路径上的传输错可忽略
             logger.debug("HTTPMCPClient.close swallowed: %s", exc)
 
@@ -355,7 +391,7 @@ AnyMCPClient = Union[StdioMCPClient, HTTPMCPClient]
 # Client 工厂
 # ---------------------------------------------------------------------------
 
-def make_client(ns_name: str, server_config: dict[str, Any]) -> AnyMCPClient:
+def make_client(ns_name: str, server_config: JsonObject) -> AnyMCPClient:
     """根据 config 构造对应 transport 的 client（不连接）。
 
     Args:
@@ -369,24 +405,35 @@ def make_client(ns_name: str, server_config: dict[str, Any]) -> AnyMCPClient:
     """
     transport = server_config.get("transport", "stdio")
     if transport == "stdio":
-        command = server_config.get("command", "")
+        command = get_field(server_config, "command", str, default="")
         if not command:
             raise ValueError(
                 f"MCP source '{ns_name}': stdio transport requires 'command'")
+        args_raw = server_config.get("args", [])
+        args: list[str] = []
+        if isinstance(args_raw, list):
+            args = [str(x) for x in args_raw]
+        shell_raw = server_config.get("shell", False)
+        shell = bool(shell_raw) if isinstance(shell_raw, bool) else False
+        env: dict[str, str] | None = None
+        env_raw = server_config.get("env")
+        if isinstance(env_raw, dict):
+            env = {str(k): str(v) for k, v in env_raw.items()}
         return StdioMCPClient(
             command,
-            server_config.get("args", []),
-            shell=server_config.get("shell", False),
-            env=server_config.get("env"),
+            args,
+            shell=shell,
+            env=env,
         )
     if transport == "http":
-        url = server_config.get("url", "")
+        url = get_field(server_config, "url", str, default="")
         if not url:
             raise ValueError(
                 f"MCP source '{ns_name}': http transport requires 'url'")
+        timeout = get_field(server_config, "timeout", float, default=30.0)
         return HTTPMCPClient(
             url,
-            timeout=server_config.get("timeout", 30.0),
+            timeout=timeout,
         )
     raise ValueError(
         f"MCP source '{ns_name}': unknown transport {transport!r}")
@@ -396,7 +443,7 @@ def make_client(ns_name: str, server_config: dict[str, Any]) -> AnyMCPClient:
 # MCPConnection — 长生命周期连接代理
 # ---------------------------------------------------------------------------
 
-def _sanitize_ns_name(name: str) -> str:
+def sanitize_ns_name(name: str) -> str:
     """将 MCP namespace 名转换为合法 Python 标识符。
 
     规则：
@@ -407,11 +454,11 @@ def _sanitize_ns_name(name: str) -> str:
     - 以数字开头时前补 ``_``
     - 全特殊字符映射后为空时返回 ``_``
 
-    >>> _sanitize_ns_name("My MCP")
+    >>> sanitize_ns_name("My MCP")
     'My_MCP'
-    >>> _sanitize_ns_name("my-srv")
+    >>> sanitize_ns_name("my-srv")
     'my_srv'
-    >>> _sanitize_ns_name("!@#$")
+    >>> sanitize_ns_name("!@#$")
     '_'
     """
     sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', name)
@@ -434,10 +481,10 @@ class MCPConnectionImpl(mutobj.Implementation[MCPConnection]):
     - 根据连接结果增删 namespace 上的函数
     """
 
-    def __init__(self, ns_name: str, server_config: dict[str, Any]):
+    def __init__(self, ns_name: str, server_config: JsonObject):
         self._name = ns_name  # 原始名，用于日志
         self._config = server_config
-        self.retry_cooldown = max(0.0, float(server_config.get("retry_cooldown", 5.0)))
+        self.retry_cooldown = max(0.0, get_field(server_config, "retry_cooldown", float, default=5.0))
 
         self.client: Optional[AnyMCPClient] = None
         self._state: ConnectionState = "disconnected"
@@ -447,12 +494,12 @@ class MCPConnectionImpl(mutobj.Implementation[MCPConnection]):
 
         # 始终存在的 namespace；失败 / 未连状态下函数表为空
         # namespace 名用 sanitized 版本，确保可作为 Python 标识符访问
-        safe_name = _sanitize_ns_name(ns_name)
+        safe_name = sanitize_ns_name(ns_name)
         # provider_kind="tool"：本 conn 主 namespace 由 MCP tools 列表驱动
         self._namespace = Namespace(safe_name, description="",
                                     provider_kind="tool")
         owner = mutobj.implementation_owner(self)
-        self._namespace._connection = owner  # type: ignore[attr-defined]
+        self._namespace.connection = owner  # type: ignore[attr-defined]
         self._namespace.connection_state = self.state  # type: ignore[attr-defined]
         self._namespace.connection_error = None  # type: ignore[attr-defined]
 
@@ -468,7 +515,7 @@ class MCPConnectionImpl(mutobj.Implementation[MCPConnection]):
         # 以及 close 时摘除。允许为 None：单元测试或裸 conn 自测场景下
         # 不挂 sandbox，peer 同步逻辑自动 no-op。详见
         # ``mutagent/docs/specifications/feature-namespace-multi-provider.md``。
-        self._sandbox: Any | None = None
+        self.sandbox: Any | None = None
 
     # -- 只读属性 -------------------------------------------------------
 
@@ -492,7 +539,7 @@ class MCPConnectionImpl(mutobj.Implementation[MCPConnection]):
         return self._namespace
 
     @property
-    def config(self) -> dict[str, Any]:
+    def config(self) -> JsonObject:
         return self._config
 
     @property
@@ -633,11 +680,11 @@ class MCPConnectionImpl(mutobj.Implementation[MCPConnection]):
             if new_peer_namespaces:
                 logger.info(
                     "MCP '%s' connected (%d functions, merged %d namespaces from %s)",
-                    self.name, len(self._namespace._functions),
+                    self.name, len(self._namespace.functions),
                     len(new_peer_namespaces), self.name)
             else:
                 logger.info("MCP '%s' connected (%d functions)",
-                            self.name, len(self._namespace._functions))
+                            self.name, len(self._namespace.functions))
         except MCPTransportError as exc:
             reason = str(exc) or exc.__class__.__name__
             self._set_state("failed", reason)
@@ -687,7 +734,7 @@ class MCPConnectionImpl(mutobj.Implementation[MCPConnection]):
 
     # -- 外部查询 ----------------------------------------------------
 
-    def list_tools_metadata(self) -> list[dict[str, Any]]:
+    def list_tools_metadata(self) -> list[JsonObject]:
         """返回当前 conn 可见的所有 tool 元数据。
 
         覆盖本 conn 的主 namespace 与所有 peer namespaces。未连接 / 连失败
@@ -702,16 +749,16 @@ class MCPConnectionImpl(mutobj.Implementation[MCPConnection]):
                 "source_namespace": str,    # 隔属哪个 namespace（主 ns 或 peer ns 名）
             }
         """
-        result: list[dict[str, Any]] = []
+        result: list[JsonObject] = []
         seen: list[Namespace] = [self._namespace, *self._peer_namespaces]
         for ns in seen:
-            for fn_name, fn in ns._functions.items():
-                schema = getattr(fn, '_mcp_input_schema', None) or {}
-                desc = (
-                    getattr(fn, '_mcp_description', None)
-                    or ns._descriptions.get(fn_name, '')
-                    or ''
-                )
+            for fn_name, fn in ns.functions.items():
+                if isinstance(fn, McpTool):
+                    schema: JsonObject = fn.mcp_input_schema
+                    desc = fn.mcp_description or ns.descriptions.get(fn_name, '') or ''
+                else:
+                    schema = JsonObject()
+                    desc = ns.descriptions.get(fn_name, '') or ''
                 result.append({
                     "name": fn_name,
                     "description": desc,
@@ -734,11 +781,11 @@ class MCPConnectionImpl(mutobj.Implementation[MCPConnection]):
         - 在 ``old_peers`` 但不在 ``new_peers`` 的 → 从 sandbox 摘除
         - 在 ``new_peers`` 但不在 ``old_peers`` 的 → 注册到 sandbox
 
-        ``self._sandbox`` 为 None（未挂 sandbox 的纯 conn / 单元测试）时
+        ``self.sandbox`` 为 None（未挂 sandbox 的纯 conn / 单元测试）时
         no-op。peer 注册时不传 ``on_remove``——peer 是 conn 的从属，移除
         时只需从 registry 摘掉，不应反向触发 ``conn.close``（会循环）。
         """
-        sandbox = self._sandbox
+        sandbox = self.sandbox
         if sandbox is None:
             return
         new_ids = {id(p) for p in new_peers}
@@ -777,8 +824,8 @@ class MCPConnectionImpl(mutobj.Implementation[MCPConnection]):
             return False
         return (time.time() - self._last_attempt_at) < self.retry_cooldown
 
-    def _refresh_namespace(self, init_result: dict[str, Any],
-                           tools: list[dict[str, Any]]) -> None:
+    def _refresh_namespace(self, init_result: JsonObject,
+                           tools: list[JsonObject]) -> None:
         """根据最新握手 / tool 列表，刷新 namespace 的描述与函数表。
 
         - 删除当前不存在的旧 tool
@@ -786,50 +833,89 @@ class MCPConnectionImpl(mutobj.Implementation[MCPConnection]):
         """
         ns = self._namespace
         # 描述：优先 instructions，退化 serverInfo.title
-        ns_desc = (
-            (init_result.get("instructions") or "").strip()
-            or (init_result.get("serverInfo") or {}).get("title", "")
-            or ""
-        )
-        ns._description = ns_desc
+        ns_desc = get_field(init_result, "instructions", str, default="")
+        if not ns_desc:
+            si = init_result.get("serverInfo")
+            if isinstance(si, dict):
+                ns_desc = get_field(si, "title", str, default="")
+        ns.description = ns_desc
 
-        new_names = {t["name"] for t in tools}
+        new_names = {get_field(t, "name", str, default="") for t in tools}
         # 删除消失的 tool
-        for old in list(ns._functions.keys()):
+        for old in list(ns.functions.keys()):
             if old not in new_names:
-                ns._functions.pop(old, None)
-                ns._descriptions.pop(old, None)
+                ns.functions.pop(old, None)
+                ns.descriptions.pop(old, None)
 
         # 注册 / 覆盖
         for tool in tools:
-            tool_name = tool["name"]
-            tool_desc = tool.get("description", "")
+            tool_name = get_field(tool, "name", str, default="")
+            tool_desc = get_field(tool, "description", str, default="")
             input_schema = tool.get("inputSchema", {})
+            if not isinstance(input_schema, dict):
+                input_schema = {}
             fn = _make_tool_func(self, tool_name, tool_desc, input_schema)
             ns.register(tool_name, fn, tool_desc)
 
         # 函数表已变更，通知所属 view 失效缓存。
         # MergedNamespaceView._resolved_cache_key = tuple(id(p) for p in providers)，
-        # 只在 providers 列表变化时失效；本函数直改 ns._functions（id 不变），
+        # 只在 providers 列表变化时失效；本函数直改 ns.functions（id 不变），
         # 导致 view.displayed / primary / _description 拿到旧结果。
-        sandbox = self._sandbox
+        sandbox = self.sandbox
         if sandbox is not None:
-            from mutagent.sandbox._env_impl import _peek_registry
-
-            registry = _peek_registry(sandbox)
+            registry = peek_registry(sandbox)
             if registry is not None:
-                view = registry._views.get(ns.name)
+                view = registry.views.get(ns.name)
                 if view is not None:
                     view.invalidate()
 
 
 # ---------------------------------------------------------------------------
 # tool wrapper
+class McpTool:
+    """MCP tool Python 包装器 — 可调用，携带元数据属性。
+
+    替代匿名函数 + monkey-patched 属性（``mcp_input_schema`` /
+    ``mcp_description`` / ``_async_original``），类型安全。
+    所有属性通过 ``__init__`` 显式声明，消除 ``# type: ignore[attr-defined]``。
+    """
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        input_schema: JsonObject,
+        description: str,
+        call_async: Any,
+        bind_sig: inspect.Signature | None,
+        loop: asyncio.AbstractEventLoop,
+        doc: str,
+    ) -> None:
+        self.__name__ = name
+        self.__doc__ = doc
+        self.__signature__ = bind_sig
+        self._async_original = call_async
+        self.mcp_input_schema = input_schema
+        self.mcp_description = description
+        self._call_async = call_async
+        self._bind_sig = bind_sig
+        self._loop = loop
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        if self._bind_sig is not None:
+            bound = self._bind_sig.bind(*args, **kwargs)
+            bound.apply_defaults()
+            kwargs = dict(bound.arguments)
+        future = asyncio.run_coroutine_threadsafe(
+            self._call_async(**kwargs), self._loop)
+        return future.result(timeout=120)
+
+
 # ---------------------------------------------------------------------------
 
 def _make_tool_func(conn: MCPConnectionImpl, tool_name: str,
                     description: str,
-                    input_schema: dict) -> Any:
+                    input_schema: JsonObject) -> Any:
     """为一个 MCP tool 生成 Python 函数。
 
     闭包持有 :class:`MCPConnection` 而非裸 client：
@@ -878,24 +964,24 @@ def _make_tool_func(conn: MCPConnectionImpl, tool_name: str,
 
     doc = "\n\n".join(sections)
 
-    # conn._sandbox 推断为 Any | None，但此函数仅在 sandbox 已挂时调用，
+    # conn.sandbox 推断为 Any | None，但此函数仅在 sandbox 已挂时调用，
     # 闭包内用到 runtime loop 时 sandbox 必然存在
-    sandbox = conn._sandbox
+    sandbox = conn.sandbox
     assert sandbox is not None
-    from mutagent.sandbox._env_impl import _require_async_loop
+    from mutagent.sandbox._env_impl import require_async_loop
 
-    loop = _require_async_loop(sandbox)
+    loop = require_async_loop(sandbox)
 
-    async def call_with_retry(kwargs: dict[str, Any]) -> Any:
-        from mutagent.sandbox._signature import _MISSING
+    async def call_with_retry(kwargs: JsonObject) -> Any:
+        from mutagent.sandbox._signature import MISSING
 
-        kwargs = {k: v for k, v in kwargs.items() if v is not _MISSING}
+        kwargs = {k: v for k, v in kwargs.items() if v is not MISSING}
         await conn.ensure_connected()
         assert conn.client is not None  # ensure_connected 成功后必非 None
         try:
             return await conn.client.call_tool(tool_name, kwargs)
         except Exception as exc:
-            if not _is_transport_error(exc):
+            if not is_transport_error(exc):
                 raise
             # 传输错 → 重连一次，再试
             conn.mark_disconnected(str(exc) or exc.__class__.__name__)
@@ -918,27 +1004,12 @@ def _make_tool_func(conn: MCPConnectionImpl, tool_name: str,
     async def _tool_async(**kwargs: Any) -> Any:
         return await call_with_retry(kwargs)
 
-    if sig is not None:
-        _bind_sig = sig
-
-        def tool_func(*args: Any, **kwargs: Any) -> Any:  # type: ignore[reportRedeclaration]
-            bound = _bind_sig.bind(*args, **kwargs)
-            bound.apply_defaults()
-            future = asyncio.run_coroutine_threadsafe(
-                call_with_retry(dict(bound.arguments)), loop)
-            return future.result(timeout=120)
-
-        tool_func.__signature__ = sig  # type: ignore[attr-defined]
-    else:
-        def tool_func(**kwargs: Any) -> Any:  # type: ignore[misc, reportRedeclaration]
-            future = asyncio.run_coroutine_threadsafe(
-                call_with_retry(kwargs), loop)
-            return future.result(timeout=120)
-
-    tool_func.__name__ = tool_name
-    tool_func.__doc__ = doc
-    tool_func._async_original = _tool_async  # type: ignore[attr-defined]
-    # 保留 input_schema 供 panel / list_tools_metadata 展示使用
-    tool_func._mcp_input_schema = input_schema  # type: ignore[attr-defined]
-    tool_func._mcp_description = description  # type: ignore[attr-defined]
-    return tool_func
+    return McpTool(
+        name=tool_name,
+        input_schema=input_schema,
+        description=description,
+        call_async=_tool_async,
+        bind_sig=sig,
+        loop=loop,
+        doc=doc,
+    )

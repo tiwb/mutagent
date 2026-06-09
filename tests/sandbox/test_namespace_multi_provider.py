@@ -6,7 +6,7 @@
 - 冲突 WARNING 在 providers 签名内只触发一次，签名变化后重新触发一次
 - ``_do_rebuild`` D11：peer-namespace duplicate / build 异常都把 state 翻 failed
 - ``SandboxEnv`` add_namespace 同名不互相覆盖；remove_provider 按实例移除
-- ``_render_namespace`` 多 provider 显示 Providers + 函数归属 + shadowed
+- ``render_namespace`` 多 provider 显示 Providers + 函数归属 + shadowed
 """
 
 import asyncio
@@ -29,7 +29,7 @@ from mutagent.sandbox._namespace_impl import (
     MergedNamespaceView,
     Namespace,
     NamespaceRegistry,
-    _render_namespace,
+    render_namespace,
     _render_registry,
     displayed_of,
     flatten_view,
@@ -88,7 +88,7 @@ class TestRegistryMultiProvider:
         reg.add(ns)
         reg.remove_provider(ns)
         assert reg.get("foo") is None
-        assert "foo" not in reg._namespaces
+        assert "foo" not in reg.namespaces
 
     def test_remove_by_name_drops_all_providers(self):
         reg = NamespaceRegistry()
@@ -200,7 +200,7 @@ class TestMergedView:
         reg.add(a)
         reg.add(b)
         view = reg.get("foo")
-        funcs = view._functions
+        funcs = view.functions
         assert set(funcs.keys()) == {"x", "y", "z"}
         # y 的 active = a
         assert funcs["y"]() == 2
@@ -270,7 +270,7 @@ class TestRenderMultiProvider:
         reg.add(a)
         reg.add(b)
         view = reg.get("foo")
-        text = _render_namespace(view)
+        text = render_namespace(view)
         assert "Providers (2):" in text
         assert "kind=tool" in text and "kind=peer" in text
         # 归属用 #N 编号（引用 Providers 段）而非 kind#hex
@@ -296,7 +296,7 @@ class TestRenderMultiProvider:
         peer.register("status", lambda: 2, "status doc")
         reg.add(empty)
         reg.add(peer)
-        text = _render_namespace(reg.get("mutbot"))
+        text = render_namespace(reg.get("mutbot"))
         assert "Providers" not in text   # 不走 multi-provider 分支
         assert "[from" not in text       # 函数行不带归属标签
         assert "functions=0" not in text  # 空壳不出现
@@ -308,7 +308,7 @@ class TestRenderMultiProvider:
         ns = Namespace("foo", description="desc")
         ns.register("x", lambda: 1, "do x")
         reg.add(ns)
-        text = _render_namespace(reg.get("foo"))
+        text = render_namespace(reg.get("foo"))
         assert "Providers" not in text
         assert "do x" in text
 
@@ -329,7 +329,7 @@ class TestSandboxEnvMultiProvider:
         sandbox_env_add_namespace(sandbox, a)
         sandbox_env_add_namespace(sandbox, b)
         # _registry 下应有 2 providers
-        assert len(_get_registry(sandbox)._namespaces["foo"]) == 2
+        assert len(_get_registry(sandbox).namespaces["foo"]) == 2
 
     def test_remove_provider_by_instance(self):
         sandbox = SandboxEnv()
@@ -341,7 +341,7 @@ class TestSandboxEnvMultiProvider:
         # 仅移除 a
         ok = sandbox_env_remove_provider(sandbox, a)
         assert ok is True
-        assert _get_registry(sandbox)._namespaces["foo"] == [b]
+        assert _get_registry(sandbox).namespaces["foo"] == [b]
         # a 的 cleanup 被调用，b 未被触发
         assert cleanups == ["a"]
 
@@ -467,7 +467,7 @@ class TestDisplayedAndPrimary:
         assert isinstance(view, MergedNamespaceView)
         assert view.displayed == [a, b]
         assert view.primary is a
-        assert view._description == "A"
+        assert view.description == "A"
 
     def test_empty_shell_view_primary_falls_back(self):
         """全是空壳 provider 时，displayed=[]，primary 退化为 _providers[0]。"""
@@ -479,7 +479,7 @@ class TestDisplayedAndPrimary:
         view = reg.get("foo")
         assert view.displayed == []
         assert view.primary is a              # 首个 provider
-        assert view._description == "A-desc"  # primary._description
+        assert view.description == "A-desc"  # primary.description
 
     def test_shell_skipped_in_displayed_and_primary(self):
         """一个空壳 + 一个有函数 → displayed 只含后者，primary 是后者。"""
@@ -492,7 +492,7 @@ class TestDisplayedAndPrimary:
         view = reg.get("foo")
         assert view.displayed == [full]
         assert view.primary is full
-        assert view._description == "full"
+        assert view.description == "full"
 
     def test_fully_shadowed_provider_not_in_displayed(self):
         """全被 shadow 的 provider 不进 displayed，primary 是赢家。"""
@@ -543,14 +543,14 @@ class TestFlattenView:
         flat = flatten_view(view)
         assert isinstance(flat, Namespace)
         # description / kind 走 primary (= a)
-        assert flat._description == "A-desc"
+        assert flat.description == "A-desc"
         assert flat.provider_kind == "tool"
         # 函数集 = active 合并：shared (a) + only_a + only_b
-        assert set(flat._functions.keys()) == {"shared", "only_a", "only_b"}
-        assert flat._functions["shared"]() == "a-wins"
-        assert flat._functions["only_b"]() == "b-only"
+        assert set(flat.functions.keys()) == {"shared", "only_a", "only_b"}
+        assert flat.functions["shared"]() == "a-wins"
+        assert flat.functions["only_b"]() == "b-only"
         # description 也拿到了 active provider 的
-        assert flat._descriptions["shared"] == "a doc"
+        assert flat.descriptions["shared"] == "a doc"
 
     def test_flatten_does_not_carry_connection(self):
         """拍平后的临时 Namespace 不挂 ``_connection``/state，对端看不到连接状态。"""
@@ -563,7 +563,7 @@ class TestFlattenView:
         reg.add(a)
         reg.add(b)
         flat = flatten_view(reg.get("foo"))
-        assert flat._connection is None
+        assert flat.connection is None
         assert flat.connection_state is None
 
 
@@ -593,14 +593,14 @@ class TestAllNamespacesFlatten:
         assert "foo" in result
         flat = result["foo"]
         # 三个函数都在：shared (先注册先赢 = ext)、only_ext、only_local
-        assert set(flat._functions.keys()) == {"shared", "only_ext", "only_local"}
+        assert set(flat.functions.keys()) == {"shared", "only_ext", "only_local"}
         # 先注册先赢：ext 先 add，赢下 shared
-        assert flat._functions["shared"]() == "ext"
+        assert flat.functions["shared"]() == "ext"
         # description 走 primary（= ext）
-        assert flat._description == "ext-desc"
+        assert flat.description == "ext-desc"
 
         # 同一 SandboxEnv 走 exec_code 能看到同一集（验证不丢函数）
-        r = sandbox.exec_code("sorted(foo._functions.keys())")
+        r = sandbox.exec_code("sorted(foo.functions.keys())")
         assert r.get("result") == ["only_ext", "only_local", "shared"]
 
     def test_single_provider_returned_as_is(self):
@@ -623,7 +623,7 @@ def _impl(conn):
 class TestRefreshNamespaceInvalidatesView:
     """验证 ``_mcp_impl._refresh_namespace`` 后 view cache 失效。
 
-    原隐藏 bug：provider 列表 id 不变但 ns._functions 变动，
+    原隐藏 bug：provider 列表 id 不变但 ns.functions 变动，
     view.displayed / primary / _description 会拿到旧结果。
     """
 
@@ -642,14 +642,14 @@ class TestRefreshNamespaceInvalidatesView:
             # 会掩盖 cache 失效问题。
             other.register("placeholder", lambda: 0, "")
             sandbox_env_add_namespace(sandbox, conn.namespace)
-            _impl(conn)._sandbox = sandbox
+            _impl(conn).sandbox = sandbox
             sandbox_env_add_namespace(sandbox, other)
             view = _get_registry(sandbox).get("mysrv")
             assert isinstance(view, MergedNamespaceView)
             # 初始：conn.namespace 空壳 → displayed = [other]，primary = other
             assert view.displayed == [other]
             assert view.primary is other
-            assert view._description == "peer-desc"
+            assert view.description == "peer-desc"
 
             # 模拟 _refresh_namespace：给 conn.namespace 填函数 + 描述
             init_result = {
@@ -667,6 +667,6 @@ class TestRefreshNamespaceInvalidatesView:
             assert conn.namespace in view.displayed
             assert view.primary is conn.namespace
             # _description 走 primary = ns.description = "tool-desc"
-            assert view._description == "tool-desc"
+            assert view.description == "tool-desc"
         finally:
             loop.close()

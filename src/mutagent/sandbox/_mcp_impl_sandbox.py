@@ -17,10 +17,12 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
+from mutio.codec.json import JsonObject, JsonValue, get_field
+
 from mutagent.sandbox._namespace_impl import Namespace
 
 if TYPE_CHECKING:
-    from mutagent.sandbox._mcp_impl import HTTPMCPClient, MCPConnection, MCPConnectionImpl
+    from mutagent.sandbox._mcp_impl import HTTPMCPClient, MCPConnectionImpl
 
 logger = logging.getLogger(__name__)
 
@@ -40,22 +42,25 @@ class PysandboxPeerClient:
     def __init__(self, http_client: "HTTPMCPClient") -> None:
         self._http = http_client
 
-    async def list_namespaces(self) -> list[dict[str, Any]]:
+    async def list_namespaces(self) -> list[JsonObject]:
         """返回 ``[{name, description, function_count}, ...]``。"""
-        result = await self._http._mcp.request(
+        result = await self._http.mcp.request(
             "pysandbox/namespaces.list", {})
-        return list(result.get("namespaces", []))
+        namespaces = result.get("namespaces", [])
+        if isinstance(namespaces, list):
+            return namespaces  # type: ignore[return-value]
+        return []
 
-    async def describe_namespace(self, name: str) -> dict[str, Any]:
+    async def describe_namespace(self, name: str) -> JsonObject:
         """返回 ``{name, description, functions: {fn: {signature, doc, kwargs_schema}}}``。"""
-        return await self._http._mcp.request(
+        return await self._http.mcp.request(
             "pysandbox/namespaces.describe", {"namespace": name})
 
     async def call_namespace(
         self, namespace: str, name: str, arguments: dict[str, Any],
     ) -> Any:
         """调用远端 ``namespace.name(**arguments)``，返回原始 result。"""
-        return await self._http._mcp.request(
+        return await self._http.mcp.request(
             "pysandbox/namespaces.call",
             {"namespace": namespace, "name": name, "arguments": arguments},
         )
@@ -93,7 +98,7 @@ def _make_namespace_func(
     已去除 fallback 分发。
     """
     # 延迟 import 避免循环
-    from mutagent.sandbox._mcp_impl import HTTPMCPClient, _is_transport_error
+    from mutagent.sandbox._mcp_impl import HTTPMCPClient, is_transport_error
     from mutagent.sandbox._signature import try_build_signature
 
     async def call_with_retry(kwargs: dict[str, Any]) -> Any:
@@ -104,7 +109,7 @@ def _make_namespace_func(
         try:
             return await peer.call_namespace(ns_name, fn_name, kwargs)
         except Exception as exc:
-            if not _is_transport_error(exc):
+            if not is_transport_error(exc):
                 raise
             conn.mark_disconnected(str(exc) or exc.__class__.__name__)
             await conn.reconnect()
@@ -118,13 +123,13 @@ def _make_namespace_func(
     async def _ns_async(**kwargs: Any) -> Any:
         return await call_with_retry(kwargs)
 
-    # conn._sandbox 推断为 Any | None，但此函数仅在 sandbox 已挂时调用，
+    # conn.sandbox 推断为 Any | None，但此函数仅在 sandbox 已挂时调用，
     # 闭包内用到 runtime loop 时 sandbox 必然存在
-    sandbox = conn._sandbox
+    sandbox = conn.sandbox
     assert sandbox is not None
-    from mutagent.sandbox._env_impl import _require_async_loop
+    from mutagent.sandbox._env_impl import require_async_loop
 
-    loop = _require_async_loop(sandbox)
+    loop = require_async_loop(sandbox)
 
     # 构真签名：仅在 server 提供结构化 params 时尝试
     # 注意：空列表亦是合法入参（无参函数），用 is not None 而非真值测试
@@ -161,15 +166,17 @@ def _make_namespace_func(
 # ---------------------------------------------------------------------------
 
 
-def has_pysandbox_capability(init_result: dict[str, Any]) -> bool:
+def has_pysandbox_capability(init_result: JsonObject) -> bool:
     """检测对端 initialize 响应是否声明了 pysandbox capability（D3）。"""
-    caps = init_result.get("capabilities") or {}
-    return isinstance(caps.get("pysandbox"), dict)
+    caps = init_result.get("capabilities")
+    if isinstance(caps, dict):
+        return isinstance(caps.get("pysandbox"), dict)
+    return False
 
 
 async def build_peer_namespaces(
     conn: "MCPConnectionImpl",
-    init_result: dict[str, Any],
+    init_result: JsonObject,
     client: "HTTPMCPClient",
 ) -> list[Namespace]:
     """从对端拉取并构建 peer namespaces。
@@ -191,7 +198,7 @@ async def build_peer_namespaces(
     source_label = conn.name
     namespaces: list[Namespace] = []
     for item in items:
-        name = item.get("name") or ""
+        name = get_field(item, "name", str, default="")
         if not name:
             continue
         try:
@@ -202,7 +209,7 @@ async def build_peer_namespaces(
                 conn.name, name, exc)
             continue
 
-        base_desc = (described.get("description") or "").rstrip()
+        base_desc = get_field(described, "description", str, default="").rstrip()
         # D6: 在描述末尾追加来源标记
         if base_desc:
             full_desc = f"{base_desc}\n\n(shared from {source_label})"
@@ -211,19 +218,23 @@ async def build_peer_namespaces(
 
         ns = Namespace(name, description=full_desc, provider_kind="peer")
         # peer namespace 也要随 conn 一起跑状态，help() 才能正确显示
-        ns._connection = conn  # type: ignore[attr-defined]
+        ns.connection = conn  # type: ignore[attr-defined]
         ns.connection_state = conn.state  # type: ignore[attr-defined]
         ns.connection_error = conn.last_error  # type: ignore[attr-defined]
 
-        functions = described.get("functions") or {}
+        functions_raw = described.get("functions")
+        functions: dict[str, JsonValue] = functions_raw if isinstance(functions_raw, dict) else {}
         for fn_name, info in functions.items():
             if not isinstance(info, dict):
                 continue
-            doc = info.get("doc") or ""
-            # params 是新 server 的 additive 可选字段，缺失不影响老 server 兼容
-            params = info.get("params")
-            if not isinstance(params, list):
-                params = None
+            doc: str = ""
+            doc_raw = info.get("doc")
+            if isinstance(doc_raw, str):
+                doc = doc_raw
+            params: list[dict[str, Any]] | None = None
+            params_raw = info.get("params")
+            if isinstance(params_raw, list):
+                params = params_raw  # type: ignore[assignment]
             fn = _make_namespace_func(
                 conn, name, fn_name, doc, params)
             # description 取 doc 首段（与 tool 路径一致：register 时存全文）

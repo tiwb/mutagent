@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Optional
+
+from mutio.codec.json import JsonObject
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +69,7 @@ class ToolUseBlock(ContentBlock):
     type: str = "tool_use"
     id: str = ""                # 工具调用标识（LLM 生成）
     name: str = ""
-    input: dict[str, Any] = field(default_factory=dict)
+    input: JsonObject = field(default_factory=JsonObject)
 
 
 @dataclass
@@ -96,7 +98,7 @@ class TurnEndBlock(ContentBlock):
 
     type: str = "turn_end"
     turn_id: str = ""
-    duration: float = 0         # 整轮耗时（秒）
+    duration: float = 0.0       # 整轮耗时（秒）
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +114,7 @@ class Message:
     """
 
     role: str
-    blocks: list[ContentBlock] = field(default_factory=list)
+    blocks: list[ContentBlock] = field(default_factory=list[ContentBlock])
 
     # --- 标识 ---
     id: str = ""                # 消息标识（空 = 未分配，应用层生成）
@@ -121,8 +123,8 @@ class Message:
     model: str = ""             # AI 模型标识
 
     # --- 事实性元数据 ---
-    timestamp: float = 0
-    duration: float = 0         # 生成耗时（秒）
+    timestamp: float = 0.0
+    duration: float = 0.0       # 生成耗时（秒）
     input_tokens: int = 0
     output_tokens: int = 0
 
@@ -141,7 +143,7 @@ class ToolSchema:
 
     name: str
     description: str
-    input_schema: dict[str, Any] = field(default_factory=dict)
+    input_schema: JsonObject = field(default_factory=JsonObject)
 
 
 @dataclass

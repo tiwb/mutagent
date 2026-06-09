@@ -4,17 +4,18 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, AsyncGenerator, ClassVar
+from typing import AsyncGenerator, ClassVar
 from uuid import uuid4
 
 import httpx
 
+from mutio.codec.json import JsonObject, get_field
 from ._llm_impl import get_default_context_window
 from ._llm_impl_openai import (
-    _messages_to_openai,
-    _send_no_stream,
-    _send_stream,
-    _tools_to_openai,
+    messages_to_openai,
+    send_no_stream,
+    send_stream,
+    tools_to_openai,
 )
 from .llm import LLMApiClient
 from .messages import Message, StreamEvent, TextBlock, ToolSchema
@@ -165,16 +166,18 @@ class CopilotApiClient(LLMApiClient):
     account_type: str
     auth: CopilotAuth
 
-    def __init__(self, spec: dict):
-        model_id = str(spec.get("model_id", ""))
-        account_type = str(spec.get("account_type", "individual"))
+    def __init__(self, spec: JsonObject):
+        model_id = get_field(spec, "model_id", str, default="")
+        account_type = get_field(spec, "account_type", str, default="individual")
+        base_url_override = get_field(spec, "base_url", str, default="")
+        github_token_raw = get_field(spec, "github_token", str, default="")
         super().__init__(
             model_id=model_id,
             context_window=get_default_context_window(model_id),
-            base_url=_resolve_base_url(account_type, str(spec.get("base_url", ""))),
+            base_url=_resolve_base_url(account_type, base_url_override),
             account_type=account_type,
             auth=CopilotAuth(
-                github_token=str(spec.get("github_token", "")).strip() or None,
+                github_token=github_token_raw.strip() or None,
             ),
         )
 
@@ -186,7 +189,7 @@ class CopilotApiClient(LLMApiClient):
         stream: bool = True,
     ) -> AsyncGenerator[StreamEvent, None]:
         """Send messages to Copilot API and yield streaming events."""
-        openai_messages = _messages_to_openai(messages)
+        openai_messages = messages_to_openai(messages)
         if prompts:
             for msg in reversed(prompts):
                 for block in msg.blocks:
@@ -195,18 +198,18 @@ class CopilotApiClient(LLMApiClient):
                             0, {"role": "system", "content": block.text}
                         )
 
-        payload: dict[str, Any] = {
+        payload: JsonObject = {
             "model": self.model_id,
             "messages": openai_messages,
         }
         if tools:
-            payload["tools"] = _tools_to_openai(tools)
+            payload["tools"] = tools_to_openai(tools)
 
         headers = self.auth.get_headers()
         if stream:
-            async for event in _send_stream(self.base_url, payload, headers):
+            async for event in send_stream(self.base_url, payload, headers):
                 yield event
             return
 
-        async for event in _send_no_stream(self.base_url, payload, headers):
+        async for event in send_no_stream(self.base_url, payload, headers):
             yield event

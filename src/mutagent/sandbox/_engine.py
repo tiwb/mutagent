@@ -48,7 +48,7 @@ def execute(code: str, namespace: dict[str, Any],
         「已知前提」一节。
     """
     # 构建 globals：安全 builtins + 注入的命名空间
-    globals_dict = {}
+    globals_dict: dict[str, Any] = {}
     safe_builtins = dict(_SAFE_BUILTINS)
     globals_dict['__builtins__'] = safe_builtins
     globals_dict.update(namespace)
@@ -61,7 +61,7 @@ def execute(code: str, namespace: dict[str, Any],
     # 注入线程安全的 print，写入私有 buffer。
     # 用闭包捕获本次调用的 stdout_buf，避免 redirect_stdout 替换全局
     # sys.stdout 导致并发线程互相污染。
-    def _safe_print(*args, **kwargs):
+    def _safe_print(*args: Any, **kwargs: Any) -> None:
         kwargs.setdefault('file', stdout_buf)
         builtins.print(*args, **kwargs)
 
@@ -119,7 +119,7 @@ def _filter_traceback(exc: BaseException) -> str:
         return ""
     kept = frames[start:]
     # 外部函数帧：隐藏文件路径，只保留函数名
-    cleaned = []
+    cleaned: list[_tb_mod.FrameSummary] = []
     for f in kept:
         if f.filename != '<pysandbox>':
             cleaned.append(_tb_mod.FrameSummary('<external>', 0, f.name))

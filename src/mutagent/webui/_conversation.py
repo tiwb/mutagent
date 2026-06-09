@@ -30,7 +30,7 @@ from ._messages import (
 from ._session_page import ResumeSessionPage
 from ._toolbar import AgentStatusBar, AgentToolbar
 from ._settings_page import SettingsPage
-from mutgui import Callback, View, ViewBlock
+from mutgui import View, ViewBlock
 from mutgui.events import Event
 
 if TYPE_CHECKING:
@@ -116,25 +116,12 @@ def _extract_text(message: Message) -> str:
     )
 
 
-def _find_last_assistant(items: list[Any]) -> AssistantTextItem | None:
-    for item in reversed(items):
-        if isinstance(item, AssistantTextItem):
-            return item
-    return None
-
-
-def _reset_context_usage(context: AgentContext) -> None:
-    if context is None:
-        return
+def reset_context_usage(context: AgentContext) -> None:
     rt = ContextRuntime.get_or_create(context)
     rt.total_input_tokens = 0
     rt.total_output_tokens = 0
     rt.total_cache_read_tokens = 0
     rt.total_cache_write_tokens = 0
-
-
-def _replace_items(self: Conversation, items: list[Any]) -> None:
-    self.message_list.replace_items(items)
 
 
 def _message_has_user_text(message: Message) -> bool:
@@ -159,7 +146,7 @@ def _assistant_turn_ends(messages: list[Message], index: int) -> bool:
     return _message_has_user_text(messages[index + 1])
 
 
-def _rebuild_items_from_messages(messages: list[Message]) -> list[ChatItem]:
+def rebuild_items_from_messages(messages: list[Message]) -> list[ChatItem]:
     items: list[ChatItem] = []
     tool_item_ids: dict[str, str] = {}
     turn_input_tokens = 0
@@ -295,28 +282,18 @@ def conversation_init__(self: Conversation, *, agent: Agent, app: App) -> None:
     self.resume_page = ResumeSessionPage(conversation=self)
     self.settings_page = SettingsPage(conversation=self)
     self.toolbar = AgentToolbar(conversation=self)
-    from ._session_page import _start_session
-    _start_session(self)
+    from ._session_page import start_session
+    start_session(self)
     ext.subscription = agent.subscribe(partial(handle_agent_event, self))
 
 
 # ── 回调 helpers ────────────────────────────────────────────────
 
 
-async def _on_settings_request_close(self: Conversation) -> None:
-    """SettingsPage 请求关闭设置页 — 走 navigate_to 让路由 + URL 同步。"""
-    await self.navigate_to("")
-
-
-async def _on_settings_request_navigate(self: Conversation, route: str) -> None:
-    """SettingsPage 请求切到指定路由（菜单点击）— 同上。"""
-    await self.navigate_to(route)
-
-
 # ── 内部 helper 函数 ────────────────────────────────────────────
 
 
-def _refresh_shell(self: Conversation) -> None:
+def refresh_shell(self: Conversation) -> None:
     ext = _cext(self)
     self.status_bar.status = self.status
     self.status_bar.input_tokens = ext.turn_input_tokens
@@ -334,7 +311,7 @@ def _refresh_shell(self: Conversation) -> None:
     self.toolbar.invalidate()
 
 
-def _reset_runtime_state(self: Conversation) -> None:
+def reset_runtime_state(self: Conversation) -> None:
     ext = _cext(self)
     self.is_busy = False
     self.status = "idle"
@@ -381,7 +358,7 @@ async def _handle_send(self: Conversation, text: str) -> None:
     ext.turn_input_tokens = 0
     ext.turn_output_tokens = 0
     ext.turn_started_at = time.time()
-    _refresh_shell(self)
+    refresh_shell(self)
     self.invalidate()
     try:
         await self.agent.submit(text)
@@ -397,7 +374,7 @@ async def _handle_send(self: Conversation, text: str) -> None:
                 timestamp=time.time(),
             ),
         )
-        _refresh_shell(self)
+        refresh_shell(self)
         self.invalidate()
 
 
@@ -407,7 +384,7 @@ async def _handle_cancel(self: Conversation) -> None:
         logger.info("Conversation cancel requested")
         ext.cancel_requested = True
         self.status = "cancelling"
-        _refresh_shell(self)
+        refresh_shell(self)
         self.invalidate()
 
 
@@ -550,7 +527,7 @@ async def handle_agent_event(self: Conversation, event: StreamEvent) -> None:
                     timestamp=time.time(),
                 ),
             )
-    _refresh_shell(self)
+    refresh_shell(self)
     self.invalidate()
 
 
@@ -634,7 +611,7 @@ async def conversation_on_event(self: Conversation, event: Event) -> bool:
 
 @mutobj.impl(Conversation.render)
 def conversation_render(self: Conversation) -> ViewBlock:
-    _refresh_shell(self)
+    refresh_shell(self)
     in_settings = self.current_route.startswith("settings")
     if in_settings:
         children: list[Any] = [self.settings_page]
@@ -688,7 +665,7 @@ def conversation_change_model(self: Conversation, model_name: str) -> None:
     ext = _cext(self)
     ext.pending_model = model_name
     self.current_model = model_name
-    _refresh_shell(self)
+    refresh_shell(self)
     self.invalidate()
 
 

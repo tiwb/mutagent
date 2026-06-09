@@ -11,6 +11,8 @@ import re
 import sys
 from functools import lru_cache
 
+from mutio.codec.json import JsonObject, JsonValue
+
 # ---------------------------------------------------------------------------
 # Terminal capability detection
 # ---------------------------------------------------------------------------
@@ -189,7 +191,7 @@ _PREVIEW_LINES = 4        # default number of result preview lines
 _RESULT_INDENT = "    "   # result continuation indent (4 spaces)
 
 
-def _format_value(value) -> str:
+def _format_value(value: JsonValue) -> str:
     """Format a single argument value in Python style."""
     if isinstance(value, str):
         display = value
@@ -202,7 +204,7 @@ def _format_value(value) -> str:
     return r
 
 
-def _format_tool_call(name: str, args: dict) -> str:
+def format_tool_call(name: str, args: JsonObject) -> str:
     """Format a tool call as a Python-style function call string."""
     if not args:
         return f"{_INDENT}{name}()"
@@ -223,7 +225,7 @@ def _format_tool_call(name: str, args: dict) -> str:
     return "\n".join(lines)
 
 
-def _format_tool_result(content: str, is_error: bool) -> str:
+def format_tool_result(content: str, is_error: bool) -> str:
     """Format a tool result with preview and line count."""
     color = bold_red if is_error else green
     lines = content.split("\n") if content else [""]
@@ -250,19 +252,4 @@ def _format_tool_result(content: str, is_error: bool) -> str:
 # Task line colorization
 # ---------------------------------------------------------------------------
 
-_TASK_CHECK_RE = re.compile(r'^(\s*(?:[-*])\s*)(\[[ x~]\])(.*)')
 
-
-def _colorize_task_line(line: str) -> str:
-    """Colorize task checkmark in a task list line."""
-    m = _TASK_CHECK_RE.match(line)
-    if not m:
-        return line
-    prefix, check, rest = m.group(1), m.group(2), m.group(3)
-    if check == '[x]':
-        return prefix + green(check) + rest
-    elif check == '[~]':
-        return prefix + yellow(check) + rest
-    elif check == '[ ]':
-        return prefix + dim(check) + rest
-    return line

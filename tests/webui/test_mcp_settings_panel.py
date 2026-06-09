@@ -109,8 +109,8 @@ class _FakeConn:
         self._tools = tools or []
         # 仿造 namespace
         self.namespace = type("NS", (), {
-            "_functions": {t["name"]: lambda **k: None for t in self._tools},
-            "_descriptions": {},
+            "functions": {t["name"]: lambda **k: None for t in self._tools},
+            "descriptions": {},
             "name": name,
         })()
 
@@ -271,9 +271,9 @@ class TestPanelLoad:
             "a": {"transport": "stdio", "command": "echo"},
             "b": {"transport": "http", "url": "http://x/mcp"},
         })
-        assert set(panel._drafts.keys()) == {"a", "b"}
-        assert panel._drafts["a"]["transport"] == "stdio"
-        assert panel._drafts["b"]["url"] == "http://x/mcp"
+        assert set(panel.drafts.keys()) == {"a", "b"}
+        assert panel.drafts["a"]["transport"] == "stdio"
+        assert panel.drafts["b"]["url"] == "http://x/mcp"
         assert panel.current_step == "list"
 
     def test_picks_up_autostart_false_conn_via_sandbox(self):
@@ -284,8 +284,8 @@ class TestPanelLoad:
                                   "autostart": False}},
             conns={"lazy": conn},
         )
-        assert "lazy" in panel._conns
-        assert panel._conns["lazy"] is conn
+        assert "lazy" in panel.conns
+        assert panel.conns["lazy"] is conn
 
 
 # ─────────────────────────────────────────────────────────────
@@ -330,7 +330,7 @@ class TestButtonStates:
 
     def _row_button_id_label(self, panel: MCPSettingPanel, key: str
                              ) -> tuple[str, str, bool]:
-        row = _render_list_row(panel, key, panel._drafts[key])
+        row = _render_list_row(panel, key, panel.drafts[key])
         btn = row["$children"][1]
         return btn["$id"], btn["children"], bool(btn.get("disabled"))
 
@@ -555,7 +555,7 @@ class TestSaveFlow:
         )
         _edit_source("a", view=panel)
         _delete_source(view=panel)
-        assert "a" not in panel._drafts
+        assert "a" not in panel.drafts
         assert panel.current_step == "list"
         assert panel.notice.startswith("Removed")
         cfg_path = tmp_path / "config.json"
@@ -570,8 +570,8 @@ class TestSaveFlow:
         _edit_source("a", view=panel)
         panel.form_name = "b"
         _save_edits(view=panel)
-        assert "a" not in panel._drafts
-        assert "b" in panel._drafts
+        assert "a" not in panel.drafts
+        assert "b" in panel.drafts
         cfg_path = tmp_path / "config.json"
         data = json.loads(cfg_path.read_text(encoding="utf-8"))
         assert "b" in data["mcp_sources"]

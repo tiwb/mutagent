@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+
+from mutio.codec import json
+
+from mutio.codec.json import JsonArray, JsonObject
 
 from mutagent.app.config import Config
 from mutagent.core._llm_impl_anthropic import AnthropicApiClient
@@ -52,19 +54,16 @@ class LLMProxyRuntime:
         self._providers_signature = ""
         self._provider_cache: dict[str, LLMApiClient] = {}
 
-    def list_models(self) -> list[dict[str, Any]]:
+    def list_models(self) -> list[JsonObject]:
         self._refresh_cache_if_needed()
         return self.config.list_models()
 
     def resolve_model(self, model_name: str) -> ResolvedModel | None:
         self._refresh_cache_if_needed()
         normalized = normalize_model_name(model_name)
-        providers = self.config.get("providers", default={}) or {}
-        if not isinstance(providers, dict):
-            return None
-        for provider_name, provider_conf in providers.items():
-            if not isinstance(provider_conf, dict):
-                continue
+        providers = self.config.root.get_field("providers", JsonObject, default=JsonObject())
+        for provider_name in providers:
+            provider_conf = json.get_field(providers, provider_name, JsonObject, default={})
             match = self._match_provider_model(model_name, normalized, provider_conf)
             if match is None:
                 continue
@@ -79,7 +78,7 @@ class LLMProxyRuntime:
         return None
 
     def _refresh_cache_if_needed(self) -> None:
-        providers = self.config.get("providers", default={}) or {}
+        providers = self.config.root.get_field("providers", JsonObject, default=JsonObject())
         signature = json.dumps(providers, ensure_ascii=False, sort_keys=True)
         if signature == self._providers_signature:
             return
@@ -90,29 +89,40 @@ class LLMProxyRuntime:
         self,
         requested_model: str,
         normalized_model: str,
-        provider_conf: dict[str, Any],
+        provider_conf: JsonObject,
     ) -> str | None:
-        models = provider_conf.get("models", [])
-        if isinstance(models, list):
-            for model_id in models:
-                if not isinstance(model_id, str):
-                    continue
-                if model_id == requested_model or normalize_model_name(model_id) == normalized_model:
-                    return model_id
-        elif isinstance(models, dict):
-            for alias, model_id in models.items():
-                if not isinstance(alias, str) or not isinstance(model_id, str):
-                    continue
-                if alias == requested_model or normalize_model_name(alias) == normalized_model:
-                    return model_id
-                if model_id == requested_model or normalize_model_name(model_id) == normalized_model:
-                    return model_id
+        # Models can be list[str] (direct IDs) or list[dict[str, str]] (alias map)
+        models_list = json.get_field(provider_conf, "models", JsonArray, default=None, fallback=None)
+        if models_list is not None:
+            if not models_list:
+                return None
+            for item in models_list:
+                if isinstance(item, str):
+                    if item == requested_model or normalize_model_name(item) == normalized_model:
+                        return item
+                elif isinstance(item, dict):
+                    for alias_raw, model_id_raw in item.items():
+                        if isinstance(model_id_raw, str):
+                            if alias_raw == requested_model or normalize_model_name(alias_raw) == normalized_model:
+                                return model_id_raw
+                            if model_id_raw == requested_model or normalize_model_name(model_id_raw) == normalized_model:
+                                return model_id_raw
+            return None
+        # Try dict format (alias → model_id mapping)
+        models_dict_raw = provider_conf.get("models")
+        if isinstance(models_dict_raw, dict):
+            for alias_raw, model_id_raw in models_dict_raw.items():
+                if isinstance(model_id_raw, str):
+                    if alias_raw == requested_model or normalize_model_name(alias_raw) == normalized_model:
+                        return model_id_raw
+                    if model_id_raw == requested_model or normalize_model_name(model_id_raw) == normalized_model:
+                        return model_id_raw
         return None
 
     def _get_provider(
         self,
         provider_name: str,
-        provider_conf: dict[str, Any],
+        provider_conf: JsonObject,
         model_id: str,
     ) -> LLMApiClient:
         cache_key = json.dumps(
@@ -192,7 +202,7 @@ class LlmMessagesView(View):
     path = "/llm/v1/messages"
 
     async def post(self, request: Request) -> Response | StreamingResponse:
-        body = await request.json()
+        body = json.narrow_value(await request.json(), JsonObject)
         return await _proxy_request(body, client_format="anthropic")
 
 
@@ -200,12 +210,12 @@ class LlmCompletionsView(View):
     path = "/llm/v1/chat/completions"
 
     async def post(self, request: Request) -> Response | StreamingResponse:
-        body = await request.json()
+        body = json.narrow_value(await request.json(), JsonObject)
         return await _proxy_request(body, client_format="openai")
 
 
 async def _proxy_request(
-    body: dict[str, Any],
+    body: JsonObject,
     *,
     client_format: str,
 ) -> Response | StreamingResponse:
@@ -253,11 +263,11 @@ async def _proxy_request(
 
     t0 = time.monotonic()
     stream = bool(body.get("stream"))
-    request_meta = {
-        "stream": stream,
-        "translated": translated,
-        "tool_count": len(body.get("tools", [])) if isinstance(body.get("tools"), list) else 0,
-    }
+    tools_raw = json.get_field(body, "tools", JsonArray, default=[])
+    request_meta: JsonObject = {}
+    request_meta["stream"] = stream
+    request_meta["translated"] = translated
+    request_meta["tool_count"] = len(tools_raw)
     if stream:
         return await _proxy_stream(
             runtime=runtime,
@@ -288,11 +298,11 @@ async def _proxy_request(
 def _build_backend_request(
     *,
     resolved: ResolvedModel,
-    body: dict[str, Any],
+    body: JsonObject,
     client_format: str,
     backend_format: str,
     base_url: str,
-) -> tuple[str, dict[str, Any], bool]:
+) -> tuple[str, JsonObject, bool]:
     if client_format == backend_format:
         payload = dict(body)
         payload["model"] = resolved.backend_model
@@ -318,12 +328,12 @@ async def _proxy_no_stream(
     runtime: LLMProxyRuntime,
     endpoint: str,
     headers: dict[str, str],
-    body: dict[str, Any],
+    body: JsonObject,
     client_format: str,
     backend_format: str,
     resolved: ResolvedModel,
     translated: bool,
-    request_meta: dict[str, Any],
+    request_meta: JsonObject,
     started_at: float,
 ) -> Response:
     body = dict(body)
@@ -332,9 +342,9 @@ async def _proxy_no_stream(
         resp = await client.post(endpoint, headers=headers, json=body)
     duration_ms = int((time.monotonic() - started_at) * 1000)
     try:
-        data = resp.json()
+        data: JsonObject = resp.json()  # type: ignore[assignment]
     except Exception:
-        data = {"error": {"message": resp.text}}
+        data: JsonObject = {"error": {"message": str(resp.text)}}
     if resp.status_code != 200:
         message = _extract_error_message(data)
         return _error_response(
@@ -370,12 +380,12 @@ async def _proxy_stream(
     runtime: LLMProxyRuntime,
     endpoint: str,
     headers: dict[str, str],
-    body: dict[str, Any],
+    body: JsonObject,
     client_format: str,
     backend_format: str,
     resolved: ResolvedModel,
     translated: bool,
-    request_meta: dict[str, Any],
+    request_meta: JsonObject,
     started_at: float,
 ) -> StreamingResponse:
     body = dict(body)
@@ -390,9 +400,9 @@ async def _proxy_stream(
                 if resp.status_code != 200:
                     error_text = await resp.aread()
                     try:
-                        payload = json.loads(error_text)
+                        payload: JsonObject = json.loads(error_text)  # type: ignore[assignment]
                     except json.JSONDecodeError:
-                        payload = {"error": {"message": error_text.decode("utf-8", errors="replace")}}
+                        payload: JsonObject = {"error": {"message": error_text.decode("utf-8", errors="replace")}}
                     message = _extract_error_message(payload)
                     for chunk in _error_stream_chunks(client_format, message):
                         yield chunk
@@ -465,12 +475,12 @@ def _endpoint_for_format(base_url: str, backend_format: str) -> str:
     return f"{base_url}/chat/completions" if backend_format == "openai" else f"{base_url}/v1/messages"
 
 
-def _extract_error_message(payload: dict[str, Any]) -> str:
-    if not isinstance(payload, dict):
-        return str(payload)
+def _extract_error_message(payload: JsonObject) -> str:
     error = payload.get("error")
-    if isinstance(error, dict) and error.get("message"):
-        return str(error["message"])
+    if isinstance(error, dict):
+        msg = error.get("message")
+        if isinstance(msg, str) and msg:
+            return msg
     if isinstance(error, str):
         return error
     return json.dumps(payload, ensure_ascii=False)
@@ -526,33 +536,36 @@ def _error_stream_chunks(client_format: str, message: str) -> list[bytes]:
     return [f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()]
 
 
-def _usage_from_payload(payload: dict[str, Any], response_format: str) -> dict[str, int]:
+def _usage_from_payload(payload: JsonObject, response_format: str) -> dict[str, int]:
     if response_format == "anthropic":
-        usage = payload.get("usage", {})
-        return {
-            k: int(v)
-            for k, v in usage.items()
-            if isinstance(v, (int, float))
-        }
-    usage = payload.get("usage", {})
+        usage_raw = json.get_field(payload, "usage", JsonObject, default={})
+        result: dict[str, int] = {}
+        for k, v in usage_raw.items():
+            if isinstance(v, (int, float)):
+                result[k] = int(v)
+        return result
+    usage_raw = json.get_field(payload, "usage", JsonObject, default={})
     result: dict[str, int] = {}
-    if "prompt_tokens" in usage:
-        result["input_tokens"] = int(usage["prompt_tokens"])
-    if "completion_tokens" in usage:
-        result["output_tokens"] = int(usage["completion_tokens"])
-    prompt_details = usage.get("prompt_tokens_details", {})
-    if isinstance(prompt_details, dict) and "cached_tokens" in prompt_details:
-        result["cache_read_input_tokens"] = int(prompt_details["cached_tokens"])
+    result["input_tokens"] = json.get_field(usage_raw, "prompt_tokens", int, default=0)
+    result["output_tokens"] = json.get_field(usage_raw, "completion_tokens", int, default=0)
+    prompt_details = usage_raw.get("prompt_tokens_details")
+    if isinstance(prompt_details, dict):
+        result["cache_read_input_tokens"] = json.get_field(prompt_details, "cached_tokens", int, default=0)
     return result
 
 
 def _usage_from_stream(lines: list[str], backend_format: str) -> dict[str, int]:
     summary = summarize_openai_sse(lines) if backend_format == "openai" else summarize_anthropic_sse(lines)
-    return dict(summary.get("usage", {}))
+    usage_raw = json.get_field(summary, "usage", JsonObject, default={})
+    result: dict[str, int] = {}
+    for k, v in usage_raw.items():
+        if isinstance(v, (int, float)):
+            result[k] = int(v)
+    return result
 
 
 def _default_log_dir(config: Config) -> Path:
-    base_dir = Path(str(config.get("logging.log_dir", default=".mutagent/logs")))
+    base_dir = Path(str(config.root.get_field("logging.log_dir", str, default=".mutagent/logs")))
     return base_dir / "proxy"
 
 

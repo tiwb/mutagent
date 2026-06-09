@@ -2,7 +2,7 @@
 
 import pytest
 
-from mutagent.core._tools_impl import ToolSetRuntime, _get_current_tool_call
+from mutagent.core._tools_impl import ToolSetRuntime, get_current_tool_call
 from mutagent.core.tools import ToolSet, Toolkit
 from mutagent.core.messages import ToolUseBlock, ToolSchema
 import mutobj
@@ -106,21 +106,6 @@ class TestToolSetAddFromObject:
         schemas = tool_set.get_tools()
         assert len(schemas) == 1
         assert schemas[0].name == "Mock-define"
-
-
-class TestToolSetAddCallable:
-
-    def test_add_standalone_function(self):
-        def greet(name: str, greeting: str = "Hello") -> str:
-            """Greet someone by name."""
-            return f"{greeting}, {name}!"
-
-        tool_set = ToolSet()
-        tool_set.add(greet)
-        schemas = tool_set.get_tools()
-        assert len(schemas) == 1
-        assert schemas[0].name == "greet"
-        assert "Greet someone" in schemas[0].description
 
 
 # ---------------------------------------------------------------------------
@@ -267,20 +252,15 @@ class TestToolSetEmptyState:
 class TestToolSetMultipleSources:
 
     def test_add_multiple_objects(self):
-        """Adding tools from multiple sources accumulates them."""
-
-        def custom_tool(x: int) -> str:
-            """A custom tool."""
-            return str(x * 2)
-
+        """Adding tools from multiple Toolkit instances accumulates them."""
         ts = ToolSet()
         ts.add(MockToolkit(), methods=["inspect"])
-        ts.add(custom_tool)
+        ts.add(MockToolkit(), methods=["define"])
 
         schemas = ts.get_tools()
         names = {s.name for s in schemas}
         assert "Mock-inspect" in names
-        assert "custom_tool" in names
+        assert "Mock-define" in names
 
     def test_add_multiple_toolkits(self):
         """Adding two different Toolkit instances."""
@@ -342,7 +322,7 @@ class TestToolNamingConvention:
     def test_explicit_tool_prefix(self):
         """_tool_prefix 显式指定时覆盖类名推导。"""
         class MyTools(Toolkit):
-            _tool_prefix = "Util"
+            tool_prefix = "Util"
 
             def ping(self) -> str:
                 """Ping."""
@@ -356,7 +336,7 @@ class TestToolNamingConvention:
     def test_empty_tool_prefix(self):
         """_tool_prefix 为空字符串时，工具名即方法名。"""
         class FlatTools(Toolkit):
-            _tool_prefix = ""
+            tool_prefix = ""
 
             def ping(self) -> str:
                 """Ping."""
@@ -490,18 +470,6 @@ class TestToolkitOwnerBinding:
         ts.add(toolkit)
         assert toolkit.owner is ts
 
-    def test_owner_not_set_for_non_toolkit(self):
-        """add() 普通对象时不设置 owner。"""
-        class NotAToolkit:
-            def greet(self) -> str:
-                """Greet."""
-                return "hi"
-
-        obj = NotAToolkit()
-        ts = ToolSet()
-        ts.add(obj)
-        assert not hasattr(obj, 'owner')
-
     def test_owner_default_none(self):
         """Toolkit 默认 owner 为 None。"""
         class FreshToolkit(Toolkit):
@@ -527,7 +495,7 @@ class TestDispatchStateTracking:
             def spy(self) -> str:
                 """Capture current tool call."""
                 nonlocal captured_tool_call
-                captured_tool_call = _get_current_tool_call(self.owner)
+                captured_tool_call = get_current_tool_call(self.owner)
                 return "spied"
 
         ts = ToolSet()
@@ -538,7 +506,7 @@ class TestDispatchStateTracking:
         await ts.dispatch(block)
 
         assert captured_tool_call is block
-        assert _get_current_tool_call(ts) is None
+        assert get_current_tool_call(ts) is None
 
     async def test_current_tool_call_cleared_on_error(self):
         """工具抛异常后 _current_tool_call 仍被清除。"""
@@ -554,7 +522,7 @@ class TestDispatchStateTracking:
         result = await ts.dispatch(block)
 
         assert result.is_error
-        assert _get_current_tool_call(ts) is None
+        assert get_current_tool_call(ts) is None
 
     async def test_active_ui_cleanup_on_dispatch_end(self):
         """dispatch 结束后清理 _active_ui。"""
@@ -607,16 +575,16 @@ class TestDispatchStateTracking:
 
 
 # ---------------------------------------------------------------------------
-# Toolkit._tool_methods Whitelist Tests
+# Toolkit.tool_methods Whitelist Tests
 # ---------------------------------------------------------------------------
 
 class TestToolMethods:
-    """Tests for Toolkit._tool_methods whitelist."""
+    """Tests for Toolkit.tool_methods whitelist."""
 
     def test_tool_methods_whitelist(self):
-        """Only methods in _tool_methods should be exposed."""
+        """Only methods in tool_methods should be exposed."""
         class SelectiveToolkit(Toolkit):
-            _tool_methods = ["search"]
+            tool_methods = ["search"]
 
             def search(self, query: str) -> str:
                 """Search."""
@@ -634,9 +602,9 @@ class TestToolMethods:
         assert "Selective-parse" not in names
 
     def test_tool_methods_empty_list(self):
-        """Empty _tool_methods means no methods exposed."""
+        """Empty tool_methods means no methods exposed."""
         class NoToolsKit(Toolkit):
-            _tool_methods = []
+            tool_methods = []
 
             def hidden(self) -> str:
                 """Hidden."""
@@ -648,7 +616,7 @@ class TestToolMethods:
         assert len(schemas) == 0
 
     def test_no_tool_methods_backward_compat(self):
-        """Without _tool_methods, all public methods exposed (backward compat)."""
+        """Without tool_methods, all public methods exposed (backward compat)."""
         class FullToolkit(Toolkit):
             def alpha(self) -> str:
                 """Alpha."""
@@ -676,7 +644,7 @@ class TestDiscoverable:
     def test_discoverable_false_still_works_with_add(self):
         """_discoverable=False toolkit can still be added manually."""
         class ManualKit(Toolkit):
-            _discoverable = False
+            discoverable = False
 
             def manual_tool(self) -> str:
                 """Manual."""
@@ -695,4 +663,4 @@ class TestDiscoverable:
                 """Default."""
                 return "ok"
 
-        assert DefaultKit._discoverable is True  # type: ignore[reportUnknownMemberType]
+        assert DefaultKit.discoverable is True  # type: ignore[reportUnknownMemberType]

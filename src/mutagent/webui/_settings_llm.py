@@ -10,17 +10,17 @@ from __future__ import annotations
 
 import re
 from copy import deepcopy
-from typing import Any, ClassVar, TYPE_CHECKING
+from typing import Any, ClassVar, TYPE_CHECKING, cast
 
 import httpx
 import mutobj
+from mutio.codec.json import JsonObject, get_field, narrow_value
 from mutagent.core.llm import LLMApiClient
 from ._settings_page import SettingPanel
 from mutgui import Bind, Callback, Expr, ViewBlock
 from mutgui.view import ViewId
 
 if TYPE_CHECKING:
-    from ._conversation import Conversation
     from ._settings_page import SettingsPage
 
 _CHAT_MODEL_PREFIXES = ("gpt-", "o1", "o3", "o4", "chatgpt-")
@@ -59,7 +59,7 @@ class LLMSettingPanel(SettingPanel):
     panel_title: ClassVar[str] = "LLM API 设置"
     panel_placement: ClassVar[str] = "settings:10/10"
 
-    _drafts: dict[str, dict[str, Any]] = mutobj.field(default_factory=dict)
+    drafts: dict[str, dict[str, Any]] = mutobj.field(default_factory=dict)
 
     id: ViewId = "llm-settings-panel"
 
@@ -102,22 +102,21 @@ class LLMSettingPanel(SettingPanel):
 # ═══════════════════════════════════════════════════════════════
 
 
-def _normalize_models(value: Any) -> list[str]:
+def _normalize_models(value: list[str] | str) -> list[str]:
     if isinstance(value, list):
+        items = cast(list[object], value)
         result: list[str] = []
-        for item in value:
+        for item in items:
             text = str(item).strip()
             if text and text not in result:
                 result.append(text)
         return result
-    if isinstance(value, str):
-        result = []
-        for part in value.split(","):
-            text = part.strip()
-            if text and text not in result:
-                result.append(text)
-        return result
-    return []
+    result = []
+    for part in value.split(","):
+        text = part.strip()
+        if text and text not in result:
+            result.append(text)
+    return result
 
 
 def _resolve_api_type(provider_path: str) -> str:
@@ -204,15 +203,8 @@ def _provider_default_models(provider_path: str) -> list[str]:
     return list(preset["models"])
 
 
-def _provider_add_button_id(provider_path: str) -> str:
-    return f"add-{_provider_name_seed(provider_path)}"
-
-
 def _available_provider_types() -> list[str]:
     """返回所有可用 provider 的 api_type，预设类型排在前面。"""
-    from mutagent.core import _llm_impl_anthropic  # noqa: F401
-    from mutagent.core import _llm_impl_openai  # noqa: F401
-
     types: list[str] = []
     for cls in mutobj.discover_subclasses(LLMApiClient):
         if cls is LLMApiClient:
@@ -239,13 +231,13 @@ def _make_provider_draft(name: str, provider_path: str) -> dict[str, Any]:
     }
 
 
-def _draft_from_config(key: str, config: dict[str, Any]) -> dict[str, Any]:
-    provider_path = str(config.get("type", "")).strip()
+def _draft_from_config(key: str, config: JsonObject) -> JsonObject:
+    provider_path = get_field(config, "type", str, default="").strip()
     if not provider_path:
         api_type = _ANTHROPIC_API_TYPE
     else:
         api_type = _resolve_api_type(provider_path) or _ANTHROPIC_API_TYPE
-    models = _normalize_models(config.get("models", []))
+    models = get_field(config, "models", list[str], default=list[str]())
     discovered = _provider_default_models(api_type)
     for model in models:
         if model not in discovered:
@@ -253,8 +245,8 @@ def _draft_from_config(key: str, config: dict[str, Any]) -> dict[str, Any]:
     return {
         "name": key,
         "type": api_type,
-        "base_url": str(config.get("base_url", _provider_base_url_default(api_type))),
-        "auth_token": str(config.get("auth_token", "")),
+        "base_url": get_field(config, "base_url", str, default=_provider_base_url_default(api_type)),
+        "auth_token": get_field(config, "auth_token", str, default=""),
         "models": models,
         "discovered_models": discovered,
     }
@@ -262,7 +254,7 @@ def _draft_from_config(key: str, config: dict[str, Any]) -> dict[str, Any]:
 
 def _all_model_names(self: LLMSettingPanel) -> list[str]:
     names: list[str] = []
-    for draft in self._drafts.values():
+    for draft in self.drafts.values():
         for model in _normalize_models(draft.get("models", [])):
             if model not in names:
                 names.append(model)
@@ -300,7 +292,7 @@ def _persist_current_draft(self: LLMSettingPanel) -> dict[str, Any]:
 def _unique_provider_name(self: LLMSettingPanel, base: str) -> str:
     candidate = base
     index = 2
-    while candidate in self._drafts:
+    while candidate in self.drafts:
         candidate = f"{base}-{index}"
         index += 1
     return candidate
@@ -314,7 +306,7 @@ def _model_family(name: str) -> str:
 
 
 def _major_prefix(family: str) -> str:
-    prefix = []
+    prefix: list[str] = []
     for char in family:
         if char.isalpha():
             prefix.append(char)
@@ -390,8 +382,8 @@ async def _discover_remote_models(
 
 def _write_config(self: LLMSettingPanel, providers: dict[str, dict[str, Any]], default_model: str) -> None:
     config = self.page.conversation.app.config
-    config.set("providers", providers, source="webui")
-    config.set("default_model", default_model, source="webui")
+    config.root.set("providers", providers, source="webui")
+    config.root.set("default_model", default_model, source="webui")
     config.save()
 
 
@@ -401,19 +393,19 @@ def _set_message(self: LLMSettingPanel, *, error: str = "", notice: str = "") ->
 
 
 def _load_from_config(self: LLMSettingPanel) -> None:
-    providers = self.page.conversation.app.config.get("providers", default={}) or {}
-    self._drafts = {
-        key: _draft_from_config(key, deepcopy(config))
-        for key, config in providers.items()
-        if isinstance(config, dict)
-    }
-    self.default_model = str(self.page.conversation.app.config.get("default_model", default="") or "")
+    providers = self.page.conversation.app.config.root.get_field("providers", JsonObject, default=JsonObject())
+    self.drafts = {}
+    for key, config in providers.items():
+        cfg = narrow_value(config, JsonObject, fallback=None)
+        if cfg is not None:
+            self.drafts[key] = _draft_from_config(key, deepcopy(cfg))
+    self.default_model = str(self.page.conversation.app.config.root.get_field("default_model", str, default="" ))
     self.current_step = "list"
     self.editing_key = ""
     self.editing_is_new = False
-    if self._drafts:
-        first_key = next(iter(self._drafts))
-        _apply_draft(self, self._drafts[first_key])
+    if self.drafts:
+        first_key = next(iter(self.drafts))
+        _apply_draft(self, self.drafts[first_key])
         self.editing_key = first_key
     else:
         draft = _make_provider_draft("anthropic", _ANTHROPIC_API_TYPE)
@@ -447,7 +439,7 @@ def _base_url_hint(provider_path: str) -> str:
 
 
 def _edit_provider(key: str, *, view: LLMSettingPanel) -> None:
-    draft = view._drafts.get(key)
+    draft = view.drafts.get(key)
     if draft is None:
         return
     view.current_step = "edit"
@@ -488,8 +480,8 @@ def _on_provider_type_change(*, view: LLMSettingPanel, value: str) -> None:
 
 def _back_to_list(*, view: LLMSettingPanel) -> None:
     view.current_step = "list"
-    if not view.editing_is_new and view.editing_key in view._drafts:
-        _apply_draft(view, view._drafts[view.editing_key])
+    if not view.editing_is_new and view.editing_key in view.drafts:
+        _apply_draft(view, view.drafts[view.editing_key])
     _sync_default_model(view)
     _set_message(view)
     view.invalidate()
@@ -502,7 +494,7 @@ def _save_provider_edits(*, view: LLMSettingPanel) -> None:
         _set_message(view, error="Provider name cannot be empty.")
         view.invalidate()
         return
-    if provider_name in view._drafts and (view.editing_is_new or provider_name != view.editing_key):
+    if provider_name in view.drafts and (view.editing_is_new or provider_name != view.editing_key):
         _set_message(view, error=f"Provider '{provider_name}' already exists.")
         view.invalidate()
         return
@@ -519,8 +511,8 @@ def _save_provider_edits(*, view: LLMSettingPanel) -> None:
         view.invalidate()
         return
     if not view.editing_is_new and view.editing_key != provider_name:
-        view._drafts.pop(view.editing_key, None)
-    view._drafts[provider_name] = draft
+        view.drafts.pop(view.editing_key, None)
+    view.drafts[provider_name] = draft
     view.editing_key = provider_name
     view.editing_is_new = False
     view.current_step = "list"
@@ -530,16 +522,16 @@ def _save_provider_edits(*, view: LLMSettingPanel) -> None:
 
 
 def _delete_provider(*, view: LLMSettingPanel) -> None:
-    if not view.editing_is_new and view.editing_key in view._drafts:
-        view._drafts.pop(view.editing_key, None)
+    if not view.editing_is_new and view.editing_key in view.drafts:
+        view.drafts.pop(view.editing_key, None)
         _set_message(view, notice=f"Removed provider '{view.editing_key}'.")
     else:
         _set_message(view)
     view.current_step = "list"
     view.editing_is_new = False
-    view.editing_key = next(iter(view._drafts), "")
+    view.editing_key = next(iter(view.drafts), "")
     if view.editing_key:
-        _apply_draft(view, view._drafts[view.editing_key])
+        _apply_draft(view, view.drafts[view.editing_key])
     _sync_default_model(view)
     view.invalidate()
 
@@ -576,7 +568,7 @@ async def _discover_models(*, view: LLMSettingPanel) -> None:
 
 async def _save_all_settings(*, view: LLMSettingPanel) -> None:
     providers: dict[str, dict[str, Any]] = {}
-    for key, draft in view._drafts.items():
+    for key, draft in view.drafts.items():
         provider_name = str(key).strip()
         models = _normalize_models(draft.get("models", []))
         base_url = str(draft.get("base_url", "")).strip()
@@ -649,7 +641,7 @@ def _render_message(self: LLMSettingPanel, *, margin_bottom: int = 12) -> list[d
 def _render_list(self: LLMSettingPanel) -> list[dict[str, Any]]:
     items = _render_message(self)
     provider_buttons: list[dict[str, Any]] = []
-    for key, draft in self._drafts.items():
+    for key, draft in self.drafts.items():
         provider_path = str(draft.get("type", _ANTHROPIC_API_TYPE))
         provider_buttons.append({
             "$component": "antd.Button",
@@ -757,7 +749,7 @@ def _render_list(self: LLMSettingPanel) -> list[dict[str, Any]]:
                         for model in _all_model_names(self)
                     ],
                     "placeholder": "Add provider first",
-                    "disabled": not bool(self._drafts),
+                    "disabled": not bool(self.drafts),
                     "onChange": Bind(self, "default_model", "$0"),
                 }],
             }],

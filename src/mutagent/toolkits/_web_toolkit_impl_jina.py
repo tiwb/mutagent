@@ -34,7 +34,7 @@ _MAX_CONTENT_CHARS = 50000
 def _get_headers(config: Config) -> dict[str, str]:
     """构建请求头，包含可选的 API key。"""
     headers: dict[str, str] = {"Accept": "application/json"}
-    api_key = config.get("WebToolkit.jina_api_key")
+    api_key = config.root.get("WebToolkit.jina_api_key")
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     return headers
@@ -57,7 +57,7 @@ class JinaSearchImpl(SearchImpl):
 
 
 @mutobj.impl(JinaSearchImpl.search)
-async def _jina_search(self: JinaSearchImpl, query: str, max_results: int = 5) -> str:
+async def jina_search_impl_search(self: JinaSearchImpl, query: str, max_results: int = 5) -> str:
     """Jina Search API 实现。"""
     encoded_query = quote(query)
     url = f"{_SEARCH_API}{encoded_query}"
@@ -123,7 +123,7 @@ class JinaFetchImpl(FetchImpl):
 
 
 @mutobj.impl(JinaFetchImpl.fetch)
-async def _jina_fetch(self: JinaFetchImpl, url: str, format: str = "markdown") -> str:
+async def jina_fetch_impl_fetch(self: JinaFetchImpl, url: str, format: str = "markdown") -> str:
     """Jina Reader API 实现。"""
     if format == "html":
         return "Jina Reader API does not support html format. Use local impl or format=\"markdown\"."

@@ -13,8 +13,9 @@ import operator
 import pytest
 
 from mutagent.sandbox._signature import (
-    _MISSING,
-    _RENDER_LINE_WIDTH,
+    MISSING,
+    _MissingSentinel,
+    RENDER_LINE_WIDTH,
     _format_json_compact,
     _format_literal_annotation,
     build_signature,
@@ -85,7 +86,7 @@ class TestMcpSchemaToSpecs:
     def test_missing_type(self) -> None:
         schema = {"properties": {"x": {}}, "required": []}
         specs = mcp_schema_to_specs(schema)
-        assert specs == [{"name": "x", "required": False, "default": _MISSING}]
+        assert specs == [{"name": "x", "required": False, "default": MISSING}]
 
     def test_order_preserved(self) -> None:
         schema = {
@@ -117,7 +118,7 @@ class TestMcpSchemaToSpecs:
         }
         specs = mcp_schema_to_specs(schema)
         assert specs == [
-            {"name": "all", "required": False, "default": _MISSING, "annotation": "bool"},
+            {"name": "all", "required": False, "default": MISSING, "annotation": "bool"},
         ]
 
 
@@ -320,8 +321,8 @@ class TestBuildSignature:
         sig = build_signature([
             {"name": "paths", "annotation": "list", "default_missing": True},
         ])
-        assert sig.parameters["paths"].default is _MISSING
-        # iter3: _MISSING.__repr__ 返回 "<omit>"
+        assert sig.parameters["paths"].default is MISSING
+        # iter3: _MissingSentinel.__repr__ 返回 "<omit>"
         assert str(sig) == "(paths: 'list' = <omit>)"
 
     def test_explicit_keyword_only_forces_all_following_kw(self) -> None:
@@ -535,9 +536,9 @@ class TestMcpSchemaIntegration:
         bound = sig.bind()
         bound.apply_defaults()
         assert bound.arguments["level"] == "info"
-        assert bound.arguments["all"] is _MISSING
-        assert bound.arguments["filename"] is _MISSING
-        # iter3: _MISSING.__repr__ → <omit>
+        assert bound.arguments["all"] is MISSING
+        assert bound.arguments["filename"] is MISSING
+        # iter3: _MissingSentinel.__repr__ → <omit>
         assert str(sig) == (
             "(level: 'str' = 'info', all: 'bool' = <omit>, "
             "filename: 'str' = <omit>)"
@@ -554,7 +555,7 @@ class TestSignatureMultilineFolding:
 
     def test_render_line_width_is_80(self) -> None:
         # iter2 是 100，iter3 改 80
-        assert _RENDER_LINE_WIDTH == 80
+        assert RENDER_LINE_WIDTH == 80
 
     def test_short_signature_stays_single_line(self) -> None:
         sig = inspect.Signature([
@@ -818,7 +819,7 @@ class TestFormatJsonCompact:
 class TestOmitSentinel:
 
     def test_missing_repr_is_omit(self) -> None:
-        assert repr(_MISSING) == "<omit>"
+        assert repr(MISSING) == "<omit>"
 
     def test_string_literal_dots_visually_distinct(self) -> None:
         # 字符串 "..." 渲染为 '...'（带引号），与 sentinel <omit>（不带引号）区分
@@ -838,7 +839,7 @@ class TestOmitSentinel:
         assert "<omit>" in str(sig)
 
     def test_pysandbox_function_without_missing_no_omit(self) -> None:
-        # 普通 Python 函数（无 _MISSING）签名不出现 <omit>
+        # 普通 Python 函数（无 _MissingSentinel）签名不出现 <omit>
         def fn(x: int = 0): ...
         out = format_callable_signature(fn)
         assert "<omit>" not in out
