@@ -36,10 +36,21 @@ You are mutagent assistant.
 """
 
 
+@mutobj.impl(App.__init__)
+def app_init(self: App, config_path: str = ".mutagent/config.json") -> None:
+    """构造期完成 config 加载与 agent 初始化。
+
+    config_path 为空字符串时跳过文件加载，构造最小 config/agent/sandbox。
+    """
+    self.load_config(config_path)
+    self.setup_agent()
+
+
 @mutobj.impl(App.load_config)
-def app_load_config(self: App, config_path: str = ".mutagent/config.json") -> None:
+def app_load_config(self: App, config_path: str) -> None:
     self.config = Config()
-    self.config.load(config_path)
+    if config_path:
+        self.config.load(config_path)
 
     # Set environment variables from config
     for key, value in self.config.root.get_field("env", dict[str, str], default={}).items():
@@ -66,13 +77,6 @@ def app_load_config(self: App, config_path: str = ".mutagent/config.json") -> No
 @mutobj.impl(App.setup_agent)
 def app_setup_agent(self: App, system_prompt: str = "") -> Agent:
     from datetime import datetime
-
-    spec = self.config.resolve_model()
-    if spec is None:
-        raise SystemExit(
-            "Error: no models configured.\n"
-            "Run the setup wizard or add a 'providers' section to your config."
-        )
 
     # --- Logging setup ---
     session_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -111,7 +115,11 @@ def app_setup_agent(self: App, system_prompt: str = "") -> Agent:
     tool_set = ToolSet()
     tool_set.add(SandboxToolkit(_env=self.sandbox, _state={}))
 
-    provider = LLMApiClient.from_spec(spec)
+    spec = self.config.resolve_model()
+    if spec:
+        provider = LLMApiClient.from_spec(spec)
+    else:
+        provider = LLMApiClient()
 
     if not system_prompt:
         system_prompt = SYSTEM_PROMPT

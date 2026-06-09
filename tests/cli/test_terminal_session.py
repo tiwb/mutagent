@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from types import SimpleNamespace
 
 from mutagent.app.app import App
 from mutagent.cli.terminal import _build_agent_session, add_terminal_subcommand
@@ -62,15 +61,8 @@ def test_build_agent_session_resumes_latest_for_empty_resume_value(tmp_path: Pat
         file_path,
         Message(role="user", blocks=[TextBlock(text="hi")], id="u1"),
     )
-    app = App()
-    object.__setattr__(
-        app,
-        "agent",
-        SimpleNamespace(
-            model="gpt-5",
-            context=AgentContext(),
-        ),
-    )
+    app = App("")
+    app.agent.model = "gpt-5"
     monkeypatch.setattr("mutagent.cli.terminal._default_session_dir", lambda: tmp_path)
 
     session = _build_agent_session(app, "")

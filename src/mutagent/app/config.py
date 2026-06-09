@@ -122,7 +122,7 @@ class ConfigSection(mutobj.Declaration):
 class Config(mutobj.Declaration):
     """可观察的配置容器。"""
 
-    path: Path | None
+    path: Path | None = None
 
     @property
     def root(self) -> ConfigSection:

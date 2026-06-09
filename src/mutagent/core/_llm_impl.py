@@ -6,12 +6,18 @@ from_spec 由各子类覆盖；
 from __future__ import annotations
 
 import fnmatch
+from typing import AsyncGenerator
 
 import mutobj
 from mutio.codec.json import JsonObject
 from mutobj import discover_subclasses, get_registry_generation
 
 from .llm import LLMApiClient
+from .messages import (
+    Message,
+    StreamEvent,
+    ToolSchema,
+)
 
 # 常见模型的 context window 大小（token 数），作为配置未指定时的兜底。
 # 支持通配符：精确匹配优先，通配符按长度降序匹配（更长 = 更具体）。
@@ -137,6 +143,19 @@ def llm_api_client_from_spec(spec: JsonObject) -> LLMApiClient:
     provider_type = str(spec.get("type", ""))
     provider_cls = _resolve_provider(provider_type)
     return provider_cls(spec)
+
+@mutobj.impl(LLMApiClient.send)
+def llm_api_client_send(
+        self: LLMApiClient,
+        messages: list[Message],
+        tools: list[ToolSchema],
+        prompts: list[Message] | None = None,
+        stream: bool = True,
+    ) -> AsyncGenerator[StreamEvent, None]:
+
+    raise NotImplementedError(
+        f"{type(self).__name__} does not implement 'send'."
+    )
 
 
 # 确保内置 provider 已注册

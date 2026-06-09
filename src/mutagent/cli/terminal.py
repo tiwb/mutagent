@@ -152,9 +152,7 @@ def add_terminal_subcommand(subparsers: Any) -> argparse.ArgumentParser:
 
 def dispatch_terminal(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     """在终端 REPL 中运行 agent 会话。"""
-    app = App()
-    app.load_config(args.config)
-    app.setup_agent()
+    app = App(config_path=args.config)
     session = _build_agent_session(app, getattr(args, "resume", None))
     spec = app.config.resolve_model()
     print(f"mutagent ready  (model: {spec.get('model_id', '?') if spec else '?'})")

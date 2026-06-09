@@ -25,7 +25,11 @@ class App(mutobj.Declaration):
     agent: Agent
     sandbox: SandboxEnv
 
-    def load_config(self, config_path: str = ".mutagent/config.json") -> None:
+
+    def __init__(self: App, config_path: str = ".mutagent/config.json") -> None:
+        ...
+
+    def load_config(self, config_path: str) -> None:
         """Load configuration from the given path and store in ``self.config``.
 
         Override if you want to control config loading (e.g. different path,

@@ -33,9 +33,8 @@ class TestMutagentDeclaration:
         class Thing(mutobj.Declaration):
             data: str
 
-        t = Thing()
-        with pytest.raises(AttributeError):
-            _ = t.data
+        with pytest.raises(TypeError, match=r"missing field.*'data'"):
+            Thing()
 
     def test_stub_method_recognized(self):
         class Service(mutobj.Declaration):

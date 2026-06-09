@@ -52,9 +52,7 @@ def dispatch_webui(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
     except ImportError as exc:
         raise SystemExit("需要先安装 WebUI 依赖：pip install mutagent[webui]") from exc
 
-    app = App()
-    app.load_config(args.config)
-    app.setup_agent()
+    app = App(config_path=args.config)
     console_level = str(app.config.root.get_field("logging.console_level", str, default="WARNING"))
     _ensure_console_logging(console_level)
 
