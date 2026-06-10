@@ -64,6 +64,7 @@ def _module_registry() -> ModuleRegistry:
 
 class WebSocketChannel(Channel):
     """mutgui Channel backed by mutio WebSocketConnection."""
+    _ws: WebSocketConnection
 
     def __init__(self, ws: WebSocketConnection) -> None:
         super().__init__()

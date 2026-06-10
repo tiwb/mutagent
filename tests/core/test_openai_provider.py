@@ -2,7 +2,7 @@
 
 import json
 import os
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -23,6 +23,7 @@ from mutagent.core._llm_impl_openai import (
     tools_to_openai,
     _response_from_openai,
 )
+from tests.core._helpers import MockLLMClient
 
 
 # ---------------------------------------------------------------------------
@@ -395,13 +396,6 @@ class TestResponseFromOpenAI:
 # Async helpers for integration tests
 # ---------------------------------------------------------------------------
 
-def _make_client():
-    """创建测试用 OpenAIProvider。"""
-    return OpenAIApiClient({
-        "base_url": "https://api.openai.com/v1",
-        "auth_token": "test-key",
-    })
-
 
 async def _collect_events(async_iter):
     """Collect all events from an async iterator into a list."""
@@ -434,10 +428,10 @@ class TestSendMessageIntegration:
             StreamEvent(type="response_done", response=response),
         ]
 
-        provider = _make_client()
-        with patch.object(provider, "send", return_value=_mock_send_events(*mock_events)):
-            messages = [Message(role="user", blocks=[TextBlock(text="Hi")])]
-            events = await _collect_events(provider.send(messages, [], stream=False))
+        provider = MockLLMClient()
+        provider.mock_send = lambda *a, **kw: _mock_send_events(*mock_events)
+        messages = [Message(role="user", blocks=[TextBlock(text="Hi")])]
+        events = await _collect_events(provider.send(messages, [], stream=False))
 
         resp_event = [e for e in events if e.type == "response_done"][0]
         resp = resp_event.response
@@ -466,10 +460,10 @@ class TestSendMessageIntegration:
             input_schema={"type": "object", "properties": {"city": {"type": "string"}}},
         )]
 
-        provider = _make_client()
-        with patch.object(provider, "send", return_value=_mock_send_events(*mock_events)):
-            messages = [Message(role="user", blocks=[TextBlock(text="What's the weather?")])]
-            events = await _collect_events(provider.send(messages, tools, stream=False))
+        provider = MockLLMClient()
+        provider.mock_send = lambda *a, **kw: _mock_send_events(*mock_events)
+        messages = [Message(role="user", blocks=[TextBlock(text="What's the weather?")])]
+        events = await _collect_events(provider.send(messages, tools, stream=False))
 
         resp_event = [e for e in events if e.type == "response_done"][0]
         resp = resp_event.response
@@ -485,11 +479,11 @@ class TestSendMessageIntegration:
             StreamEvent(type="error", error="OpenAI API error (401): Incorrect API key provided"),
         ]
 
-        provider = _make_client()
-        with patch.object(provider, "send", return_value=_mock_send_events(*mock_events)):
-            events = await _collect_events(provider.send(
-                [Message(role="user", blocks=[TextBlock(text="Hi")])], [], stream=False
-            ))
+        provider = MockLLMClient()
+        provider.mock_send = lambda *a, **kw: _mock_send_events(*mock_events)
+        events = await _collect_events(provider.send(
+            [Message(role="user", blocks=[TextBlock(text="Hi")])], [], stream=False
+        ))
 
         assert len(events) == 1
         assert events[0].type == "error"
@@ -507,11 +501,11 @@ class TestSendMessageIntegration:
             StreamEvent(type="response_done", response=response),
         ]
 
-        provider = _make_client()
-        with patch.object(provider, "send", return_value=_mock_send_events(*mock_events)):
-            events = await _collect_events(provider.send(
-                [Message(role="user", blocks=[TextBlock(text="Hi")])], [], stream=False
-            ))
+        provider = MockLLMClient()
+        provider.mock_send = lambda *a, **kw: _mock_send_events(*mock_events)
+        events = await _collect_events(provider.send(
+            [Message(role="user", blocks=[TextBlock(text="Hi")])], [], stream=False
+        ))
 
         text_events = [e for e in events if e.type == "text_delta"]
         assert len(text_events) == 1
@@ -534,11 +528,11 @@ class TestSendMessageIntegration:
             StreamEvent(type="response_done", response=response),
         ]
 
-        provider = _make_client()
-        with patch.object(provider, "send", return_value=_mock_send_events(*mock_events)):
-            events = await _collect_events(provider.send(
-                [Message(role="user", blocks=[TextBlock(text="Do stuff")])], [], stream=False
-            ))
+        provider = MockLLMClient()
+        provider.mock_send = lambda *a, **kw: _mock_send_events(*mock_events)
+        events = await _collect_events(provider.send(
+            [Message(role="user", blocks=[TextBlock(text="Do stuff")])], [], stream=False
+        ))
 
         tool_start_events = [e for e in events if e.type == "tool_use_start"]
         tool_end_events = [e for e in events if e.type == "tool_use_end"]
@@ -558,7 +552,7 @@ class TestSendMessageIntegration:
             StreamEvent(type="response_done", response=response),
         ]
 
-        provider = _make_client()
+        provider = MockLLMClient()
         captured_kwargs = {}
 
         async def mock_send(messages, tools, prompts=None, stream=True):
@@ -567,12 +561,12 @@ class TestSendMessageIntegration:
             for event in mock_events:
                 yield event
 
-        with patch.object(provider, "send", side_effect=mock_send):
-            messages = [Message(role="user", blocks=[TextBlock(text="Hi")])]
-            prompt_msg = Message(role="system", blocks=[TextBlock(text="You are helpful.")])
-            await _collect_events(provider.send(
-                messages, [], prompts=[prompt_msg], stream=False
-            ))
+        provider.mock_send = mock_send
+        messages = [Message(role="user", blocks=[TextBlock(text="Hi")])]
+        prompt_msg = Message(role="system", blocks=[TextBlock(text="You are helpful.")])
+        await _collect_events(provider.send(
+            messages, [], prompts=[prompt_msg], stream=False
+        ))
 
         assert captured_kwargs["prompts"] is not None
         assert len(captured_kwargs["prompts"]) == 1
@@ -588,7 +582,7 @@ class TestSendMessageIntegration:
             StreamEvent(type="response_done", response=response),
         ]
 
-        provider = _make_client()
+        provider = MockLLMClient()
         captured_kwargs = {}
 
         async def mock_send(messages, tools, prompts=None, stream=True):
@@ -597,9 +591,9 @@ class TestSendMessageIntegration:
             for event in mock_events:
                 yield event
 
-        with patch.object(provider, "send", side_effect=mock_send):
-            messages = [Message(role="user", blocks=[TextBlock(text="Hi")])]
-            await _collect_events(provider.send(messages, [], stream=False))
+        provider.mock_send = mock_send
+        messages = [Message(role="user", blocks=[TextBlock(text="Hi")])]
+        await _collect_events(provider.send(messages, [], stream=False))
 
         assert captured_kwargs["prompts"] is None
 

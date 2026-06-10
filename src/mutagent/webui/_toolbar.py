@@ -262,6 +262,7 @@ class ModelSelectorAction(Action):
 class SelectModelAction(Action):
     """菜单内单个模型选项 — 动态 label + checked 态。"""
     variant = "button"
+    _model_name: str
 
     def __init__(self, model_name: str) -> None:
         super().__init__()

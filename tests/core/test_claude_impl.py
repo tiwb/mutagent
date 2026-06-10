@@ -2,7 +2,7 @@
 
 import json
 import os
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -17,11 +17,11 @@ from mutagent.core.messages import (
     Usage,
 )
 from mutagent.core._llm_impl_anthropic import (
-    AnthropicApiClient,
     _messages_to_claude,
     _tools_to_claude,
     _response_from_claude,
 )
+from tests.core._helpers import MockLLMClient
 
 
 # ---------------------------------------------------------------------------
@@ -228,14 +228,6 @@ class TestResponseFromClaude:
         assert _get_tool_calls(resp.message) == []
 
 
-def _make_client():
-    """创建测试用 AnthropicProvider。"""
-    return AnthropicApiClient({
-        "base_url": "https://api.anthropic.com",
-        "auth_token": "test-key",
-    })
-
-
 async def _async_events(*events: StreamEvent):
     """Helper: yield StreamEvent objects as an async iterator."""
     for event in events:
@@ -252,17 +244,16 @@ class TestSendMessageIntegration:
             usage=Usage(input_tokens=5, output_tokens=3),
         )
 
-        mock_events = _async_events(
+        provider = MockLLMClient()
+        provider.mock_send = lambda *a, **kw: _async_events(
             StreamEvent(type="text_delta", text="Hello from Claude!"),
             StreamEvent(type="response_done", response=response),
         )
 
-        provider = _make_client()
-        with patch.object(provider, "send", return_value=mock_events):
-            messages = [Message(role="user", blocks=[TextBlock(text="Hi")])]
-            events = [e async for e in provider.send(
-                messages, [], stream=False
-            )]
+        messages = [Message(role="user", blocks=[TextBlock(text="Hi")])]
+        events = [e async for e in provider.send(
+            messages, [], stream=False
+        )]
 
         resp_event = [e for e in events if e.type == "response_done"][0]
         resp = resp_event.response
@@ -278,7 +269,8 @@ class TestSendMessageIntegration:
             usage=Usage(input_tokens=10, output_tokens=8),
         )
 
-        mock_events = _async_events(
+        provider = MockLLMClient()
+        provider.mock_send = lambda *a, **kw: _async_events(
             StreamEvent(type="tool_use_start", tool_call=tc),
             StreamEvent(type="tool_use_end"),
             StreamEvent(type="response_done", response=response),
@@ -290,12 +282,10 @@ class TestSendMessageIntegration:
             input_schema={"type": "object", "properties": {"target": {"type": "string"}}},
         )]
 
-        provider = _make_client()
-        with patch.object(provider, "send", return_value=mock_events):
-            messages = [Message(role="user", blocks=[TextBlock(text="Show me the code")])]
-            events = [e async for e in provider.send(
-                messages, tools, stream=False
-            )]
+        messages = [Message(role="user", blocks=[TextBlock(text="Show me the code")])]
+        events = [e async for e in provider.send(
+            messages, tools, stream=False
+        )]
 
         resp_event = [e for e in events if e.type == "response_done"][0]
         resp = resp_event.response
@@ -306,18 +296,17 @@ class TestSendMessageIntegration:
 
     async def test_send_message_api_error(self):
         """Test provider.send() yields error event on API error."""
-        mock_events = _async_events(
+        provider = MockLLMClient()
+        provider.mock_send = lambda *a, **kw: _async_events(
             StreamEvent(
                 type="error",
                 error="Claude API error (401): Invalid API key",
             ),
         )
 
-        provider = _make_client()
-        with patch.object(provider, "send", return_value=mock_events):
-            events = [e async for e in provider.send(
-                [Message(role="user", blocks=[TextBlock(text="Hi")])], [], stream=False
-            )]
+        events = [e async for e in provider.send(
+            [Message(role="user", blocks=[TextBlock(text="Hi")])], [], stream=False
+        )]
 
         assert len(events) == 1
         assert events[0].type == "error"

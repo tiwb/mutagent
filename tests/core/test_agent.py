@@ -8,7 +8,6 @@ import mutobj
 from mutagent.core.agent import Agent
 from mutagent.core.context import AgentContext
 from mutagent.core._agent_impl import MAX_TOOL_ROUNDS, get_current_task
-from mutagent.core._llm_impl_anthropic import AnthropicApiClient
 from mutagent.core.messages import (
     Message,
     Response,
@@ -18,6 +17,7 @@ from mutagent.core.messages import (
     ToolUseBlock,
 )
 from mutagent.core.tools import ToolSet, Toolkit
+from tests.core._helpers import MockLLMClient
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +46,7 @@ class _TestToolkit(Toolkit):
 def _make_agent(llm=None, model="test-model"):
     """Create an Agent with a minimal ToolSet for testing."""
     if llm is None:
-        llm = AnthropicApiClient({"base_url": "https://api.test.com", "auth_token": "test-key"})
+        llm = MockLLMClient()
     tool_set = ToolSet()
     tool_set.add(_TestToolkit())
     context = AgentContext()
@@ -149,7 +149,7 @@ class TestBasicResponse:
             yield StreamEvent(type="text_delta", text="Hello!")
             yield StreamEvent(type="response_done", response=response)
 
-        agent.llm.send = mock_send
+        agent.llm.mock_send = mock_send
 
         await agent.submit("Hi")
         await _await_turn(agent)
@@ -173,7 +173,7 @@ class TestBasicResponse:
             yield StreamEvent(type="text_delta", text="")
             yield StreamEvent(type="response_done", response=response)
 
-        agent.llm.send = mock_send
+        agent.llm.mock_send = mock_send
 
         await agent.submit("Hi")
         await _await_turn(agent)
@@ -216,7 +216,7 @@ class TestToolCalls:
                 yield StreamEvent(type="text_delta", text="The echo returned: echo: hello")
                 yield StreamEvent(type="response_done", response=final_response)
 
-        agent.llm.send = mock_send
+        agent.llm.mock_send = mock_send
 
         events = await _collect_events(agent)
         types = [e.type for e in events]
@@ -259,7 +259,7 @@ class TestToolCalls:
                 yield StreamEvent(type="text_delta", text="Done.")
                 yield StreamEvent(type="response_done", response=final_response)
 
-        agent.llm.send = mock_send
+        agent.llm.mock_send = mock_send
 
         events = await _collect_events(agent)
         exec_starts = [e for e in events if e.type == "tool_exec_start"]
@@ -295,7 +295,7 @@ class TestToolCalls:
                 yield StreamEvent(type="text_delta", text="Processed.")
                 yield StreamEvent(type="response_done", response=final_response)
 
-        agent.llm.send = mock_send
+        agent.llm.mock_send = mock_send
 
         events = await _collect_events(agent)
         types = [e.type for e in events]
@@ -318,7 +318,7 @@ class TestErrorHandling:
         async def mock_send(messages, tools, prompts=None, stream=True):
             yield StreamEvent(type="error", error="API rate limited")
 
-        agent.llm.send = mock_send
+        agent.llm.mock_send = mock_send
 
         events = await _collect_events(agent)
         types = [e.type for e in events]
@@ -335,7 +335,7 @@ class TestErrorHandling:
             # Only text_delta, no response_done
             yield StreamEvent(type="text_delta", text="unfinished...")
 
-        agent.llm.send = mock_send
+        agent.llm.mock_send = mock_send
 
         events = await _collect_events(agent)
         types = [e.type for e in events]
@@ -352,7 +352,7 @@ class TestErrorHandling:
             yield StreamEvent(type="text_delta", text="late")
             yield StreamEvent(type="response_done", response=_make_response("late"))
 
-        agent.llm.send = mock_send
+        agent.llm.mock_send = mock_send
 
         await agent.submit("first")
         with pytest.raises(RuntimeError, match="busy"):
@@ -384,7 +384,7 @@ class TestCancel:
             yield StreamEvent(type="text_delta", text="partial output...")
             await asyncio.sleep(10)  # Simulate long running
 
-        agent.llm.send = mock_send
+        agent.llm.mock_send = mock_send
 
         events: list[StreamEvent] = []
         agent.subscribe(lambda e: events.append(e))
@@ -425,7 +425,7 @@ class TestSubscribe:
             yield StreamEvent(type="text_delta", text="A")
             yield StreamEvent(type="response_done", response=response)
 
-        agent.llm.send = mock_send
+        agent.llm.mock_send = mock_send
 
         events_a: list[StreamEvent] = []
         events_b: list[StreamEvent] = []
@@ -532,7 +532,7 @@ class TestMaxToolRounds:
                 yield StreamEvent(type="text_delta", text="Summary of all work done.")
                 yield StreamEvent(type="response_done", response=resp)
 
-        agent.llm.send = mock_send
+        agent.llm.mock_send = mock_send
 
         events = await _collect_events(agent)
         tool_exec_starts = [e for e in events if e.type == "tool_exec_start"]
@@ -582,7 +582,7 @@ class TestEdgeCases:
                 yield StreamEvent(type="text_delta", text="Now really done.")
                 yield StreamEvent(type="response_done", response=final_response)
 
-        agent.llm.send = mock_send
+        agent.llm.mock_send = mock_send
 
         events = await _collect_events(agent)
         types = [e.type for e in events]
@@ -598,7 +598,7 @@ class TestEdgeCases:
             yield StreamEvent(type="text_delta", text="All done.")
             yield StreamEvent(type="response_done", response=response)
 
-        agent.llm.send = mock_send
+        agent.llm.mock_send = mock_send
 
         events = await _collect_events(agent)
         types = [e.type for e in events]
@@ -612,7 +612,7 @@ class TestEdgeCases:
             yield StreamEvent(type="text_delta", text="Done.")
             yield StreamEvent(type="response_done", response=response)
 
-        agent.llm.send = mock_send
+        agent.llm.mock_send = mock_send
 
         await _collect_events(agent)
         last_msg = agent.context.messages[-1]

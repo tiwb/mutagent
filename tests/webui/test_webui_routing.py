@@ -11,16 +11,64 @@ from typing import Any
 import pytest
 
 from mutagent.webui._conversation import Conversation
-from mutagent.webui._settings_page import SettingsPage
+from mutagent.webui._settings_page import SettingsPage, SettingPanel
 from mutagent.webui._conversation import _cext, _parse_hash, _hash_for_route
 from mutgui.events import Event
-from mutagent.app.config import Config
 from mutagent.core.context import AgentContext
 
 
-class _FakeSandbox:
-    def list_sources(self) -> dict:
-        return {}
+async def _noop(*args: Any, **kwargs: Any) -> None:
+    pass
+
+
+class _MinimalSettingsPage:
+    """测试用最小 SettingsPage，避免真实初始化中 SettingPanel 子类发现。"""
+
+    def __init__(self, conversation: Any = None) -> None:
+        self.panels: dict[str, SettingPanel] = {}
+        self.active_panel_id = ""
+        self.active = False
+        self.ordered_panel_ids: list[str] = []
+        self.conversation = conversation
+
+    async def close(self) -> None:
+        if self.conversation:
+            await self.conversation.navigate_to("")
+        else:
+            self.active = False
+
+    def invalidate(self) -> None:
+        """noop，测试不需要真实 render。"""
+
+    async def activate(self, panel_id: str) -> None:
+        target = panel_id or (self.ordered_panel_ids[0] if self.ordered_panel_ids else "")
+        if not target or target not in self.panels:
+            return
+        if self.active:
+            prev = self.panels.get(self.active_panel_id)
+            if prev is not None and prev is not self.panels.get(target):
+                prev.on_close()
+        self.active_panel_id = target
+        self.active = True
+        new_panel = self.panels[target]
+        new_panel.on_open()
+
+    async def deactivate(self) -> None:
+        if self.active:
+            prev = self.panels.get(self.active_panel_id)
+            if prev is not None:
+                prev.on_close()
+        self.active = False
+
+
+def _make_minimal_settings_page(conversation: Any = None) -> _MinimalSettingsPage:
+    """创建一个包含基础 SettingPanel 的 minimal page，用于测试路由 / 面板切换。"""
+    page = _MinimalSettingsPage(conversation=conversation)
+    for pid in ("llm", "mcp", "sandbox"):
+        panel = SettingPanel.__new__(SettingPanel)
+        page.panels[pid] = panel
+        page.ordered_panel_ids.append(pid)
+    return page
 
 
 class _DummyAgent:
@@ -28,22 +76,39 @@ class _DummyAgent:
         self.llm = type("LLM", (), {"model": "model-alpha", "context_window": 200000})()
         self.model = "model-alpha"
         self.context = AgentContext()
-        self.config = Config()
-        self.config.load_from_dict({})
-        self.sandbox = _FakeSandbox()
 
-    def list_models(self) -> list[dict[str, str]]:
-        return [{"name": "alpha", "model_id": "model-alpha"}]
 
-    def subscribe(self, callback):
-        self._callback = callback
-        return lambda: None
+class _MockConversation(Conversation):
+    """测试用 Conversation 子类，send_command / broadcast_command 可被注入。
 
-    async def submit(self, text: str) -> None:
-        self.last_submit = text
+    跳过真实 __init__ 中的 Agent.subscribe() / SettingsPage 创建等重型初始化，
+    只设置路由测试所需的最小状态。
+    """
+    _mock_send_command: Callable[..., Any] | None = None
+    _mock_broadcast_command: Callable[..., Any] | None = None
 
-    def cancel(self) -> bool:
-        return True
+    def __init__(self, agent: Any = None, app: Any = None) -> None:
+        super(Conversation, self).__init__()
+        self.app = app or _DummyAgent()
+        self.agent = agent or self.app
+        self.current_route = ""
+        self.settings_page = _make_minimal_settings_page(conversation=self)
+        # 构造完整性检查需要，但测试用不到
+        self.current_model = "model-alpha"
+        self.message_list = type("_", (), {})()  # type: ignore[assignment]
+        self.status_bar = type("_", (), {"invalidate": lambda self: None})()  # type: ignore[assignment]
+        self.chat_input = type("_", (), {"invalidate": lambda self: None})()  # type: ignore[assignment]
+        self.toolbar = type("_", (), {"invalidate": lambda self: None})()  # type: ignore[assignment]
+        self.resume_page = type("_", (), {"invalidate": lambda self: None, "activate": _noop})()  # type: ignore[assignment]
+        self.session = type("_", (), {})()  # type: ignore[assignment]
+
+    async def send_command(self, name: str, /, **args: Any) -> None:
+        if self._mock_send_command:
+            await self._mock_send_command(name, **args)
+
+    async def broadcast_command(self, name: str, /, **args: Any) -> None:
+        if self._mock_broadcast_command:
+            await self._mock_broadcast_command(name, **args)
 
 
 # ── route 解析 / 构造 ─────────────────────────────────────────
@@ -83,20 +148,20 @@ def test_hash_for_route_round_trip(route: str, expected: str) -> None:
 # ── navigate_to / on_hash_change 状态机 ──────────────────────────
 
 
-def _make_conversation() -> Conversation:
+def _make_conversation() -> _MockConversation:
     agent = _DummyAgent()
-    return Conversation(agent=agent, app=agent)
+    return _MockConversation(agent=agent, app=agent)
 
 
-def _patch_commands(conv: Conversation) -> list[tuple[str, dict[str, Any]]]:
+def _patch_commands(conv: _MockConversation) -> list[tuple[str, dict[str, Any]]]:
     """劫持 send_command + broadcast_command 记录调用，绕开 ViewPort 上下文要求。"""
     calls: list[tuple[str, dict[str, Any]]] = []
 
     async def _record(name: str, /, **args: Any) -> None:
         calls.append((name, args))
 
-    conv.send_command = _record  # type: ignore[method-assign]
-    conv.broadcast_command = _record  # type: ignore[method-assign]
+    conv._mock_send_command = _record
+    conv._mock_broadcast_command = _record
     return calls
 
 

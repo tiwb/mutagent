@@ -156,6 +156,7 @@ class CancelMessageAction(Action):
 
 class SetSendModeChoiceAction(Action):
     variant = "button"
+    mode: str
 
     def __init__(self, mode: str, label: str) -> None:
         super().__init__()

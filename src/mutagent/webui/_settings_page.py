@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING, ClassVar
+from typing import Any, Callable, TYPE_CHECKING, ClassVar
 
 import mutobj
 from mutobj import AttributeDescriptor
@@ -55,8 +55,8 @@ class SettingPanel(View):
 
     def render(self) -> ViewBlock: ...
 
-    def on_open(self) -> None: ...
-    def on_close(self) -> None: ...
+    on_open: Callable[[], None] = mutobj.field(default=lambda: None)
+    on_close: Callable[[], None] = mutobj.field(default=lambda: None)
 
     def load_config(self) -> None: ...
 
