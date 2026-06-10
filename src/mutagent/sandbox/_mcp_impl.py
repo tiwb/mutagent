@@ -481,41 +481,33 @@ class MCPConnectionImpl(mutobj.Implementation[MCPConnection]):
     - 根据连接结果增删 namespace 上的函数
     """
 
+    # -- 字段声明 -------------------------------------------------------
+    _name: str
+    _config: JsonObject
+    retry_cooldown: float
+    client: Optional[AnyMCPClient] = None
+    _state: ConnectionState = "disconnected"
+    _last_error: Optional[str] = None
+    _last_attempt_at: Optional[float] = None
+    _lock: asyncio.Lock = mutobj.field(default_factory=asyncio.Lock)
+    _namespace: Namespace
+    _peer_namespaces: list[Namespace] = mutobj.field(default_factory=list)
+    sandbox: Any | None = None
+
     def __init__(self, ns_name: str, server_config: JsonObject):
         self._name = ns_name  # 原始名，用于日志
         self._config = server_config
         self.retry_cooldown = max(0.0, get_field(server_config, "retry_cooldown", float, default=5.0))
 
-        self.client: Optional[AnyMCPClient] = None
-        self._state: ConnectionState = "disconnected"
-        self._last_error: Optional[str] = None
-        self._last_attempt_at: Optional[float] = None
-        self._lock = asyncio.Lock()
-
         # 始终存在的 namespace；失败 / 未连状态下函数表为空
         # namespace 名用 sanitized 版本，确保可作为 Python 标识符访问
         safe_name = sanitize_ns_name(ns_name)
         # provider_kind="tool"：本 conn 主 namespace 由 MCP tools 列表驱动
-        self._namespace = Namespace(safe_name, description="",
-                                    provider_kind="tool")
+        self._namespace = Namespace(safe_name, description="", provider_kind="tool")
         owner = mutobj.implementation_owner(self)
         self._namespace.connection = owner  # type: ignore[attr-defined]
         self._namespace.connection_state = self.state  # type: ignore[attr-defined]
         self._namespace.connection_error = None  # type: ignore[attr-defined]
-
-        # 通过 pysandbox/namespaces.* 扩展协议从对端融合进来的 peer
-        # namespaces。每次 _do_rebuild 重建；与 self.namespace 一样
-        # 共享本 conn 的连接状态。详见
-        # ``mutagent/docs/specifications/feature-pysandbox-namespace-sharing.md``。
-        self._peer_namespaces: list[Namespace] = []
-
-        # SandboxEnv 回引：由调用方 connect_sources 赋值
-        # 在 ``sandbox.add_namespace(conn.namespace)`` 之后立即赋值。
-        # 用于 _do_rebuild 中把 peer namespaces 同步注册到 sandbox registry，
-        # 以及 close 时摘除。允许为 None：单元测试或裸 conn 自测场景下
-        # 不挂 sandbox，peer 同步逻辑自动 no-op。详见
-        # ``mutagent/docs/specifications/feature-namespace-multi-provider.md``。
-        self.sandbox: Any | None = None
 
     # -- 只读属性 -------------------------------------------------------
 

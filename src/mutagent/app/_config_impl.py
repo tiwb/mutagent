@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import mutobj
+from mutobj.core._fields import field
 from mutio.codec.json import JsonObject, JsonValue
 from mutagent.app.config import (
     ChangeCallback, CancelFn, Config, ConfigChangeEvent, ConfigSection,
@@ -25,8 +26,8 @@ from mutagent.app.config import (
 
 class ConfigExt(mutobj.Extension[Config]):
     """Config 的运行时状态。"""
-    data: JsonObject = {}
-    listeners: list[tuple[str, ChangeCallback]] = []
+    data: JsonObject = field(default_factory=dict)
+    listeners: list[tuple[str, ChangeCallback]] = field(default_factory=list)
 
 
 def _cext(self: Config) -> ConfigExt:
