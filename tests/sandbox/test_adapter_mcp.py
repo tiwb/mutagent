@@ -337,7 +337,9 @@ class TestBridgeDispatch:
 
 class _FakeSandbox:
     """Mock sandbox，runtime loop 由 SandboxEnvRuntime 承载。"""
-    pass
+
+    def __init__(self) -> None:
+        self.__mutobj_storage__ = {}
 
 
 def _sandbox_with_loop(
@@ -1112,6 +1114,7 @@ class TestMakeToolFuncSignature:
         # 可以直接传最小对象。
         class _DummySandbox:
             def __init__(self) -> None:
+                self.__mutobj_storage__ = {}
                 SandboxEnvRuntime.get_or_create(self).async_loop = cast(  # type: ignore[arg-type]
                     asyncio.AbstractEventLoop,
                     object(),

@@ -17,7 +17,7 @@ class PySandboxTools(MCPToolSet):
     使用 path 路由到 MCPView（由消费者定义 view）。
     """
     path = "/mcp"
-    # 启动期注入的类级单例（ClassVar 避免被 mutobj 包成 per-instance AttributeDescriptor）
+    # 启动期注入的类级单例
     env: ClassVar[SandboxEnv | None] = None
 
     async def pysandbox(self, code: str) -> str | ToolResult:

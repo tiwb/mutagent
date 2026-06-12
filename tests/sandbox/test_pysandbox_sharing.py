@@ -61,11 +61,15 @@ class _FakeSandbox:
     """
 
     def __init__(self) -> None:
+        self.__mutobj_storage__ = {}
         SandboxEnvRuntime.get_or_create(self).registry = NamespaceRegistry()  # type: ignore[arg-type]
 
 
 class _LoopSandbox:
     """最小 loop carrier，用于挂载 SandboxEnvRuntime。"""
+
+    def __init__(self) -> None:
+        self.__mutobj_storage__ = {}
 
 
 def _sandbox_with_loop(loop: asyncio.AbstractEventLoop | None) -> _LoopSandbox:

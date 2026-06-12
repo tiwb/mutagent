@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any, Callable, TYPE_CHECKING, ClassVar
 
 import mutobj
-from mutobj import AttributeDescriptor
 from mutgui import Action, ActionContext, Callback, Expr, View, ViewBlock
 
 if TYPE_CHECKING:
@@ -61,23 +60,6 @@ class SettingPanel(View):
     def load_config(self) -> None: ...
 
 
-# ── helpers ──────────────────────────────────────────────────
-
-
-def _resolve_panel_attr(cls: type, attr_name: str, default: str = "") -> str:
-    """Extract a string class-attribute from a mutobj Declaration subclass.
-
-    Class-level attrs on Declaration subclasses are wrapped in AttributeDescriptor
-    objects.  This helper unwraps them so cls.panel_id / cls.panel_title etc.
-    are used as plain strings at class-discovery time.
-    """
-    desc = cls.__dict__.get(attr_name)
-    if isinstance(desc, AttributeDescriptor):
-        val = desc.default
-        return str(val) if val is not ... else default
-    return str(desc) if desc else default
-
-
 # ── @impl: __init__ ──────────────────────────────────────────
 
 
@@ -98,7 +80,7 @@ def settings_page_init__(
     self.ordered_panel_ids = []
 
     for cls in panel_classes:
-        panel_id = _resolve_panel_attr(cls, "panel_id")
+        panel_id = cls.panel_id
         if not panel_id:
             continue
         panel = cls(page=self)
@@ -106,7 +88,7 @@ def settings_page_init__(
 
     def _placement_key(panel_id: str) -> str:
         panel = self.panels[panel_id]
-        placement = _resolve_panel_attr(type(panel), "panel_placement")
+        placement = type(panel).panel_placement
         return placement or f"zzzz:{panel_id}"
 
     self.ordered_panel_ids = sorted(self.panels.keys(), key=_placement_key)
@@ -125,7 +107,7 @@ def settings_page_render(self: SettingsPage) -> ViewBlock:
     menu_items: list[dict[str, Any]] = []
     for panel_id in self.ordered_panel_ids:
         panel = self.panels[panel_id]
-        title = _resolve_panel_attr(type(panel), "panel_title") or panel_id
+        title = type(panel).panel_title or panel_id
         menu_items.append({"key": panel_id, "label": title})
 
     sider: dict[str, Any] = {

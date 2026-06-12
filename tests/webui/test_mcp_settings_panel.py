@@ -54,6 +54,7 @@ class _FakeRegistry:
 
 class _FakeSandbox:
     def __init__(self) -> None:
+        self.__mutobj_storage__ = {}
         self._mcp_conns: dict[str, Any] = {}
         self._removed: list[Any] = []
         self._added: list[tuple[Any, Any]] = []
