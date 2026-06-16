@@ -128,8 +128,8 @@ def _runtime_messages(registry: ModuleRegistry) -> list[dict[str, str]]:
 def web_ui_server_init__(
     self: WebUIServer,
     *,
-    app: Any,
-    agent: Any,
+    app: App,
+    agent: Agent,
     host: str = "127.0.0.1",
     port: int = 0,
 ) -> None:

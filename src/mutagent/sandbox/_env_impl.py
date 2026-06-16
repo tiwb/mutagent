@@ -520,7 +520,7 @@ def sandbox_env_remove_provider(self: SandboxEnv, ns: Namespace) -> bool:
 
 
 @mutobj.impl(SandboxEnv.connect_source)
-def sandbox_env_connect_source(self: SandboxEnv, conn: Any) -> None:
+def sandbox_env_connect_source(self: SandboxEnv, conn: MCPConnection) -> None:
     """注入一个 MCP 连接源。幂等。"""
     from mutagent.sandbox._mcp_impl import MCPConnectionImpl
 
@@ -531,7 +531,7 @@ def sandbox_env_connect_source(self: SandboxEnv, conn: Any) -> None:
     registry = _get_registry(self)
     existing = registry.namespaces.get(conn.namespace.name, [])
     if conn.namespace not in existing:
-        sandbox_env_add_namespace(self, conn.namespace, on_remove=conn.close)
+        sandbox_env_add_namespace(self, cast(Namespace, conn.namespace), on_remove=conn.close)
 
 
 @mutobj.impl(SandboxEnv.disconnect_source)
@@ -543,7 +543,7 @@ def sandbox_env_disconnect_source(self: SandboxEnv, name: str) -> None:
 
 
 @mutobj.impl(SandboxEnv.list_sources)
-def sandbox_env_list_sources(self: SandboxEnv) -> dict[str, Any]:
+def sandbox_env_list_sources(self: SandboxEnv) -> dict[str, MCPConnection]:
     return dict(_get_mcp_conns(self))
 
 

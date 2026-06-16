@@ -68,5 +68,3 @@ pythonVersion = "3.11"
 include = ["src"]
 extraPaths = ["src"]
 
-[tool.mutobj-lint]
-include = ["src"]

@@ -8,9 +8,10 @@ namespace 产出和 tool 元数据查询。Connector 是 Namespace 反向懒触�
 不感知 transport 细节（stdio / http）、状态机实现或内部锁。
 """
 
-from typing import Any, Literal
+from typing import Literal, Sequence
 
 import mutobj
+from mutio.codec.json import JsonObject
 from .namespace import NamespaceProtocol
 
 ConnectionState = Literal["disconnected", "connecting", "connected", "failed"]
@@ -34,7 +35,7 @@ class MCPConnection(mutobj.Declaration):
     def __init__(
         self,
         ns_name: str,
-        config: dict[str, Any],
+        config: JsonObject,
     ) -> None:
         """构造一个 MCP connection 代理。
 
@@ -47,7 +48,7 @@ class MCPConnection(mutobj.Declaration):
         ...
 
     @property
-    def config(self) -> dict[str, Any]:
+    def config(self) -> JsonObject:
         """构造时传入的 MCP server 配置（transport / command / url 等）。"""
         ...
 
@@ -76,7 +77,7 @@ class MCPConnection(mutobj.Declaration):
         ...
 
     @property
-    def peer_namespaces(self) -> list[NamespaceProtocol]:
+    def peer_namespaces(self) -> Sequence[NamespaceProtocol]:
         """从对端 pysandbox 融合进来的 peer namespaces。
 
         仅 HTTP transport + 对端支持 pysandbox capability 时非空。
@@ -113,7 +114,7 @@ class MCPConnection(mutobj.Declaration):
         """
         ...
 
-    def list_tools_metadata(self) -> list[dict[str, Any]]:
+    def list_tools_metadata(self) -> list[JsonObject]:
         """返回当前 source 暴露的 tool 元数据列表。"""
         ...
 

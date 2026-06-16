@@ -12,7 +12,10 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, TypeVar, cast
+from typing_extensions import TypeForm
+
+T = TypeVar('T')
 
 import mutobj
 from mutobj.core._fields import field
@@ -118,7 +121,7 @@ def _full_path(prefix: str, name: str) -> str:
 
 
 @mutobj.impl(ConfigSection.get)
-def config_section_get(self: ConfigSection, name: str, *, default: Any = None) -> Any:
+def config_section_get(self: ConfigSection, name: str, *, default: T = None) -> JsonValue | T:
     """读取配置值。name 为相对路径，递归展开环境变量。"""
     ext = _cext(self.config)
     full_name = _full_path(self.prefix, name)
@@ -131,7 +134,7 @@ def config_section_get(self: ConfigSection, name: str, *, default: Any = None) -
 
 
 @mutobj.impl(ConfigSection.get_field)
-def config_section_get_field(self: ConfigSection, name: str, type: Any = None, /, *, default: Any = None) -> Any:
+def config_section_get_field(self: ConfigSection, name: str, type: TypeForm[T], /, *, default: T = None) -> T:
     """类型化读取。值不匹配 type 时抛 TypeError，泛型只检测外容器类型。"""
     ext = _cext(self.config)
     full_name = _full_path(self.prefix, name)
@@ -146,7 +149,7 @@ def config_section_get_field(self: ConfigSection, name: str, type: Any = None, /
             f"Config key '{name}': expected {type}, "
             f"got {value.__class__.__name__}"
         )
-    return value
+    return cast(T, value)
 
 
 @mutobj.impl(ConfigSection.set)
@@ -308,8 +311,8 @@ def config_list_models(self: Config) -> list[JsonObject]:
 # ── 持久化 ───────────────────────────────────────────
 
 @mutobj.impl(Config.load)
-def config_load(self: Config, config_path: str) -> None:
-    p = Path(config_path).expanduser()
+def config_load(self: Config, path: str) -> None:
+    p = Path(path).expanduser()
     if not p.is_absolute():
         p = (Path.cwd() / p).resolve()
     # 项目级配置不存在时 fallback 到用户级 ~/.mutagent/config.json

@@ -20,7 +20,7 @@ import re
 import subprocess
 import sys
 import time
-from typing import Any, Optional, Union
+from typing import Any, Optional, Sequence, Union
 
 from mutio.codec.json import JsonObject, JsonValue, get_field, loads as _json_loads
 
@@ -33,6 +33,7 @@ from mutagent.sandbox._env_impl import (
     sandbox_env_remove_provider,
 )
 from mutagent.sandbox._namespace_impl import Namespace
+from mutagent.sandbox.namespace import NamespaceProtocol
 from mutagent.sandbox.mcp import ConnectionState, MCPConnection
 from mutio.mcp.client import MCPClient
 from mutio.mcp.protocol import PROTOCOL_VERSION
@@ -494,10 +495,10 @@ class MCPConnectionImpl(mutobj.Implementation[MCPConnection]):
     _peer_namespaces: list[Namespace] = mutobj.field(default_factory=list)
     sandbox: Any | None = None
 
-    def __init__(self, ns_name: str, server_config: JsonObject):
+    def __init__(self, ns_name: str, config: JsonObject):
         self._name = ns_name  # 原始名，用于日志
-        self._config = server_config
-        self.retry_cooldown = max(0.0, get_field(server_config, "retry_cooldown", float, default=5.0))
+        self._config = config
+        self.retry_cooldown = max(0.0, get_field(config, "retry_cooldown", float, default=5.0))
 
         # 始终存在的 namespace；失败 / 未连状态下函数表为空
         # namespace 名用 sanitized 版本，确保可作为 Python 标识符访问
@@ -527,7 +528,7 @@ class MCPConnectionImpl(mutobj.Implementation[MCPConnection]):
         return self._last_error
 
     @property
-    def namespace(self) -> Namespace:
+    def namespace(self) -> NamespaceProtocol:
         return self._namespace
 
     @property
@@ -539,7 +540,7 @@ class MCPConnectionImpl(mutobj.Implementation[MCPConnection]):
         return self._last_attempt_at
 
     @property
-    def peer_namespaces(self) -> list[Namespace]:
+    def peer_namespaces(self) -> Sequence[NamespaceProtocol]:
         return self._peer_namespaces
 
     # -- 状态变更 helper（保证 namespace 状态字段同步）-------------------

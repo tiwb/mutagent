@@ -195,8 +195,13 @@ def _resolve_view_class(item_type: type[ChatItem]) -> type[ChatItemView[Any]]:
         ) from None
 
 
+@mutobj.impl(ChatItemView[ChatItem].render)
+def chat_item_view_render(self: ChatItemView[ChatItem]) -> ViewBlock:
+    raise NotImplementedError
+
+
 @mutobj.impl(ChatItemView.for_item)
-def chat_item_view_for_item(cls: type[ChatItemView[Any]], item: ChatItem) -> ChatItemView[Any]:
+def chat_item_view_for_item(cls: type[ChatItemView[ChatItem]], item: ChatItem) -> ChatItemView[ChatItem]:
     view_cls = _resolve_view_class(type(item))
     return view_cls(item=item)
 

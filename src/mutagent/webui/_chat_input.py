@@ -33,6 +33,7 @@ class ChatInput(View):
 @mutobj.impl(ChatInput.__init__)
 def chat_input_init__(
     self: ChatInput,
+    *,
     conversation: Conversation,
 ) -> None:
     super(ChatInput, self).__init__()

@@ -57,7 +57,13 @@ class SettingPanel(View):
     on_open: Callable[[], None] = mutobj.field(default=lambda: None)
     on_close: Callable[[], None] = mutobj.field(default=lambda: None)
 
-    def load_config(self) -> None: ...
+
+# ── @impl: SettingPanel ─────────────────────────────────────
+
+
+@mutobj.impl(SettingPanel.render)
+def setting_panel_render(self: SettingPanel) -> ViewBlock:
+    raise NotImplementedError
 
 
 # ── @impl: __init__ ──────────────────────────────────────────

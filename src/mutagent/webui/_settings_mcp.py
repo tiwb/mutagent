@@ -711,7 +711,7 @@ def _render_list_row(self: MCPSettingPanel, key: str,
     if conn is not None and state == "connected":
         # 聚合同名 namespace（主 ns + peer namespaces），与 edit 页一致
         merged_funcs: dict[str, Any] = {}
-        for ns in [conn.namespace] + conn.peer_namespaces:
+        for ns in [conn.namespace, *conn.peer_namespaces]:
             merged_funcs.update(ns.functions)
         tools_count = len(merged_funcs)
     else:

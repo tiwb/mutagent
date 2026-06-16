@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import UnionType
 from typing import Callable, Iterable, TypeVar
 from typing_extensions import TypeForm
 
@@ -44,19 +43,12 @@ class ConfigSection(mutobj.Declaration):
         """
         ...
 
-    def get_field(self, name: str, type: TypeForm[T] | UnionType, /, *, default: T = None) -> T:
+    def get_field(self, name: str, type: TypeForm[T], /, *, default: T = None) -> T:
         """类型化读取配置值。
 
         name 和 type 位置传递，default 必须关键词传递。
         运行时做递归类型检查，不匹配抛 TypeError。
         泛型递归检测元素类型（如 list[str] 会检查每个元素是否为 str）。
-
-        ``type`` 参数签名为 ``type[T] | UnionType``：
-        单类型（str/int/float/bool）精确推导 T；Union（str | float）不报错，
-        但 T 从 default 推导。Union 字段推荐用 isinstance 逐分支窄化。
-
-        未来 PEP 747 ``TypeForm[T]`` 落地后可替换 ``UnionType``，
-        届时 union 的 T 也可从 type 精确推导。
         """
         ...
 
