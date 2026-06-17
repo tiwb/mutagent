@@ -1,0 +1,33 @@
+/* ToolCard styles */
+
+.mutagent-tool-card {
+  margin: 6px 0 10px 0;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid #8b949e;
+  background: rgba(255, 255, 255, 0.02);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mutagent-tool-pre {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  background: rgba(255, 255, 255, 0.04);
+  font-size: var(--mutagent-font-size-base);
+  font-family: var(--mutgui-font-mono, monospace);
+}
+
+.mutagent-tool-pre--error {
+  border-left: 3px solid #e5534b;
+}
+
+.mutagent-tool-divider {
+  height: 1px;
+  background: var(--mutgui-border);
+  margin: 4px 0;
+}

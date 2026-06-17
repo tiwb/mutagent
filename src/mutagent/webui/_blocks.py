@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 import mutobj
-from mutgui import Callback, View, ViewBlock
+from mutgui import View, ViewBlock
 from mutgui.view import RenderComponent, RenderNode, RenderTree
 
 
@@ -15,19 +15,7 @@ class BlockRenderer(View):
     def render(self) -> ViewBlock: ...
 
 
-class ThinkingBlock(View):
-    body: str = ""
-    expanded: bool = False
-
-    def render(self) -> ViewBlock: ...
-
-
 _FENCE_RE = re.compile(r"^```([^\n]*)$")
-
-
-def _toggle_thinking(*, view: ThinkingBlock) -> None:
-    view.expanded = not view.expanded
-    view.invalidate()
 
 
 def _render_text_block(text: str, *, kind: str = "paragraph") -> RenderComponent:
@@ -95,45 +83,6 @@ def _render_code_block(code: str, language: str) -> RenderComponent:
     }
 
 
-def _render_mutagent_block(block_type: str, body: str) -> RenderNode:
-    if block_type == "thinking":
-        return ThinkingBlock(body=body)
-    return {
-        "$component": "html.div",
-        "$id": f"mutagent-{block_type}-{abs(hash(body))}",
-        "style": {
-            "margin": "10px 0",
-            "padding": "10px 12px",
-            "borderRadius": 12,
-            "border": "1px solid var(--mutgui-border)",
-            "background": "rgba(255,255,255,0.03)",
-        },
-        "$children": [
-            {
-                "$component": "html.div",
-                "$id": "mutagent-label",
-                "style": {
-                    "fontSize": "var(--mutagent-font-size-meta)",
-                    "color": "var(--mutgui-text-dim)",
-                    "marginBottom": "6px",
-                },
-                "children": f"mutagent:{block_type}",
-            },
-            {
-                "$component": "html.pre",
-                "$id": "mutagent-body",
-                "style": {
-                    "margin": 0,
-                    "whiteSpace": "pre-wrap",
-                    "fontSize": "var(--mutagent-font-size-base)",
-                    "fontFamily": "var(--mutgui-font-mono, monospace)",
-                },
-                "children": body,
-            },
-        ],
-    }
-
-
 def _render_markdown_chunks(text: str) -> list[RenderComponent]:
     parts: list[RenderComponent] = []
     for raw in text.split("\n\n"):
@@ -174,11 +123,7 @@ def _render_segments(text: str) -> RenderTree:
                 fence_lines = []
             else:
                 body = "\n".join(fence_lines)
-                if fence_lang.startswith("mutagent:"):
-                    block_type = fence_lang[len("mutagent:") :].strip() or "code"
-                    parts.append(_render_mutagent_block(block_type, body))
-                else:
-                    parts.append(_render_code_block(body, fence_lang))
+                parts.append(_render_code_block(body, fence_lang))
                 in_fence = False
                 fence_lang = ""
                 fence_lines = []
@@ -208,63 +153,3 @@ def block_renderer_render(self: BlockRenderer) -> ViewBlock:
     ])
 
 
-@mutobj.impl(ThinkingBlock.render)
-def thinking_block_render(self: ThinkingBlock) -> ViewBlock:
-    children: list[RenderNode] = [
-        {
-            "$component": "html.div",
-            "$id": "thinking-header",
-            "style": {
-                "display": "flex",
-                "alignItems": "center",
-                "justifyContent": "space-between",
-            },
-            "$children": [
-                {
-                    "$component": "html.div",
-                    "$id": "thinking-title",
-                    "style": {
-                        "fontSize": "var(--mutagent-font-size-meta)",
-                        "color": "var(--mutgui-text-dim)",
-                    },
-                    "children": "thinking",
-                },
-                {
-                    "$component": "antd.Button",
-                    "$id": "thinking-toggle",
-                    "size": "small",
-                    "children": "展开" if not self.expanded else "收起",
-                    "onClick": Callback(_toggle_thinking, view=self),
-                },
-            ],
-        }
-    ]
-    if self.expanded:
-        children.append(
-            {
-                "$component": "html.pre",
-                "$id": "thinking-body",
-                "style": {
-                    "margin": "8px 0 0 0",
-                    "whiteSpace": "pre-wrap",
-                    "fontSize": "var(--mutagent-font-size-base)",
-                    "fontFamily": "var(--mutgui-font-mono, monospace)",
-                    "color": "var(--mutgui-text-dim)",
-                },
-                "children": self.body,
-            }
-        )
-    return ViewBlock([
-        {
-            "$component": "html.div",
-            "$id": "thinking-shell",
-            "style": {
-                "margin": "10px 0",
-                "padding": "10px 12px",
-                "borderRadius": 12,
-                "border": "1px solid var(--mutgui-border)",
-                "background": "rgba(255,255,255,0.03)",
-            },
-            "$children": children,
-        }
-    ])

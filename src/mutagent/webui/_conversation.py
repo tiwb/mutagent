@@ -13,6 +13,7 @@ from mutagent.core.messages import (
     Message,
     StreamEvent,
     TextBlock,
+    ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
 )
@@ -23,6 +24,7 @@ from ._messages import (
     AssistantTextItem,
     ChatItem,
     MessageList,
+    ThinkingBlockItem,
     ToolCallItem,
     TurnSeparatorItem,
     UserTextItem,
@@ -99,6 +101,7 @@ class ConversationExt(mutobj.Extension[Conversation]):
     turn_started_at: float = 0.0
     subscription: CancelFn | None = None
     pending_model: str = ""
+    appended_thinking_ids: set[str] = mutobj.field(default_factory=set)
 
 def _cext(self: Conversation) -> ConversationExt:
     return ConversationExt.get_or_create(self)
@@ -198,6 +201,19 @@ def rebuild_items_from_messages(messages: list[Message]) -> list[ChatItem]:
             turn_input_tokens += message.input_tokens
             turn_output_tokens += message.output_tokens
             turn_duration += message.duration
+            # thinking blocks — 在正文前显示
+            for block in message.blocks:
+                if not isinstance(block, ThinkingBlock):
+                    continue
+                if not block.thinking:
+                    continue
+                items.append(ThinkingBlockItem(
+                    id=f"thinking-{message.id or time.time_ns()}",
+                    kind="assistant.thinking",
+                    thinking=block.thinking,
+                    signature=block.signature,
+                    data=block.data,
+                ))
             if text:
                 items.append(AssistantTextItem(
                     id=message.id or _now_item_id("assistant"),
@@ -219,7 +235,7 @@ def rebuild_items_from_messages(messages: list[Message]) -> list[ChatItem]:
                     kind="assistant.tool_group",
                     tool_id=block.id,
                     name=block.name,
-                    input_text=str(block.input),
+                    input_kwargs=block.input,
                     status="pending",
                 ))
             if _assistant_turn_ends(messages, index):
@@ -442,14 +458,14 @@ async def handle_agent_event(self: Conversation, event: StreamEvent) -> None:
                     kind="assistant.tool_group",
                     tool_id=tool_call.id,
                     name=tool_call.name,
-                    input_text=str(tool_call.input),
+                    input_kwargs=tool_call.input,
                     status="pending",
                 ),
             )
         tool_item = self.message_list.find_item(item_id)
         if isinstance(tool_item, ToolCallItem):
             tool_item.status = "pending"
-            tool_item.input_text = str(tool_call.input)
+            tool_item.input_kwargs = tool_call.input
             self.message_list.invalidate_item(item_id)
         self.status = "tool_calling"
     elif event.type == "tool_exec_end" and isinstance(event.tool_call, ToolResultBlock):
@@ -477,6 +493,26 @@ async def handle_agent_event(self: Conversation, event: StreamEvent) -> None:
         ext.turn_input_tokens += response.message.input_tokens
         ext.turn_output_tokens += response.message.output_tokens
         self.message_list.invalidate_item(assistant_item.id)
+        # 流式结束后，thinking blocks 作为独立 item 插入
+        from mutagent.core.messages import ThinkingBlock
+        appended_thinking_ids: set[str] = ext.appended_thinking_ids
+        for block in response.message.blocks:
+            if not isinstance(block, ThinkingBlock) or not block.thinking:
+                continue
+            block_key = block.thinking[:40]
+            if block_key in appended_thinking_ids:
+                continue
+            appended_thinking_ids.add(block_key)
+            self.message_list.append_item(
+                ThinkingBlockItem(
+                    id=_now_item_id("thinking"),
+                    kind="assistant.thinking",
+                    thinking=block.thinking,
+                    signature=block.signature,
+                    data=block.data,
+                ),
+            )
+        ext.appended_thinking_ids = appended_thinking_ids
     elif event.type == "error":
         logger.error("Conversation received error event: %s", event.error or "Unknown error")
         self.message_list.append_item(

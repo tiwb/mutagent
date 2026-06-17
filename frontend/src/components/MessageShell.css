@@ -1,0 +1,72 @@
+/* Message shell shared styles — bubbles + meta + dividers */
+
+.mutagent-message-shell {
+  display: flex;
+  justify-content: flex-start;
+  padding: 6px 0;
+}
+
+.mutagent-bubble {
+  max-width: 80%;
+  border-radius: 14px;
+  padding: 10px 14px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.mutagent-bubble--user {
+  background: var(--mutgui-accent);
+  color: #ffffff;
+}
+
+.mutagent-bubble--assistant {
+  background: var(--mutgui-surface);
+  color: var(--mutgui-text);
+  border: 1px solid var(--mutgui-border);
+}
+
+.mutagent-bubble--error {
+  background: rgba(229, 83, 75, 0.08);
+  color: var(--mutgui-text);
+  border: 1px solid #e5534b;
+}
+
+.mutagent-meta {
+  font-size: var(--mutagent-font-size-meta);
+  color: var(--mutgui-text-dim);
+  margin-bottom: 6px;
+}
+
+.mutagent-message-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.65;
+  font-size: var(--mutagent-font-size-base);
+}
+
+.mutagent-error-text {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: var(--mutagent-font-size-base);
+  font-family: var(--mutgui-font-mono, monospace);
+}
+
+/* Turn separator */
+.mutagent-turn-separator {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+}
+
+.mutagent-turn-line {
+  flex: 1;
+  height: 1px;
+  background: var(--mutgui-border);
+}
+
+.mutagent-turn-detail {
+  font-size: var(--mutagent-font-size-meta);
+  color: var(--mutgui-text-dim);
+  white-space: nowrap;
+}

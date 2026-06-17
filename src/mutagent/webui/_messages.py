@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
-import time
 from typing import Any, ClassVar, Generic, TypeVar
 
 import mutobj
 from ._blocks import BlockRenderer
 from mutgui import Callback, View, ViewBlock, VirtualList, VirtualListItemAdapter
+from mutio.codec.json import JsonObject
 
 _T = TypeVar("_T", bound="ChatItem")
 
@@ -54,12 +53,20 @@ class TurnSeparatorItem(ChatItem):
 class ToolCallItem(ChatItem):
     tool_id: str
     name: str
-    input_text: str = ""
+    input_kwargs: JsonObject = mutobj.field(default_factory=dict)
     result_text: str = ""
     status: str = "pending"
     is_error: bool = False
     duration: float = 0.0
     expanded: bool = True
+
+
+@dataclass(slots=True)
+class ThinkingBlockItem(ChatItem):
+    thinking: str
+    signature: str = ""
+    data: str = ""
+    expanded: bool = False
 
 
 class ChatItemView(View, Generic[_T]):
@@ -141,23 +148,11 @@ class ToolCallCard(ChatItemView[ToolCallItem]):
     def render(self) -> ViewBlock: ...
 
 
-# ── 工具函数 ──────────────────────────────────────────────────
+class ThinkingBlockView(ChatItemView[ThinkingBlockItem]):
+    item_type: ClassVar[type[ChatItem]] = ThinkingBlockItem
+    item: ThinkingBlockItem
 
-
-def _format_clock(timestamp: float) -> str:
-    if not timestamp:
-        return ""
-    return time.strftime("%H:%M:%S", time.localtime(timestamp))
-
-
-def _role_meta(role: str, model: str = "", timestamp: float = 0.0) -> str:
-    parts = [role]
-    if model:
-        parts.append(model)
-    clock = _format_clock(timestamp)
-    if clock:
-        parts.append(clock)
-    return " · ".join(parts)
+    def render(self) -> ViewBlock: ...
 
 
 # ---------------------------------------------------------------------------
@@ -294,40 +289,6 @@ def message_list_replace_items(self: MessageList, items: list[ChatItem]) -> None
     self.items[:] = items
     self.refresh()
 
-
-# ---------------------------------------------------------------------------
-# 气泡通用样式
-# ---------------------------------------------------------------------------
-
-
-def _bubble_shell(is_user: bool) -> dict[str, Any]:
-    return {
-        "display": "flex",
-        "justifyContent": "flex-end" if is_user else "flex-start",
-        "padding": "6px 0",
-    }
-
-
-def _bubble_style(is_user: bool) -> dict[str, Any]:
-    return {
-        "maxWidth": "80%",
-        "borderRadius": 14,
-        "padding": "10px 14px",
-        "background": "var(--mutgui-accent)" if is_user else "var(--mutgui-surface)",
-        "color": "#ffffff" if is_user else "var(--mutgui-text)",
-        "boxShadow": "0 1px 3px rgba(0, 0, 0, 0.08)",
-        "border": "none" if is_user else "1px solid var(--mutgui-border)",
-    }
-
-
-def _meta_style() -> dict[str, Any]:
-    return {
-        "fontSize": "var(--mutagent-font-size-meta)",
-        "color": "var(--mutgui-text-dim)",
-        "marginBottom": 6,
-    }
-
-
 # ---------------------------------------------------------------------------
 # UserMessage
 # ---------------------------------------------------------------------------
@@ -337,35 +298,11 @@ def _meta_style() -> dict[str, Any]:
 def user_message_render(self: UserMessage) -> ViewBlock:
     return ViewBlock([
         {
-            "$component": "html.div",
-            "$id": "user-row",
-            "style": _bubble_shell(True),
-            "$children": [
-                {
-                    "$component": "html.div",
-                    "$id": "user-bubble",
-                    "style": _bubble_style(True),
-                    "$children": [
-                        {
-                            "$component": "html.div",
-                            "$id": "user-meta",
-                            "style": _meta_style(),
-                            "children": _role_meta("你", timestamp=self.item.timestamp),
-                        },
-                        {
-                            "$component": "html.div",
-                            "$id": "user-text",
-                            "style": {
-                                "whiteSpace": "pre-wrap",
-                                "wordBreak": "break-word",
-                                "lineHeight": 1.65,
-                                "fontSize": "var(--mutagent-font-size-base)",
-                            },
-                            "children": self.item.text,
-                        },
-                    ],
-                }
-            ],
+            "$component": "mutagent.UserMessage",
+            "$id": self.item.id,
+            "role": "你",
+            "timestamp": self.item.timestamp,
+            "text": self.item.text,
         }
     ])
 
@@ -391,29 +328,12 @@ def assistant_message_render(self: AssistantMessage) -> ViewBlock:
         self.renderer.id = f"block-renderer-{self.item.id}"
     return ViewBlock([
         {
-            "$component": "html.div",
-            "$id": "assistant-row",
-            "style": _bubble_shell(False),
-            "$children": [
-                {
-                    "$component": "html.div",
-                    "$id": "assistant-bubble",
-                    "style": _bubble_style(False),
-                    "$children": [
-                        {
-                            "$component": "html.div",
-                            "$id": "assistant-meta",
-                            "style": _meta_style(),
-                            "children": _role_meta(
-                                "助手",
-                                model=self.item.model,
-                                timestamp=self.item.timestamp,
-                            ),
-                        },
-                        self.renderer,
-                    ],
-                }
-            ],
+            "$component": "mutagent.AssistantMessage",
+            "$id": self.item.id,
+            "role": "助手",
+            "model": self.item.model,
+            "timestamp": self.item.timestamp,
+            "$children": [self.renderer],
         }
     ])
 
@@ -427,40 +347,11 @@ def assistant_message_render(self: AssistantMessage) -> ViewBlock:
 def assistant_error_render(self: AssistantError) -> ViewBlock:
     return ViewBlock([
         {
-            "$component": "html.div",
-            "$id": "error-row",
-            "style": _bubble_shell(False),
-            "$children": [
-                {
-                    "$component": "html.div",
-                    "$id": "error-bubble",
-                    "style": {
-                        **_bubble_style(False),
-                        "border": "1px solid #e5534b",
-                        "background": "rgba(229, 83, 75, 0.08)",
-                    },
-                    "$children": [
-                        {
-                            "$component": "html.div",
-                            "$id": "error-meta",
-                            "style": _meta_style(),
-                            "children": _role_meta("错误", timestamp=self.item.timestamp),
-                        },
-                        {
-                            "$component": "html.pre",
-                            "$id": "error-text",
-                            "style": {
-                                "margin": 0,
-                                "whiteSpace": "pre-wrap",
-                                "wordBreak": "break-word",
-                                "fontSize": "var(--mutagent-font-size-base)",
-                                "fontFamily": "var(--mutgui-font-mono, monospace)",
-                            },
-                            "children": self.item.error,
-                        },
-                    ],
-                }
-            ],
+            "$component": "mutagent.AssistantError",
+            "$id": self.item.id,
+            "role": "错误",
+            "timestamp": self.item.timestamp,
+            "error": self.item.error,
         }
     ])
 
@@ -472,49 +363,42 @@ def assistant_error_render(self: AssistantError) -> ViewBlock:
 
 @mutobj.impl(TurnSeparator.render)
 def turn_separator_render(self: TurnSeparator) -> ViewBlock:
-    detail = (
-        f"{self.item.duration:.1f}s · in {self.item.input_tokens} · out {self.item.output_tokens}"
-        if self.item.duration or self.item.input_tokens or self.item.output_tokens
-        else "turn done"
-    )
     return ViewBlock([
         {
-            "$component": "html.div",
-            "$id": "turn-separator",
-            "style": {
-                "display": "flex",
-                "alignItems": "center",
-                "gap": "12px",
-                "padding": "10px 0",
-            },
+            "$component": "mutagent.TurnSeparator",
+            "$id": self.item.id,
+            "duration": self.item.duration,
+            "inputTokens": self.item.input_tokens,
+            "outputTokens": self.item.output_tokens,
+        }
+    ])
+
+
+# ---------------------------------------------------------------------------
+# ThinkingBlockView
+# ---------------------------------------------------------------------------
+
+
+def _toggle_thinking(*, view: ThinkingBlockView) -> None:
+    view.item.expanded = not view.item.expanded
+    view.invalidate()
+
+
+@mutobj.impl(ThinkingBlockView.render)
+def thinking_block_view_render(self: ThinkingBlockView) -> ViewBlock:
+    return ViewBlock([
+        {
+            "$component": "mutagent.ThinkingBlock",
+            "$id": self.item.id,
+            "thinking": self.item.thinking,
+            "expanded": self.item.expanded,
             "$children": [
                 {
-                    "$component": "html.div",
-                    "$id": "line-left",
-                    "style": {
-                        "flex": 1,
-                        "height": "1px",
-                        "background": "var(--mutgui-border)",
-                    },
-                },
-                {
-                    "$component": "html.div",
-                    "$id": "turn-detail",
-                    "style": {
-                        "fontSize": "var(--mutagent-font-size-meta)",
-                        "color": "var(--mutgui-text-dim)",
-                    },
-                    "children": detail,
-                },
-                {
-                    "$component": "html.div",
-                    "$id": "line-right",
-                    "style": {
-                        "flex": 1,
-                        "height": "1px",
-                        "background": "var(--mutgui-border)",
-                    },
-                },
+                    "$component": "antd.Button",
+                    "size": "small",
+                    "children": "展开" if not self.item.expanded else "收起",
+                    "onClick": Callback(_toggle_thinking, view=self),
+                }
             ],
         }
     ])
@@ -525,158 +409,16 @@ def turn_separator_render(self: TurnSeparator) -> ViewBlock:
 # ---------------------------------------------------------------------------
 
 
-def _toggle_tool_card(*, view: ToolCallCard) -> None:
-    view.item.expanded = not view.item.expanded
-    view.invalidate()
-
-
-def _pretty_json(text: str) -> str:
-    if not text:
-        return ""
-    try:
-        return json.dumps(json.loads(text), ensure_ascii=False, indent=2)
-    except Exception:
-        return text
-
-
 @mutobj.impl(ToolCallCard.render)
 def tool_call_card_render(self: ToolCallCard) -> ViewBlock:
-    status = self.item.status
-    status_text = {
-        "pending": "pending",
-        "success": "success",
-        "error": "error",
-        "cancelled": "cancelled",
-    }.get(status, status)
-    status_color = {
-        "pending": "#d4a72c",
-        "success": "#2fb171",
-        "error": "#e5534b",
-        "cancelled": "#8b949e",
-    }.get(status, "#8b949e")
-    input_text = _pretty_json(self.item.input_text)
-    result_text = _pretty_json(self.item.result_text)
-    children: list[Any] = [
-        {
-            "$component": "html.div",
-            "$id": "header",
-            "style": {
-                "display": "flex",
-                "alignItems": "center",
-                "justifyContent": "space-between",
-                "gap": "12px",
-            },
-            "$children": [
-                {
-                    "$component": "html.div",
-                    "$id": "tool-title",
-                    "style": {"fontWeight": 600},
-                    "children": self.item.name,
-                },
-                {
-                    "$component": "html.div",
-                    "$id": "status",
-                    "style": {
-                        "fontSize": "var(--mutagent-font-size-meta)",
-                        "color": status_color,
-                    },
-                    "children": status_text,
-                },
-            ],
-        },
-        {
-            "$component": "antd.Button",
-            "$id": "toggle",
-            "size": "small",
-            "children": "展开" if not self.item.expanded else "收起",
-            "onClick": Callback(_toggle_tool_card, view=self),
-        },
-    ]
-    if self.item.expanded:
-        if input_text:
-            children.append(
-                {
-                    "$component": "html.div",
-                    "$id": "input",
-                    "style": {"marginTop": "10px"},
-                    "$children": [
-                        {
-                            "$component": "html.div",
-                            "$id": "input-label",
-                            "style": {
-                                "fontSize": "var(--mutagent-font-size-meta)",
-                                "color": "var(--mutgui-text-dim)",
-                                "marginBottom": "6px",
-                            },
-                            "children": "Input",
-                        },
-                        {
-                            "$component": "html.pre",
-                            "$id": "input-pre",
-                            "style": {
-                                "margin": 0,
-                                "padding": "10px 12px",
-                                "borderRadius": 12,
-                                "overflowX": "auto",
-                                "whiteSpace": "pre-wrap",
-                                "background": "rgba(255,255,255,0.04)",
-                                "fontSize": "var(--mutagent-font-size-base)",
-                                "fontFamily": "var(--mutgui-font-mono, monospace)",
-                            },
-                            "children": input_text,
-                        },
-                    ],
-                }
-            )
-        if result_text:
-            children.append(
-                {
-                    "$component": "html.div",
-                    "$id": "result",
-                    "style": {"marginTop": "10px"},
-                    "$children": [
-                        {
-                            "$component": "html.div",
-                            "$id": "result-label",
-                            "style": {
-                                "fontSize": "var(--mutagent-font-size-meta)",
-                                "color": "var(--mutgui-text-dim)",
-                                "marginBottom": "6px",
-                            },
-                            "children": "Result",
-                        },
-                        {
-                            "$component": "html.pre",
-                            "$id": "result-pre",
-                            "style": {
-                                "margin": 0,
-                                "padding": "10px 12px",
-                                "borderRadius": 12,
-                                "overflowX": "auto",
-                                "whiteSpace": "pre-wrap",
-                                "background": "rgba(255,255,255,0.04)",
-                                "fontSize": "var(--mutagent-font-size-base)",
-                                "fontFamily": "var(--mutgui-font-mono, monospace)",
-                            },
-                            "children": result_text,
-                        },
-                    ],
-                }
-            )
     return ViewBlock([
         {
-            "$component": "html.div",
-            "$id": "tool-card",
-            "style": {
-                "margin": "6px 0 10px 0",
-                "padding": "12px 14px",
-                "borderRadius": 14,
-                "border": f"1px solid {status_color}",
-                "background": "rgba(255,255,255,0.02)",
-                "display": "flex",
-                "flexDirection": "column",
-                "gap": "8px",
-            },
-            "$children": children,
+            "$component": "mutagent.ToolCallCard",
+            "$id": self.item.id,
+            "name": self.item.name,
+            "status": self.item.status,
+            "input": self.item.input_kwargs,
+            "resultText": self.item.result_text or None,
+            "isError": self.item.is_error,
         }
     ])

@@ -1,0 +1,26 @@
+.mutagent-thinking-shell {
+  margin: 6px 0 10px 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--mutgui-border);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.mutagent-thinking-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.mutagent-thinking-title {
+  font-size: var(--mutagent-font-size-meta);
+  color: var(--mutgui-text-dim);
+}
+
+.mutagent-thinking-body {
+  margin: 8px 0 0 0;
+  white-space: pre-wrap;
+  font-size: var(--mutagent-font-size-base);
+  font-family: var(--mutgui-font-mono, monospace);
+  color: var(--mutgui-text-dim);
+}
