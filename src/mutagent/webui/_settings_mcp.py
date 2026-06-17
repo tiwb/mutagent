@@ -98,7 +98,7 @@ class MCPSettingPanel(SettingPanel):
         else:
             children = _render_list(self)
         return ViewBlock([{
-            "$component": "div",
+            "$component": "html.div",
             "$id": "mcp-settings-body",
             "style": {"paddingBottom": 12},
             "$children": children,
@@ -719,7 +719,7 @@ def _render_list_row(self: MCPSettingPanel, key: str,
     tools_label = f"{tools_count} functions" if tools_count else ""
 
     return {
-        "$component": "div",
+        "$component": "html.div",
         "$id": f"mcp-row-{key}",
         "style": {
             "display": "flex",
@@ -733,7 +733,7 @@ def _render_list_row(self: MCPSettingPanel, key: str,
         "$children": [
             # 名字 + transport tag + state tag (clickable → edit)
             {
-                "$component": "div",
+                "$component": "html.div",
                 "$id": f"mcp-row-info-{key}",
                 "style": {
                     "flex": "1",
@@ -746,7 +746,7 @@ def _render_list_row(self: MCPSettingPanel, key: str,
                 "onClick": Callback(_edit_source, key, view=self),
                 "$children": [
                     {
-                        "$component": "div",
+                        "$component": "html.div",
                         "$id": f"mcp-row-title-{key}",
                         "style": {
                             "display": "flex",
@@ -756,7 +756,7 @@ def _render_list_row(self: MCPSettingPanel, key: str,
                         },
                         "$children": [
                             {
-                                "$component": "div",
+                                "$component": "html.div",
                                 "style": {"fontWeight": 600},
                                 "children": key,
                             },
@@ -771,7 +771,7 @@ def _render_list_row(self: MCPSettingPanel, key: str,
                                 "children": _state_tag_text(state, conn),
                             },
                             *([{
-                                "$component": "div",
+                                "$component": "html.div",
                                 "style": {
                                     "fontSize": "12px",
                                     "color": "var(--mutgui-text-dim)",
@@ -836,7 +836,7 @@ def _render_list(self: MCPSettingPanel) -> list[dict[str, Any]]:
             "description": "No MCP sources configured yet",
         }]
     items.append({
-        "$component": "div",
+        "$component": "html.div",
         "$id": "mcp-list",
         "style": {
             "display": "flex",
@@ -848,7 +848,7 @@ def _render_list(self: MCPSettingPanel) -> list[dict[str, Any]]:
     })
 
     items.append({
-        "$component": "div",
+        "$component": "html.div",
         "$id": "mcp-config-path",
         "style": {
             "marginTop": 4,
@@ -931,7 +931,7 @@ def _render_function_browser(self: MCPSettingPanel,
     """
     if conn is None or conn.state != "connected":
         return {
-            "$component": "div",
+            "$component": "html.div",
             "$id": "mcp-func-empty",
             "style": {
                 "padding": "12px",
@@ -994,7 +994,7 @@ def _render_function_browser(self: MCPSettingPanel,
                 if fn_expanded:
                     detail_text = _fn_detail(func, fname)
                     detail_block = [{
-                        "$component": "div",
+                        "$component": "html.div",
                         "$id": f"mcp-fn-detail-{full_name}",
                         "style": {
                             "marginTop": 4,
@@ -1011,11 +1011,11 @@ def _render_function_browser(self: MCPSettingPanel,
                     }]
 
                 func_rows.append({
-                    "$component": "div",
+                    "$component": "html.div",
                     "$id": f"mcp-fn-row-{full_name}",
                     "$children": [
                         {
-                            "$component": "div",
+                            "$component": "html.div",
                             "$id": f"mcp-fn-click-{full_name}",
                             "style": {
                                 "display": "grid",
@@ -1028,7 +1028,7 @@ def _render_function_browser(self: MCPSettingPanel,
                             "onClick": Callback(_toggle_fn, full_name, view=self),
                             "$children": [
                                 {
-                                    "$component": "div",
+                                    "$component": "html.div",
                                     "$id": f"mcp-fn-toggle-{full_name}",
                                     "style": {
                                         "fontSize": "10px",
@@ -1037,7 +1037,7 @@ def _render_function_browser(self: MCPSettingPanel,
                                     "children": fn_toggle,
                                 },
                                 {
-                                    "$component": "div",
+                                    "$component": "html.div",
                                     "$id": f"mcp-fn-name-{full_name}",
                                     "style": {
                                         "fontFamily": "'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace",
@@ -1049,7 +1049,7 @@ def _render_function_browser(self: MCPSettingPanel,
                                     "children": fname,
                                 },
                                 {
-                                    "$component": "div",
+                                    "$component": "html.div",
                                     "$id": f"mcp-fn-desc-{full_name}",
                                     "style": {
                                         "fontSize": "12px",
@@ -1067,12 +1067,12 @@ def _render_function_browser(self: MCPSettingPanel,
                 })
 
         ns_rows.append({
-            "$component": "div",
+            "$component": "html.div",
             "$id": f"mcp-ns-block-{ns_name}",
             "$children": [
                 # Level 1: namespace 行
                 {
-                    "$component": "div",
+                    "$component": "html.div",
                     "$id": f"mcp-ns-row-{ns_name}",
                     "style": {
                         "display": "flex",
@@ -1085,19 +1085,19 @@ def _render_function_browser(self: MCPSettingPanel,
                     "onClick": Callback(_toggle_ns, ns_name, view=self),
                     "$children": [
                         {
-                            "$component": "div",
+                            "$component": "html.div",
                             "$id": f"mcp-ns-toggle-{ns_name}",
                             "style": {"fontSize": "12px", "width": "14px"},
                             "children": toggle,
                         },
                         {
-                            "$component": "div",
+                            "$component": "html.div",
                             "$id": f"mcp-ns-name-{ns_name}",
                             "style": {"fontWeight": 600, "fontSize": "13px"},
                             "children": ns_name,
                         },
                         {
-                            "$component": "div",
+                            "$component": "html.div",
                             "$id": f"mcp-ns-count-{ns_name}",
                             "style": {"fontSize": "12px", "color": "var(--mutgui-text-dim)"},
                             "children": f"({len(funcs)} functions)",
@@ -1106,7 +1106,7 @@ def _render_function_browser(self: MCPSettingPanel,
                 },
                 # Level 2~3: 函数列表（仅展开时）
                 *([{
-                    "$component": "div",
+                    "$component": "html.div",
                     "$id": f"mcp-func-list-{ns_name}",
                     "style": {
                         "display": "flex",
@@ -1121,14 +1121,14 @@ def _render_function_browser(self: MCPSettingPanel,
 
     if not ns_rows:
         return {
-            "$component": "div",
+            "$component": "html.div",
             "$id": "mcp-func-none",
             "style": {"padding": "12px", "color": "var(--mutgui-text-dim)", "fontSize": "13px"},
             "children": "(connected, but no functions discovered)",
         }
 
     return {
-        "$component": "div",
+        "$component": "html.div",
         "$id": "mcp-func-browser",
         "style": {
             "display": "flex",
@@ -1167,7 +1167,7 @@ def _render_edit(self: MCPSettingPanel) -> list[dict[str, Any]]:
                 "onClick": Callback(_back_to_list, view=self),
             },
             {
-                "$component": "div",
+                "$component": "html.div",
                 "style": {"fontWeight": 600},
                 "children": key or "(new source)",
             },
@@ -1364,7 +1364,7 @@ def _render_edit(self: MCPSettingPanel) -> list[dict[str, Any]]:
             total_funcs += len(merged)
 
     func_header_children: list[dict[str, Any]] = [{
-        "$component": "div",
+        "$component": "html.div",
         "$id": "mcp-func-title",
         "style": {"fontWeight": 500, "fontSize": "13px"},
         "children": f"Functions ({total_funcs})" if total_funcs else "Functions",
@@ -1379,7 +1379,7 @@ def _render_edit(self: MCPSettingPanel) -> list[dict[str, Any]]:
             "onClick": Callback(_btn_reload_tools, key, view=self),
         })
     items.append({
-        "$component": "div",
+        "$component": "html.div",
         "$id": "mcp-func-header",
         "style": {
             "display": "flex",
@@ -1457,7 +1457,7 @@ def _render_edit(self: MCPSettingPanel) -> list[dict[str, Any]]:
     })
 
     items.append({
-        "$component": "div",
+        "$component": "html.div",
         "$id": "mcp-edit-actions",
         "style": {
             "display": "flex",

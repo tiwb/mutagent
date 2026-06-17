@@ -620,13 +620,13 @@ def conversation_render(self: Conversation) -> ViewBlock:
     else:
         children = [
             {
-                "$component": "div",
+                "$component": "html.div",
                 "$id": "toolbar-shell",
                 "style": {"padding": "8px 12px"},
                 "$children": [self.toolbar],
             },
             {
-                "$component": "div",
+                "$component": "html.div",
                 "$id": "messages-shell",
                 "style": {
                     "flex": 1,
@@ -641,7 +641,7 @@ def conversation_render(self: Conversation) -> ViewBlock:
         ]
     return ViewBlock([
         {
-            "$component": "div",
+            "$component": "html.div",
             "$id": "conversation-root",
             "style": {
                 "--mutagent-font-size-base": "13px",

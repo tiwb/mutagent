@@ -261,7 +261,7 @@ def message_list_invalidate_item(self: MessageList, item_id: str) -> None:
 def message_list_render(self: MessageList) -> ViewBlock:
     return ViewBlock([
         {
-            "$component": "div",
+            "$component": "html.div",
             "$id": "message-list-shell",
             "style": {
                 "height": "100%",
@@ -337,23 +337,23 @@ def _meta_style() -> dict[str, Any]:
 def user_message_render(self: UserMessage) -> ViewBlock:
     return ViewBlock([
         {
-            "$component": "div",
+            "$component": "html.div",
             "$id": "user-row",
             "style": _bubble_shell(True),
             "$children": [
                 {
-                    "$component": "div",
+                    "$component": "html.div",
                     "$id": "user-bubble",
                     "style": _bubble_style(True),
                     "$children": [
                         {
-                            "$component": "div",
+                            "$component": "html.div",
                             "$id": "user-meta",
                             "style": _meta_style(),
                             "children": _role_meta("你", timestamp=self.item.timestamp),
                         },
                         {
-                            "$component": "div",
+                            "$component": "html.div",
                             "$id": "user-text",
                             "style": {
                                 "whiteSpace": "pre-wrap",
@@ -391,17 +391,17 @@ def assistant_message_render(self: AssistantMessage) -> ViewBlock:
         self.renderer.id = f"block-renderer-{self.item.id}"
     return ViewBlock([
         {
-            "$component": "div",
+            "$component": "html.div",
             "$id": "assistant-row",
             "style": _bubble_shell(False),
             "$children": [
                 {
-                    "$component": "div",
+                    "$component": "html.div",
                     "$id": "assistant-bubble",
                     "style": _bubble_style(False),
                     "$children": [
                         {
-                            "$component": "div",
+                            "$component": "html.div",
                             "$id": "assistant-meta",
                             "style": _meta_style(),
                             "children": _role_meta(
@@ -427,12 +427,12 @@ def assistant_message_render(self: AssistantMessage) -> ViewBlock:
 def assistant_error_render(self: AssistantError) -> ViewBlock:
     return ViewBlock([
         {
-            "$component": "div",
+            "$component": "html.div",
             "$id": "error-row",
             "style": _bubble_shell(False),
             "$children": [
                 {
-                    "$component": "div",
+                    "$component": "html.div",
                     "$id": "error-bubble",
                     "style": {
                         **_bubble_style(False),
@@ -441,13 +441,13 @@ def assistant_error_render(self: AssistantError) -> ViewBlock:
                     },
                     "$children": [
                         {
-                            "$component": "div",
+                            "$component": "html.div",
                             "$id": "error-meta",
                             "style": _meta_style(),
                             "children": _role_meta("错误", timestamp=self.item.timestamp),
                         },
                         {
-                            "$component": "pre",
+                            "$component": "html.pre",
                             "$id": "error-text",
                             "style": {
                                 "margin": 0,
@@ -479,7 +479,7 @@ def turn_separator_render(self: TurnSeparator) -> ViewBlock:
     )
     return ViewBlock([
         {
-            "$component": "div",
+            "$component": "html.div",
             "$id": "turn-separator",
             "style": {
                 "display": "flex",
@@ -489,7 +489,7 @@ def turn_separator_render(self: TurnSeparator) -> ViewBlock:
             },
             "$children": [
                 {
-                    "$component": "div",
+                    "$component": "html.div",
                     "$id": "line-left",
                     "style": {
                         "flex": 1,
@@ -498,7 +498,7 @@ def turn_separator_render(self: TurnSeparator) -> ViewBlock:
                     },
                 },
                 {
-                    "$component": "div",
+                    "$component": "html.div",
                     "$id": "turn-detail",
                     "style": {
                         "fontSize": "var(--mutagent-font-size-meta)",
@@ -507,7 +507,7 @@ def turn_separator_render(self: TurnSeparator) -> ViewBlock:
                     "children": detail,
                 },
                 {
-                    "$component": "div",
+                    "$component": "html.div",
                     "$id": "line-right",
                     "style": {
                         "flex": 1,
@@ -558,7 +558,7 @@ def tool_call_card_render(self: ToolCallCard) -> ViewBlock:
     result_text = _pretty_json(self.item.result_text)
     children: list[Any] = [
         {
-            "$component": "div",
+            "$component": "html.div",
             "$id": "header",
             "style": {
                 "display": "flex",
@@ -568,13 +568,13 @@ def tool_call_card_render(self: ToolCallCard) -> ViewBlock:
             },
             "$children": [
                 {
-                    "$component": "div",
+                    "$component": "html.div",
                     "$id": "tool-title",
                     "style": {"fontWeight": 600},
                     "children": self.item.name,
                 },
                 {
-                    "$component": "div",
+                    "$component": "html.div",
                     "$id": "status",
                     "style": {
                         "fontSize": "var(--mutagent-font-size-meta)",
@@ -596,12 +596,12 @@ def tool_call_card_render(self: ToolCallCard) -> ViewBlock:
         if input_text:
             children.append(
                 {
-                    "$component": "div",
+                    "$component": "html.div",
                     "$id": "input",
                     "style": {"marginTop": "10px"},
                     "$children": [
                         {
-                            "$component": "div",
+                            "$component": "html.div",
                             "$id": "input-label",
                             "style": {
                                 "fontSize": "var(--mutagent-font-size-meta)",
@@ -611,7 +611,7 @@ def tool_call_card_render(self: ToolCallCard) -> ViewBlock:
                             "children": "Input",
                         },
                         {
-                            "$component": "pre",
+                            "$component": "html.pre",
                             "$id": "input-pre",
                             "style": {
                                 "margin": 0,
@@ -631,12 +631,12 @@ def tool_call_card_render(self: ToolCallCard) -> ViewBlock:
         if result_text:
             children.append(
                 {
-                    "$component": "div",
+                    "$component": "html.div",
                     "$id": "result",
                     "style": {"marginTop": "10px"},
                     "$children": [
                         {
-                            "$component": "div",
+                            "$component": "html.div",
                             "$id": "result-label",
                             "style": {
                                 "fontSize": "var(--mutagent-font-size-meta)",
@@ -646,7 +646,7 @@ def tool_call_card_render(self: ToolCallCard) -> ViewBlock:
                             "children": "Result",
                         },
                         {
-                            "$component": "pre",
+                            "$component": "html.pre",
                             "$id": "result-pre",
                             "style": {
                                 "margin": 0,
@@ -665,7 +665,7 @@ def tool_call_card_render(self: ToolCallCard) -> ViewBlock:
             )
     return ViewBlock([
         {
-            "$component": "div",
+            "$component": "html.div",
             "$id": "tool-card",
             "style": {
                 "margin": "6px 0 10px 0",

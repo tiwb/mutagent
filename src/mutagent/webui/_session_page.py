@@ -136,7 +136,7 @@ def _scan_sessions(session_dir: Path) -> list[SessionSummary]:
 
 def _render_resume_page(self: ResumeSessionPage) -> ViewBlock:
     back_btn: dict[str, Any] = {
-        "$component": "div",
+        "$component": "html.div",
         "$id": "resume-back-btn",
         "children": "← 返回对话",
         "onClick": Callback(_on_back_click, self),
@@ -148,7 +148,7 @@ def _render_resume_page(self: ResumeSessionPage) -> ViewBlock:
         },
     }
     header: dict[str, Any] = {
-        "$component": "div",
+        "$component": "html.div",
         "$id": "resume-header",
         "style": {
             "display": "flex",
@@ -161,7 +161,7 @@ def _render_resume_page(self: ResumeSessionPage) -> ViewBlock:
         },
         "$children": [
             {
-                "$component": "div",
+                "$component": "html.div",
                 "$id": "resume-header-left",
                 "style": {
                     "display": "flex",
@@ -171,7 +171,7 @@ def _render_resume_page(self: ResumeSessionPage) -> ViewBlock:
                 "$children": [
                     back_btn,
                     {
-                        "$component": "div",
+                        "$component": "html.div",
                         "$id": "resume-title",
                         "style": {
                             "fontSize": "18px",
@@ -203,7 +203,7 @@ def _render_resume_page(self: ResumeSessionPage) -> ViewBlock:
                 },
                 "onClick": Callback(_on_resume_click, self, entry.path),
                 "$children": [{
-                    "$component": "div",
+                    "$component": "html.div",
                     "$id": "resume-entry-content",
                     "style": {
                         "display": "flex",
@@ -214,7 +214,7 @@ def _render_resume_page(self: ResumeSessionPage) -> ViewBlock:
                     },
                     "$children": [
                         {
-                            "$component": "div",
+                            "$component": "html.div",
                             "$id": "resume-entry-title",
                             "style": {
                                 "fontSize": "var(--mutagent-font-size-base)",
@@ -228,7 +228,7 @@ def _render_resume_page(self: ResumeSessionPage) -> ViewBlock:
                             "children": entry.title,
                         },
                         {
-                            "$component": "div",
+                            "$component": "html.div",
                             "$id": "resume-entry-meta",
                             "style": {
                                 "fontSize": "var(--mutagent-font-size-meta)",
@@ -241,7 +241,7 @@ def _render_resume_page(self: ResumeSessionPage) -> ViewBlock:
             })
     else:
         body_children.append({
-            "$component": "div",
+            "$component": "html.div",
             "$id": "resume-empty",
             "style": {
                 "padding": "32px 16px",
@@ -252,7 +252,7 @@ def _render_resume_page(self: ResumeSessionPage) -> ViewBlock:
         })
 
     root: dict[str, Any] = {
-        "$component": "div",
+        "$component": "html.div",
         "$id": "resume-page-root",
         "style": {
             "display": "flex",
@@ -265,7 +265,7 @@ def _render_resume_page(self: ResumeSessionPage) -> ViewBlock:
         "$children": [
             header,
             {
-                "$component": "div",
+                "$component": "html.div",
                 "$id": "resume-list",
                 "style": {
                     "display": "flex",

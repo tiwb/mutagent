@@ -51,13 +51,13 @@ def _render_text_block(text: str, *, kind: str = "paragraph") -> RenderComponent
         )
     else:
         style["margin"] = "8px 0"
-    return {"$component": "div", "$id": f"{kind}-{abs(hash(text))}", "style": style, "children": text}
+    return {"$component": "html.div", "$id": f"{kind}-{abs(hash(text))}", "style": style, "children": text}
 
 
 def _render_code_block(code: str, language: str) -> RenderComponent:
     header = language or "code"
     return {
-        "$component": "div",
+        "$component": "html.div",
         "$id": f"code-{abs(hash(code + language))}",
         "style": {
             "margin": "10px 0",
@@ -68,7 +68,7 @@ def _render_code_block(code: str, language: str) -> RenderComponent:
         },
         "$children": [
             {
-                "$component": "div",
+                "$component": "html.div",
                 "$id": "code-header",
                 "style": {
                     "padding": "6px 10px",
@@ -79,7 +79,7 @@ def _render_code_block(code: str, language: str) -> RenderComponent:
                 "children": header,
             },
             {
-                "$component": "pre",
+                "$component": "html.pre",
                 "$id": "code-pre",
                 "style": {
                     "margin": 0,
@@ -99,7 +99,7 @@ def _render_mutagent_block(block_type: str, body: str) -> RenderNode:
     if block_type == "thinking":
         return ThinkingBlock(body=body)
     return {
-        "$component": "div",
+        "$component": "html.div",
         "$id": f"mutagent-{block_type}-{abs(hash(body))}",
         "style": {
             "margin": "10px 0",
@@ -110,7 +110,7 @@ def _render_mutagent_block(block_type: str, body: str) -> RenderNode:
         },
         "$children": [
             {
-                "$component": "div",
+                "$component": "html.div",
                 "$id": "mutagent-label",
                 "style": {
                     "fontSize": "var(--mutagent-font-size-meta)",
@@ -120,7 +120,7 @@ def _render_mutagent_block(block_type: str, body: str) -> RenderNode:
                 "children": f"mutagent:{block_type}",
             },
             {
-                "$component": "pre",
+                "$component": "html.pre",
                 "$id": "mutagent-body",
                 "style": {
                     "margin": 0,
@@ -200,7 +200,7 @@ def block_renderer_render(self: BlockRenderer) -> ViewBlock:
     parts = _render_segments(self.text)
     return ViewBlock([
         {
-            "$component": "div",
+            "$component": "html.div",
             "$id": "block-renderer",
             "style": {"display": "flex", "flexDirection": "column"},
             "$children": parts,
@@ -212,7 +212,7 @@ def block_renderer_render(self: BlockRenderer) -> ViewBlock:
 def thinking_block_render(self: ThinkingBlock) -> ViewBlock:
     children: list[RenderNode] = [
         {
-            "$component": "div",
+            "$component": "html.div",
             "$id": "thinking-header",
             "style": {
                 "display": "flex",
@@ -221,7 +221,7 @@ def thinking_block_render(self: ThinkingBlock) -> ViewBlock:
             },
             "$children": [
                 {
-                    "$component": "div",
+                    "$component": "html.div",
                     "$id": "thinking-title",
                     "style": {
                         "fontSize": "var(--mutagent-font-size-meta)",
@@ -242,7 +242,7 @@ def thinking_block_render(self: ThinkingBlock) -> ViewBlock:
     if self.expanded:
         children.append(
             {
-                "$component": "pre",
+                "$component": "html.pre",
                 "$id": "thinking-body",
                 "style": {
                     "margin": "8px 0 0 0",
@@ -256,7 +256,7 @@ def thinking_block_render(self: ThinkingBlock) -> ViewBlock:
         )
     return ViewBlock([
         {
-            "$component": "div",
+            "$component": "html.div",
             "$id": "thinking-shell",
             "style": {
                 "margin": "10px 0",

@@ -90,7 +90,7 @@ class LLMSettingPanel(SettingPanel):
         else:
             children = _render_list(self)
         return ViewBlock([{
-            "$component": "div",
+            "$component": "html.div",
             "$id": "llm-settings-body",
             "style": {"paddingBottom": 12},
             "$children": children,
@@ -656,7 +656,7 @@ def _render_list(self: LLMSettingPanel) -> list[dict[str, Any]]:
             },
             "onClick": Callback(_edit_provider, key, view=self),
             "$children": [{
-                "$component": "div",
+                "$component": "html.div",
                 "$id": f"provider-text-{key}",
                 "style": {
                     "display": "flex",
@@ -666,7 +666,7 @@ def _render_list(self: LLMSettingPanel) -> list[dict[str, Any]]:
                 },
                 "$children": [
                     {
-                        "$component": "div",
+                        "$component": "html.div",
                         "$id": f"provider-header-{key}",
                         "style": {
                             "display": "flex",
@@ -676,7 +676,7 @@ def _render_list(self: LLMSettingPanel) -> list[dict[str, Any]]:
                         },
                         "$children": [
                             {
-                                "$component": "div",
+                                "$component": "html.div",
                                 "$id": f"provider-title-{key}",
                                 "style": {"fontWeight": 600},
                                 "children": key,
@@ -690,7 +690,7 @@ def _render_list(self: LLMSettingPanel) -> list[dict[str, Any]]:
                         ],
                     },
                     {
-                        "$component": "div",
+                        "$component": "html.div",
                         "$id": f"provider-summary-{key}",
                         "style": {
                             "fontSize": "12px",
@@ -723,7 +723,7 @@ def _render_list(self: LLMSettingPanel) -> list[dict[str, Any]]:
             "$children": add_buttons,
         },
         {
-            "$component": "div",
+            "$component": "html.div",
             "$id": "provider-list",
             "style": {"display": "flex", "flexDirection": "column", "gap": "8px", "marginBottom": 16},
             "$children": provider_buttons or [{
@@ -755,7 +755,7 @@ def _render_list(self: LLMSettingPanel) -> list[dict[str, Any]]:
             }],
         },
         {
-            "$component": "div",
+            "$component": "html.div",
             "$id": "config-path",
             "style": {
                 "marginTop": 4,
@@ -857,7 +857,7 @@ def _render_edit(self: LLMSettingPanel) -> list[dict[str, Any]]:
                     "$id": "models-item",
                     "$children": [
                         {
-                            "$component": "div",
+                            "$component": "html.div",
                             "$id": "models-header",
                             "style": {
                                 "display": "flex",
@@ -868,17 +868,17 @@ def _render_edit(self: LLMSettingPanel) -> list[dict[str, Any]]:
                             },
                             "$children": [
                                 {
-                                    "$component": "div",
+                                    "$component": "html.div",
                                     "$id": "models-label-wrap",
                                     "$children": [
                                         {
-                                            "$component": "div",
+                                            "$component": "html.div",
                                             "$id": "models-label",
                                             "style": {"fontWeight": 500},
                                             "children": "Models",
                                         },
                                         {
-                                            "$component": "div",
+                                            "$component": "html.div",
                                             "$id": "discover-hint",
                                             "style": {"fontSize": "12px", "color": "var(--mutgui-text-dim)"},
                                             "children": "模型发现会按 Provider Type 对应的协议规则处理",

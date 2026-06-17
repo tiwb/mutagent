@@ -129,7 +129,7 @@ def settings_page_render(self: SettingsPage) -> ViewBlock:
     }
 
     back_btn: dict[str, Any] = {
-        "$component": "div",
+        "$component": "html.div",
         "$id": "settings-back-btn",
         "children": "← 返回对话",
         "onClick": Callback(_on_back_click, self),
@@ -142,7 +142,7 @@ def settings_page_render(self: SettingsPage) -> ViewBlock:
     }
 
     sider_header: dict[str, Any] = {
-        "$component": "div",
+        "$component": "html.div",
         "$id": "settings-sider-header",
         "style": {
             "display": "flex",
@@ -155,7 +155,7 @@ def settings_page_render(self: SettingsPage) -> ViewBlock:
     }
 
     sider_wrap: dict[str, Any] = {
-        "$component": "div",
+        "$component": "html.div",
         "$id": "settings-sider",
         "style": {
             "width": "220px",
@@ -172,7 +172,7 @@ def settings_page_render(self: SettingsPage) -> ViewBlock:
 
     title_text = active.panel_title if active else ""
     header: dict[str, Any] = {
-        "$component": "div",
+        "$component": "html.div",
         "$id": "settings-content-header",
         "style": {
             "display": "flex",
@@ -183,7 +183,7 @@ def settings_page_render(self: SettingsPage) -> ViewBlock:
         },
         "$children": [
             {
-                "$component": "div",
+                "$component": "html.div",
                 "$id": "settings-content-title",
                 "style": {
                     "fontSize": "var(--mutagent-font-size-base)",
@@ -197,7 +197,7 @@ def settings_page_render(self: SettingsPage) -> ViewBlock:
 
     body_children: list[Any] = [active] if active is not None else []
     body: dict[str, Any] = {
-        "$component": "div",
+        "$component": "html.div",
         "$id": "settings-content-body",
         "style": {
             "flex": 1,
@@ -209,7 +209,7 @@ def settings_page_render(self: SettingsPage) -> ViewBlock:
     }
 
     content: dict[str, Any] = {
-        "$component": "div",
+        "$component": "html.div",
         "$id": "settings-content",
         "style": {
             "flex": 1,
@@ -222,7 +222,7 @@ def settings_page_render(self: SettingsPage) -> ViewBlock:
     }
 
     root: dict[str, Any] = {
-        "$component": "div",
+        "$component": "html.div",
         "$id": "settings-page-root",
         "style": {
             "display": "flex",

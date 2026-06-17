@@ -117,6 +117,7 @@ def _runtime_messages(registry: ModuleRegistry) -> list[dict[str, str]]:
         messages.append({"type": "runtime.css", "href": href})
     messages.extend([
         {"type": "runtime.import", "module": "@mutgui/antd"},
+        {"type": "runtime.import", "module": "@mutgui/html"},
         {"type": "runtime.import", "module": "@mutagent/ui"},
         {"type": "runtime.install", "module": "@mutgui/theme-dark"},
         {"type": "runtime.mount"},

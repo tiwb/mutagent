@@ -85,7 +85,7 @@ def agent_status_bar_render(self: AgentStatusBar) -> ViewBlock:
             "error": "var(--mutgui-danger, #ff4d4f)",
         }.get(self.status, "var(--mutgui-text-dim)")
         segments.append({
-            "$component": "div",
+            "$component": "html.div",
             "$id": "status-text",
             "style": {
                 "fontSize": "var(--mutagent-font-size-meta)",
@@ -98,7 +98,7 @@ def agent_status_bar_render(self: AgentStatusBar) -> ViewBlock:
     # Cost
     cost_text = f"${self.total_cost:.3f}" if self.total_cost else "$0"
     segments.append({
-        "$component": "div",
+        "$component": "html.div",
         "$id": "status-cost",
         "style": {
             "fontSize": "var(--mutagent-font-size-meta)",
@@ -115,7 +115,7 @@ def agent_status_bar_render(self: AgentStatusBar) -> ViewBlock:
     else:
         ctx_str = f"{ctx_used_str}/?"
     segments.append({
-        "$component": "div",
+        "$component": "html.div",
         "$id": "status-context",
         "style": {
             "fontSize": "var(--mutagent-font-size-meta)",
@@ -127,7 +127,7 @@ def agent_status_bar_render(self: AgentStatusBar) -> ViewBlock:
 
     # 紧凑行
     compact_row = {
-        "$component": "div",
+        "$component": "html.div",
         "$id": "status-compact",
         "style": {
             "display": "flex",
@@ -146,7 +146,7 @@ def agent_status_bar_render(self: AgentStatusBar) -> ViewBlock:
 
     def _add_row(label: str, value: str) -> None:
         detail_lines.append({
-            "$component": "div",
+            "$component": "html.div",
             "style": {
                 "display": "flex",
                 "justifyContent": "space-between",
@@ -155,8 +155,8 @@ def agent_status_bar_render(self: AgentStatusBar) -> ViewBlock:
                 "padding": "2px 0",
             },
             "$children": [
-                {"$component": "div", "style": {"color": "var(--mutgui-text-dim)"}, "children": label},
-                {"$component": "div", "style": {"color": "var(--mutgui-text)", "fontVariantNumeric": "tabular-nums"}, "children": value},
+                {"$component": "html.div", "style": {"color": "var(--mutgui-text-dim)"}, "children": label},
+                {"$component": "html.div", "style": {"color": "var(--mutgui-text)", "fontVariantNumeric": "tabular-nums"}, "children": value},
             ],
         })
 
@@ -176,7 +176,7 @@ def agent_status_bar_render(self: AgentStatusBar) -> ViewBlock:
             else "var(--mutgui-danger, #ff4d4f)"
         )
         detail_lines.append({
-            "$component": "div",
+            "$component": "html.div",
             "style": {
                 "marginBottom": "8px",
                 "height": "4px",
@@ -185,7 +185,7 @@ def agent_status_bar_render(self: AgentStatusBar) -> ViewBlock:
                 "overflow": "hidden",
             },
             "$children": [{
-                "$component": "div",
+                "$component": "html.div",
                 "style": {
                     "height": "100%",
                     "width": f"{min(ctx_pct * 100, 100):.1f}%",
@@ -206,7 +206,7 @@ def agent_status_bar_render(self: AgentStatusBar) -> ViewBlock:
     _add_row("Cost", f"${self.total_cost:.6f}")
 
     detail_panel = {
-        "$component": "div",
+        "$component": "html.div",
         "$id": "status-detail",
         "style": {
             "minWidth": "240px",
