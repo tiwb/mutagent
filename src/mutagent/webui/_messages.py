@@ -69,6 +69,32 @@ class ThinkingBlockItem(ChatItem):
     expanded: bool = False
 
 
+@dataclass(slots=True)
+class SectionHeadingItem(ChatItem):
+    """标题 item，独立渲染为可折叠的标题行。
+
+    text 保留原始文本（可能含 **粗体** / *斜体* / `行内代码` 等），
+    由前端标题组件做行内 markdown 渲染。
+    """
+    text: str
+    level: int
+    collapsed: bool = False
+    turn_id: str = ""
+
+
+@dataclass(slots=True)
+class MarkdownItem(ChatItem):
+    """Markdown 文本内容块，由前端 markdown 渲染器处理。"""
+    text: str
+
+
+@dataclass(slots=True)
+class CodeBlockItem(ChatItem):
+    """Fenced code block 内容块。"""
+    code: str
+    language: str = ""
+
+
 class ChatItemView(View, Generic[_T]):
     """所有 ChatItem 渲染器的统一基类。
 
@@ -94,6 +120,8 @@ class MessageList(View):
     items: list[ChatItem] = mutobj.field(default_factory=list)
     adapter: _MessageListAdapter
     virtual_list: VirtualList
+    parser: Any = None
+    turn_base: int = 0
 
     def __init__(self) -> None: ...
 
@@ -106,6 +134,16 @@ class MessageList(View):
     def refresh(self) -> None: ...
 
     def invalidate_item(self, item_id: str) -> None: ...
+
+    def remove_items(self, item_ids: list[str]) -> None: ...
+
+    def begin_turn(self) -> None: ...
+
+    def end_turn(self) -> None: ...
+
+    def sync_from_parser(self, new_items: list[ChatItem]) -> None: ...
+
+    def toggle_section_collapse(self, section_id: str) -> None: ...
 
     def render(self) -> ViewBlock: ...
 
@@ -151,6 +189,31 @@ class ToolCallCard(ChatItemView[ToolCallItem]):
 class ThinkingBlockView(ChatItemView[ThinkingBlockItem]):
     item_type: ClassVar[type[ChatItem]] = ThinkingBlockItem
     item: ThinkingBlockItem
+
+    def render(self) -> ViewBlock: ...
+
+
+class SectionHeadingView(ChatItemView[SectionHeadingItem]):
+    """标题行渲染器。渲染标题文本 + 折叠/展开按钮。"""
+    item_type: ClassVar[type[ChatItem]] = SectionHeadingItem
+    item: SectionHeadingItem
+    msg_list_ref: MessageList | None = None
+
+    def render(self) -> ViewBlock: ...
+
+
+class MarkdownView(ChatItemView[MarkdownItem]):
+    """Markdown 文本块渲染器。"""
+    item_type: ClassVar[type[ChatItem]] = MarkdownItem
+    item: MarkdownItem
+
+    def render(self) -> ViewBlock: ...
+
+
+class CodeBlockView(ChatItemView[CodeBlockItem]):
+    """代码块渲染器。"""
+    item_type: ClassVar[type[ChatItem]] = CodeBlockItem
+    item: CodeBlockItem
 
     def render(self) -> ViewBlock: ...
 
@@ -217,7 +280,10 @@ class _MessageListAdapter(VirtualListItemAdapter):
         return self.message_list.items[index].id
 
     def create_item_view(self, index: int) -> View:
-        return ChatItemView.for_item(self.message_list.items[index])
+        view = ChatItemView.for_item(self.message_list.items[index])
+        if isinstance(view, SectionHeadingView):
+            view.msg_list_ref = self.message_list
+        return view
 
     def invalidate_existing_item(self, item_id: str) -> None:
         for virtual_list in self.virtual_lists:
@@ -239,6 +305,8 @@ def message_list_init(self: MessageList) -> None:
         stick_to_bottom=True,
         estimated_item_height=128,
     )
+    self.turn_base = 0
+    self.parser = None
 
 
 @mutobj.impl(MessageList.refresh)
@@ -288,6 +356,93 @@ def message_list_find_item(self: MessageList, item_id: str) -> ChatItem | None:
 def message_list_replace_items(self: MessageList, items: list[ChatItem]) -> None:
     self.items[:] = items
     self.refresh()
+
+
+@mutobj.impl(MessageList.remove_items)
+def message_list_remove_items(self: MessageList, item_ids: list[str]) -> None:
+    ids_set = set(item_ids)
+    self.items[:] = [item for item in self.items if item.id not in ids_set]
+    self.refresh()
+
+
+@mutobj.impl(MessageList.begin_turn)
+def message_list_begin_turn(self: MessageList) -> None:
+    from ._markdown_parser import IncrementalMarkdownParser
+    self.turn_base = len(self.items)
+    self.parser = IncrementalMarkdownParser(prefix=f"turn-{len(self.items)}-")
+
+
+@mutobj.impl(MessageList.end_turn)
+def message_list_end_turn(self: MessageList) -> None:
+    self.parser = None
+    self.turn_base = 0
+
+
+@mutobj.impl(MessageList.sync_from_parser)
+def message_list_sync_from_parser(self: MessageList, new_items: list[ChatItem]) -> None:
+    """Diff parser 输出与当前 turn items，增量更新。
+
+    - 新增 item: append
+    - 内容变化: invalidate_item
+    - 数量减少（折叠等）: replace_items
+    """
+    turn_base = self.turn_base
+    old_turn_items = self.items[turn_base:] if turn_base < len(self.items) else []
+    old_count = len(old_turn_items)
+    new_count = len(new_items)
+
+    if new_count < old_count:
+        # 折叠导致 item 减少 → 整体替换 turn 区段
+        self.items[turn_base:] = new_items
+        self.refresh()
+        return
+
+    # 追加新 item
+    for item in new_items[old_count:]:
+        self.items.append(item)
+
+    # 检查已有 item 内容变化
+    for i in range(min(old_count, new_count)):
+        old_item = old_turn_items[i]
+        new_item = new_items[i]
+        if old_item.id != new_item.id:
+            # ID 分歧（不应在流式场景出现）→ fallback
+            self.items[turn_base:] = new_items
+            self.refresh()
+            return
+        if _items_differ(old_item, new_item):
+            self.items[turn_base + i] = new_item
+            self.invalidate_item(new_item.id)
+
+    if new_count > old_count:
+        self.refresh()
+
+
+@mutobj.impl(MessageList.toggle_section_collapse)
+def message_list_toggle_section_collapse(self: MessageList, section_id: str) -> None:
+    if self.parser is None:
+        return
+    self.parser.toggle_collapse(section_id)
+    self.sync_from_parser(self.parser.visible_items())
+
+
+# ---------------------------------------------------------------------------
+# 辅助函数
+# ---------------------------------------------------------------------------
+
+
+def _items_differ(a: ChatItem, b: ChatItem) -> bool:
+    """比较两个 ChatItem 的内容是否不同。"""
+    if type(a) is not type(b):
+        return True
+    if isinstance(a, SectionHeadingItem) and isinstance(b, SectionHeadingItem):
+        return a.text != b.text or a.level != b.level or a.collapsed != b.collapsed
+    if isinstance(a, MarkdownItem) and isinstance(b, MarkdownItem):
+        return a.text != b.text
+    if isinstance(a, CodeBlockItem) and isinstance(b, CodeBlockItem):
+        return a.code != b.code or a.language != b.language
+    return True
+
 
 # ---------------------------------------------------------------------------
 # UserMessage
@@ -420,5 +575,56 @@ def tool_call_card_render(self: ToolCallCard) -> ViewBlock:
             "input": self.item.input_kwargs,
             "resultText": self.item.result_text or None,
             "isError": self.item.is_error,
+        }
+    ])
+
+
+# ---------------------------------------------------------------------------
+# SectionHeadingView
+# ---------------------------------------------------------------------------
+
+
+@mutobj.impl(SectionHeadingView.render)
+def section_heading_view_render(self: SectionHeadingView) -> ViewBlock:
+    return ViewBlock([
+        {
+            "$component": "mutagent.SectionHeading",
+            "$id": self.item.id,
+            "text": self.item.text,
+            "level": self.item.level,
+            "collapsed": self.item.collapsed,
+        }
+    ])
+
+
+# ---------------------------------------------------------------------------
+# MarkdownView
+# ---------------------------------------------------------------------------
+
+
+@mutobj.impl(MarkdownView.render)
+def markdown_view_render(self: MarkdownView) -> ViewBlock:
+    return ViewBlock([
+        {
+            "$component": "mutagent.MarkdownContent",
+            "$id": self.item.id,
+            "text": self.item.text,
+        }
+    ])
+
+
+# ---------------------------------------------------------------------------
+# CodeBlockView
+# ---------------------------------------------------------------------------
+
+
+@mutobj.impl(CodeBlockView.render)
+def code_block_view_render(self: CodeBlockView) -> ViewBlock:
+    return ViewBlock([
+        {
+            "$component": "mutagent.CodeBlock",
+            "$id": self.item.id,
+            "code": self.item.code,
+            "language": self.item.language,
         }
     ])

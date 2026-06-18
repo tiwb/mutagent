@@ -1,0 +1,41 @@
+/* SectionHeading — 可折叠标题行
+ *
+ * 字号统一 ``--mutagent-font-size-base``，与正文一致。
+ * 颜色使用 ``--mutagent-heading-color``（默认淡黄色），可全局覆盖或按层级覆盖。
+ * 各级标题仅靠 ``font-weight`` 区分层级，用户可单独覆盖任一 ``--levelN`` class。
+ */
+
+.mutagent-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px 2px;
+  font-size: var(--mutagent-font-size-base);
+  color: var(--mutagent-heading-color, #f0e68c);
+  line-height: 1.4;
+}
+
+.mutagent-section-heading__text {
+  flex: 1;
+  word-break: break-word;
+}
+
+/* ── 各级标题独立样式，可单独覆盖 ── */
+
+.mutagent-section-heading--level1 { font-weight: 700; }
+.mutagent-section-heading--level1::before { content: '#'; margin-right: 0.4em; }
+
+.mutagent-section-heading--level2 { font-weight: 700; }
+.mutagent-section-heading--level2::before { content: '##'; margin-right: 0.4em; }
+
+.mutagent-section-heading--level3 { font-weight: 600; }
+.mutagent-section-heading--level3::before { content: '###'; margin-right: 0.4em; }
+
+.mutagent-section-heading--level4 { font-weight: 600; }
+.mutagent-section-heading--level4::before { content: '####'; margin-right: 0.4em; }
+
+.mutagent-section-heading--level5 { font-weight: 600; }
+.mutagent-section-heading--level5::before { content: '#####'; margin-right: 0.4em; }
+
+.mutagent-section-heading--level6 { font-weight: 600; }
+.mutagent-section-heading--level6::before { content: '######'; margin-right: 0.4em; }

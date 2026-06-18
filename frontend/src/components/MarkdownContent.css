@@ -1,0 +1,73 @@
+/* MarkdownContent — 文本内容块（react-markdown 渲染） */
+
+.mutagent-markdown-content {
+  word-break: break-word;
+  line-height: 1.7;
+  font-size: var(--mutagent-font-size-base);
+  margin: 8px 0;
+  padding: 0 12px;
+  color: var(--mutagent-content-color, var(--mutgui-text));
+}
+
+/* 列表 — 减小默认缩进 */
+.mutagent-markdown-content ol,
+.mutagent-markdown-content ul {
+  padding-left: 1.2em;
+  margin: 0.4em 0;
+}
+
+/* 分割线 */
+.mutagent-markdown-content hr {
+  border: none;
+  border-top: 1px solid var(--mutagent-hr-color, var(--mutgui-border));
+  margin: 0.8em 0;
+}
+
+/* 段落 — 缩减默认间距 */
+.mutagent-markdown-content p {
+}
+
+/* 表格 */
+.mutagent-markdown-content table {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+  font-size: 0.95em;
+}
+
+.mutagent-markdown-content th,
+.mutagent-markdown-content td {
+  padding: 6px 12px;
+  border: 1px solid var(--mutgui-border);
+  text-align: left;
+}
+
+.mutagent-markdown-content th {
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+/* blockquote — 左侧竖线，与标题文字对齐 */
+.mutagent-markdown-content blockquote {
+  margin: 0;
+  padding: 0 0 0 8px;
+  border-left: 2px solid var(--mutagent-content-color, oklch(0.70 0 0));
+}
+
+/* inline code */
+.mutagent-markdown-content code {
+  font-family: var(--mutgui-font-mono, monospace);
+  color: var(--mutagent-code-color, oklch(0.75 0.15 160));
+}
+
+/* fenced code block fallback（正常不应出现，已被 CodeBlockItem 提取） */
+.mutagent-markdown-content pre {
+  margin: 10px 0;
+  padding: 12px 14px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  font-size: var(--mutagent-font-size-base);
+  font-family: var(--mutgui-font-mono, monospace);
+  border: 1px solid var(--mutgui-border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+}

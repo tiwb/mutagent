@@ -1,0 +1,35 @@
+/* CodeBlock — 纯文本风格 fenced code block
+ *
+ * 无边框无背景。上下 ``` 和语言名是独立元素。
+ * ``mutagent-code-block__fence-mark`` — ``` 符号
+ * ``mutagent-code-block__fence-lang`` — 语言名
+ * ``mutagent-code-block__code``   — 代码正文
+ */
+
+.mutagent-code-block {
+  margin: 4px 0;
+  padding: 0 12px;
+  font-size: var(--mutagent-font-size-base);
+  font-family: var(--mutgui-font-mono, monospace);
+}
+
+.mutagent-code-block__fence {
+  margin: 4px 0;
+  color: var(--mutagent-code-fence-color, var(--mutgui-text-dim));
+}
+
+.mutagent-code-block__fence-mark {
+  /* 可单独覆盖 ``` 样式 */
+}
+
+.mutagent-code-block__fence-lang {
+  /* 可单独覆盖语言名样式，如：font-style: italic; color: ...; */
+}
+
+.mutagent-code-block__code {
+  margin: 0;
+  padding: 2px 0;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  color: var(--mutagent-code-color, var(--mutgui-text));
+}

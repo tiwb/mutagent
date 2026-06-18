@@ -21,8 +21,8 @@ from mutagent.core.llm import LLMApiClient
 from ._chat_input import ChatInput
 from ._messages import (
     AssistantErrorItem,
-    AssistantTextItem,
     ChatItem,
+    MarkdownItem,
     MessageList,
     ThinkingBlockItem,
     ToolCallItem,
@@ -111,12 +111,6 @@ def _cext(self: Conversation) -> ConversationExt:
 
 def _now_item_id(prefix: str) -> str:
     return f"{prefix}-{time.time_ns()}"
-
-
-def _extract_text(message: Message) -> str:
-    return "".join(
-        block.text for block in message.blocks if isinstance(block, TextBlock)
-    )
 
 
 def reset_context_usage(context: AgentContext) -> None:
@@ -215,16 +209,9 @@ def rebuild_items_from_messages(messages: list[Message]) -> list[ChatItem]:
                     data=block.data,
                 ))
             if text:
-                items.append(AssistantTextItem(
-                    id=message.id or _now_item_id("assistant"),
-                    kind="assistant.text",
-                    text=text,
-                    model=message.model,
-                    timestamp=message.timestamp,
-                    duration=message.duration,
-                    input_tokens=message.input_tokens,
-                    output_tokens=message.output_tokens,
-                ))
+                from ._markdown_parser import IncrementalMarkdownParser
+                parser = IncrementalMarkdownParser(prefix=f"{message.id or 'assistant'}-")
+                items.extend(parser.parse_complete(text))
             for block in message.blocks:
                 if not isinstance(block, ToolUseBlock):
                     continue
@@ -404,47 +391,20 @@ async def _handle_cancel(self: Conversation) -> None:
         self.invalidate()
 
 
-def _ensure_current_assistant(self: Conversation, event: StreamEvent) -> AssistantTextItem:
-    ext = _cext(self)
-    item = None
-    if ext.current_assistant_id:
-        found = self.message_list.find_item(ext.current_assistant_id)
-        if isinstance(found, AssistantTextItem):
-            item = found
-    if item is None:
-        response = event.response.message if event.response else None
-        item = AssistantTextItem(
-            id=(response.id if response and response.id else _now_item_id("assistant")),
-            kind="assistant.text",
-            text="",
-            model=(response.model if response else ""),
-            timestamp=(response.timestamp if response else time.time()),
-        )
-        ext.current_assistant_id = item.id
-        self.message_list.append_item(item)
-    return item
-
-
 async def handle_agent_event(self: Conversation, event: StreamEvent) -> None:
     ext = _cext(self)
     logger.debug("Conversation received event: %s", event.type)
     if event.type == "response_start":
         logger.info("Assistant response started")
-        response = event.response.message if event.response else None
-        item = AssistantTextItem(
-            id=(response.id if response and response.id else _now_item_id("assistant")),
-            kind="assistant.text",
-            text="",
-            model=(response.model if response else ""),
-            timestamp=(response.timestamp if response else time.time()),
-        )
-        ext.current_assistant_id = item.id
-        self.message_list.append_item(item)
+        self.message_list.begin_turn()
         self.status = "thinking"
     elif event.type == "text_delta" and event.text:
-        item = _ensure_current_assistant(self, event)
-        item.text += event.text
-        self.message_list.invalidate_item(item.id)
+        ml = self.message_list
+        if ml.parser is None:
+            ml.begin_turn()
+        assert ml.parser is not None
+        new_items = ml.parser.feed(event.text)
+        ml.sync_from_parser(new_items)
     elif event.type == "tool_exec_start" and isinstance(event.tool_call, ToolUseBlock):
         logger.info("Tool execution started: %s", event.tool_call.name)
         tool_call = event.tool_call
@@ -481,18 +441,12 @@ async def handle_agent_event(self: Conversation, event: StreamEvent) -> None:
             self.message_list.invalidate_item(tool_item.id)
         self.status = "thinking"
     elif event.type == "response_done" and event.response is not None:
-        assistant_item = _ensure_current_assistant(self, event)
+        if self.message_list.parser is not None:
+            new_items = self.message_list.parser.finalize()
+            self.message_list.sync_from_parser(new_items)
         response = event.response
-        response_text = _extract_text(response.message)
-        if response_text and not assistant_item.text:
-            assistant_item.text = response_text
-        assistant_item.model = response.message.model or assistant_item.model
-        assistant_item.duration += response.message.duration
-        assistant_item.input_tokens += response.message.input_tokens
-        assistant_item.output_tokens += response.message.output_tokens
         ext.turn_input_tokens += response.message.input_tokens
         ext.turn_output_tokens += response.message.output_tokens
-        self.message_list.invalidate_item(assistant_item.id)
         # 流式结束后，thinking blocks 作为独立 item 插入
         from mutagent.core.messages import ThinkingBlock
         appended_thinking_ids: set[str] = ext.appended_thinking_ids
@@ -527,14 +481,14 @@ async def handle_agent_event(self: Conversation, event: StreamEvent) -> None:
         self.is_busy = False
     elif event.type == "turn_done":
         logger.info("Conversation turn finished")
+        self.message_list.end_turn()
         if ext.cancel_requested:
-            assistant_item = self.message_list.find_item(ext.current_assistant_id)
-            if isinstance(assistant_item, AssistantTextItem):
-                if "[interrupted]" not in assistant_item.text:
-                    assistant_item.text = (
-                        assistant_item.text.rstrip() + "\n\n[interrupted]"
-                    ).strip()
-                    self.message_list.invalidate_item(assistant_item.id)
+            # 取消时追加中断标记到最后一个 MarkdownItem
+            for item in reversed(self.message_list.items):
+                if isinstance(item, MarkdownItem) and "[interrupted]" not in item.text:
+                    item.text = (item.text.rstrip() + "\n\n[interrupted]").strip()
+                    self.message_list.invalidate_item(item.id)
+                    break
         duration = max(0.0, time.time() - ext.turn_started_at) if ext.turn_started_at else 0.0
         self.message_list.append_item(
             TurnSeparatorItem(
