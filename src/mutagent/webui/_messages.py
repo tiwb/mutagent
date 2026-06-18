@@ -93,6 +93,7 @@ class CodeBlockItem(ChatItem):
     """Fenced code block 内容块。"""
     code: str
     language: str = ""
+    fence_count: int = 3
 
 
 class ChatItemView(View, Generic[_T]):
@@ -626,5 +627,6 @@ def code_block_view_render(self: CodeBlockView) -> ViewBlock:
             "$id": self.item.id,
             "code": self.item.code,
             "language": self.item.language,
+            "fenceCount": self.item.fence_count,
         }
     ])

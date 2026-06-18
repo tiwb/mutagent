@@ -1,9 +1,29 @@
-/* CodeBlock — 纯文本风格 fenced code block
+/* CodeBlock — 语法高亮 fenced code block
  *
- * 无边框无背景。上下 ``` 和语言名是独立元素。
+ * 上下 ``` 和语言名是独立元素。代码通过 highlight.js 高亮，
+ * token class 映射到 --mutagent-hl-* CSS 变量。
+ *
  * ``mutagent-code-block__fence-mark`` — ``` 符号
  * ``mutagent-code-block__fence-lang`` — 语言名
- * ``mutagent-code-block__code``   — 代码正文
+ * ``mutagent-code-block__code``       — 代码正文容器
+ *
+ * 高亮颜色变量（暗色默认值，可通过覆盖变量实现主题切换）：
+ * ``--mutagent-hl-text``        — 基础文字
+ * ``--mutagent-hl-keyword``     — 关键词
+ * ``--mutagent-hl-string``      — 字符串
+ * ``--mutagent-hl-number``      — 数字
+ * ``--mutagent-hl-comment``     — 注释
+ * ``--mutagent-hl-function``    — 函数/方法
+ * ``--mutagent-hl-type``        — 类型/类名
+ * ``--mutagent-hl-builtin``     — 内置常量
+ * ``--mutagent-hl-literal``     — 字面量
+ * ``--mutagent-hl-variable``    — 变量/参数
+ * ``--mutagent-hl-regex``       — 正则表达式
+ * ``--mutagent-hl-punctuation`` — 标点
+ * ``--mutagent-hl-operator``    — 运算符
+ * ``--mutagent-hl-title``       — 类/函数定义
+ * ``--mutagent-hl-attr``        — 属性访问
+ * ``--mutagent-hl-meta``        — shebang/pragma
  */
 
 .mutagent-code-block {
@@ -31,5 +51,50 @@
   padding: 2px 0;
   overflow-x: auto;
   white-space: pre-wrap;
-  color: var(--mutagent-code-color, var(--mutgui-text));
 }
+
+/* ── 高亮基础 ── */
+.mutagent-code-block__code code {
+  color: var(--mutagent-hl-text, oklch(0.84 0 0));
+  background: transparent;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+/* ── highlight.js token → CSS variable 映射 ── */
+.mutagent-code-block__code .hljs-keyword    { color: var(--mutagent-hl-keyword,    oklch(0.70 0.13 245)); }
+.mutagent-code-block__code .hljs-string     { color: var(--mutagent-hl-string,     oklch(0.70 0.08 45));  }
+.mutagent-code-block__code .hljs-number     { color: var(--mutagent-hl-number,     oklch(0.78 0.07 140)); }
+.mutagent-code-block__code .hljs-comment    { color: var(--mutagent-hl-comment,    oklch(0.58 0.04 140)); font-style: italic; }
+.mutagent-code-block__code .hljs-function   { color: var(--mutagent-hl-function,   oklch(0.83 0.07 100)); }
+.mutagent-code-block__code .hljs-type       { color: var(--mutagent-hl-type,       oklch(0.72 0.08 180)); }
+.mutagent-code-block__code .hljs-built_in   { color: var(--mutagent-hl-builtin,    oklch(0.70 0.13 245)); }
+.mutagent-code-block__code .hljs-literal    { color: var(--mutagent-hl-literal,    oklch(0.70 0.13 245)); }
+.mutagent-code-block__code .hljs-variable   { color: var(--mutagent-hl-variable,   oklch(0.76 0.08 235)); }
+.mutagent-code-block__code .hljs-regexp     { color: var(--mutagent-hl-regex,      oklch(0.62 0.11 25));  }
+.mutagent-code-block__code .hljs-punctuation { color: var(--mutagent-hl-punctuation, oklch(0.82 0 0));    }
+.mutagent-code-block__code .hljs-operator   { color: var(--mutagent-hl-operator,   oklch(0.82 0 0));     }
+.mutagent-code-block__code .hljs-title      { color: var(--mutagent-hl-title,      oklch(0.72 0.08 180)); }
+.mutagent-code-block__code .hljs-attr       { color: var(--mutagent-hl-attr,       oklch(0.76 0.08 235)); }
+.mutagent-code-block__code .hljs-meta       { color: var(--mutagent-hl-meta,       oklch(0.58 0.04 140)); }
+.mutagent-code-block__code .hljs-params     { color: var(--mutagent-hl-variable,   oklch(0.76 0.08 235)); }
+.mutagent-code-block__code .hljs-property   { color: var(--mutagent-hl-variable,   oklch(0.76 0.08 235)); }
+
+/* ── 补充 token（不加额外颜色，继承基础文字色） ── */
+.mutagent-code-block__code .hljs-name           { /* 继承基础色 */ }
+.mutagent-code-block__code .hljs-tag            { /* 继承基础色 */ }
+
+/* CSS 专用 */
+.mutagent-code-block__code .hljs-selector-class { color: var(--mutagent-hl-variable, oklch(0.76 0.08 235)); }
+.mutagent-code-block__code .hljs-selector-id    { color: var(--mutagent-hl-variable, oklch(0.76 0.08 235)); }
+.mutagent-code-block__code .hljs-selector-tag   { color: var(--mutagent-hl-keyword,  oklch(0.70 0.13 245)); }
+
+/* Markdown 专用 */
+.mutagent-code-block__code .hljs-section        { color: var(--mutagent-hl-keyword,  oklch(0.70 0.13 245)); }
+.mutagent-code-block__code .hljs-code           { color: var(--mutagent-hl-string,   oklch(0.70 0.08 45));  }
+.mutagent-code-block__code .hljs-quote          { color: var(--mutagent-hl-comment,  oklch(0.58 0.04 140)); }
+.mutagent-code-block__code .hljs-bullet         { color: var(--mutagent-hl-keyword,  oklch(0.70 0.13 245)); }
+
+/* 链接 / 强调 */
+.mutagent-code-block__code .hljs-link           { color: var(--mutagent-hl-variable, oklch(0.76 0.08 235)); text-decoration: underline; }
+.mutagent-code-block__code .hljs-emphasis       { color: var(--mutagent-hl-text,     oklch(0.84 0 0));    font-style: italic; }

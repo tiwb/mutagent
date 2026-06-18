@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from ._messages import CodeBlockItem, MarkdownItem, SectionHeadingItem, ChatItem
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
-_FENCE_RE = re.compile(r"^```(.*)$")
+_FENCE_RE = re.compile(r"^(`{3,})(.*)$")
 
 
 @dataclass
@@ -51,6 +51,7 @@ class IncrementalMarkdownParser:
         self._text_buffer: list[str] = []
         self._line_buffer: str = ""  # 尚未完成的行
         self._in_fence: bool = False
+        self._fence_count: int = 0
         self._fence_lang: str = ""
         self._fence_buffer: list[str] = []
         self._section_counter: int = 0
@@ -82,9 +83,10 @@ class IncrementalMarkdownParser:
         self._flush_text()
         if self._in_fence:
             # 未闭合 fence — 降级为普通文本
-            self._text_buffer.append("```" + self._fence_lang)
+            self._text_buffer.append("`" * self._fence_count + self._fence_lang)
             self._text_buffer.extend(self._fence_buffer)
             self._in_fence = False
+            self._fence_count = 0
             self._fence_lang = ""
             self._fence_buffer = []
             self._flush_text()
@@ -156,25 +158,39 @@ class IncrementalMarkdownParser:
         if fm:
             self._flush_text()
             self._in_fence = True
-            self._fence_lang = fm.group(1).strip()
+            self._fence_count = len(fm.group(1))
+            self._fence_lang = fm.group(2).strip()
             self._fence_buffer = []
             return
         self._text_buffer.append(line)
 
     def _process_fence_line(self, line: str) -> None:
-        """处理 fence 内的行。"""
-        if _FENCE_RE.match(line):
-            # fence 关闭
-            self._chunk_counter += 1
-            cid = f"{self._prefix}code-{self._chunk_counter}"
-            code = "\n".join(self._fence_buffer)
-            chunk = CodeBlockItem(
-                id=cid, kind="code_block", code=code, language=self._fence_lang
-            )
-            self._append_chunk(chunk)
-            self._in_fence = False
-            self._fence_lang = ""
-            self._fence_buffer = []
+        """处理 fence 内的行。
+
+        关闭条件（遵循 CommonMark 规范）：
+        - 反引号数量 ≥ 开启 fence 的数量
+        - 反引号后无信息字符串（仅允许空白）
+        """
+        fm = _FENCE_RE.match(line)
+        if fm:
+            closing_count = len(fm.group(1))
+            closing_info = fm.group(2).strip()
+            if closing_count >= self._fence_count and not closing_info:
+                # fence 关闭
+                self._chunk_counter += 1
+                cid = f"{self._prefix}code-{self._chunk_counter}"
+                code = "\n".join(self._fence_buffer)
+                chunk = CodeBlockItem(
+                    id=cid, kind="code_block", code=code,
+                    language=self._fence_lang, fence_count=self._fence_count,
+                )
+                self._append_chunk(chunk)
+                self._in_fence = False
+                self._fence_count = 0
+                self._fence_lang = ""
+                self._fence_buffer = []
+            else:
+                self._fence_buffer.append(line)
         else:
             self._fence_buffer.append(line)
 
