@@ -17,7 +17,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
-from mutio.codec.json import JsonObject, JsonValue, get_field
+from mutio.codec.json import JsonObject, JsonValue, get_field, narrow_value
 
 from mutagent.sandbox._namespace_impl import Namespace
 
@@ -46,15 +46,16 @@ class PysandboxPeerClient:
         """返回 ``[{name, description, function_count}, ...]``。"""
         result = await self._http.mcp.request(
             "pysandbox/namespaces.list", {})
-        namespaces = result.get("namespaces", [])
-        if isinstance(namespaces, list):
-            return namespaces  # type: ignore[return-value]
-        return []
+        obj = narrow_value(result, JsonObject, fallback=None)
+        if obj is None:
+            return []
+        return get_field(obj, "namespaces", list[JsonObject], default=list[JsonObject]())
 
     async def describe_namespace(self, name: str) -> JsonObject:
         """返回 ``{name, description, functions: {fn: {signature, doc, kwargs_schema}}}``。"""
-        return await self._http.mcp.request(
+        result = await self._http.mcp.request(
             "pysandbox/namespaces.describe", {"namespace": name})
+        return narrow_value(result, JsonObject)
 
     async def call_namespace(
         self, namespace: str, name: str, arguments: dict[str, Any],
